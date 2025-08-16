@@ -1,8 +1,174 @@
 ﻿<!doctype html>
-<html>
-  <head><meta charset="utf-8"><title>Keilani Brain</title></head>
-  <body>
-    <h1>Keilani Brain API is live</h1>
-    <p>Use <code>/api/ingest</code> and <code>/api/chat</code> (POST) via your app or curl.</p>
-  </body>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Keilani Brain — Chat</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; }
+    body { margin: 0; background: #0b0f14; color: #e6edf3; }
+    header { padding: 16px 20px; border-bottom: 1px solid #1f2937; }
+    header h1 { margin: 0; font-size: 18px; }
+    main { max-width: 900px; margin: 24px auto; padding: 0 16px 40px; }
+    .card { background: #0f1720; border: 1px solid #1f2937; border-radius: 10px; padding: 16px; }
+    .row { display: flex; gap: 10px; }
+    textarea, input[type="text"] { width: 100%; background: #0b1220; color: #e6edf3; border: 1px solid #263445; border-radius: 8px; padding: 10px; }
+    textarea { min-height: 100px; resize: vertical; }
+    button { background: #2563eb; color: white; border: 0; border-radius: 8px; padding: 10px 14px; cursor: pointer; }
+    button:disabled { opacity: 0.6; cursor: not-allowed; }
+    .meta { font-size: 12px; color: #93a2b9; margin-top: 6px; }
+    .reply { white-space: pre-wrap; background: #0b1220; border: 1px solid #263445; border-radius: 8px; padding: 12px; }
+    .matches { margin-top: 12px; font-size: 13px; }
+    table { width: 100%; border-collapse: collapse; }
+    th, td { text-align: left; border-bottom: 1px solid #1f2937; padding: 8px 6px; }
+    .pill { display:inline-block; font-size:12px; padding:2px 8px; border:1px solid #334155; border-radius:999px; color:#93a2b9; }
+    .row-opts { display:flex; gap:10px; align-items:center; margin: 8px 0 0; }
+    .notice { color:#93a2b9; font-size:12px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>🧠 Keilani Brain — Chat</h1>
+  </header>
+
+  <main>
+    <div class="card">
+      <label for="message">Message to Keilani</label>
+      <textarea id="message" placeholder="Say hi to Keilani… e.g. “Using the Sales & Monetization playbook, create 3 offers at $10, $50, and $200 with clear CTAs.”"></textarea>
+
+      <div class="row-opts">
+        <label class="notice">
+          Retrieval threshold:
+          <input id="threshold" type="number" min="0" max="1" step="0.05" value="0.6" style="width:80px" />
+        </label>
+        <label class="notice">
+          Match count:
+          <input id="count" type="number" min="1" max="20" step="1" value="8" style="width:80px" />
+        </label>
+        <label class="notice">
+          <input id="skipContext" type="checkbox" />
+          Skip RAG (OpenAI only)
+        </label>
+        <span class="pill" id="status">idle</span>
+      </div>
+
+      <div class="row" style="margin-top:10px;">
+        <input id="userId" type="text" value="00000000-0000-0000-0000-000000000001" />
+        <button id="send">Send</button>
+      </div>
+
+      <div class="meta">Tip: lower threshold (e.g. 0.5) = more context; raise (e.g. 0.7) = stricter matches.</div>
+
+      <h3 style="margin:16px 0 6px;">Reply</h3>
+      <div id="reply" class="reply">–</div>
+
+      <div class="matches">
+        <h3>Matches</h3>
+        <div id="matchesEmpty" class="notice">No matches yet.</div>
+        <table id="matchesTable" style="display:none;">
+          <thead><tr><th>Title</th><th>Source</th><th>Similarity</th></tr></thead>
+          <tbody id="matchesBody"></tbody>
+        </table>
+      </div>
+    </div>
+  </main>
+
+  <script>
+    const sendBtn = document.getElementById('send');
+    const msgEl = document.getElementById('message');
+    const userEl = document.getElementById('userId');
+    const statusEl = document.getElementById('status');
+    const replyEl = document.getElementById('reply');
+    const matchesEmpty = document.getElementById('matchesEmpty');
+    const matchesTable = document.getElementById('matchesTable');
+    const matchesBody = document.getElementById('matchesBody');
+    const thresholdEl = document.getElementById('threshold');
+    const countEl = document.getElementById('count');
+    const skipContextEl = document.getElementById('skipContext');
+
+    function setStatus(s){ statusEl.textContent = s; }
+
+    async function sendToKeilani(message) {
+      const threshold = Number(thresholdEl.value || 0.6);
+      const count = Number(countEl.value || 8);
+      const skip = skipContextEl.checked;
+
+      const qs = new URLSearchParams();
+      if (skip) qs.set('nocontext','1');
+      else {
+        qs.set('threshold', String(threshold));
+        qs.set('count', String(count));
+      }
+
+      const url = `/api/chat?${qs.toString()}`;
+      const body = {
+        userId: userEl.value || "00000000-0000-0000-0000-000000000001",
+        message
+      };
+
+      setStatus('thinking…');
+      sendBtn.disabled = true;
+
+      try {
+        const resp = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(body)
+        });
+        const data = await resp.json();
+
+        if (!resp.ok) {
+          replyEl.textContent = `⚠️ ${data.error || 'Chat error'}`;
+          matchesEmpty.style.display = 'block';
+          matchesTable.style.display = 'none';
+          return;
+        }
+
+        // Show reply
+        replyEl.textContent = data.reply || '—';
+
+        // Speak it (optional): plug in your TTS here
+        // speakAsKeilani(data.reply)
+
+        // Show matches
+        const matches = Array.isArray(data.matches) ? data.matches : [];
+        if (matches.length === 0) {
+          matchesEmpty.style.display = 'block';
+          matchesTable.style.display = 'none';
+        } else {
+          matchesEmpty.style.display = 'none';
+          matchesTable.style.display = '';
+          matchesBody.innerHTML = matches.map(m =>
+            `<tr><td>${escapeHtml(m.title || '')}</td><td>${escapeHtml(m.source || '')}</td><td>${Number(m.similarity || 0).toFixed(3)}</td></tr>`
+          ).join('');
+        }
+      } catch (e) {
+        replyEl.textContent = `⚠️ Network error: ${e.message}`;
+        matchesEmpty.style.display = 'block';
+        matchesTable.style.display = 'none';
+      } finally {
+        setStatus('idle');
+        sendBtn.disabled = false;
+      }
+    }
+
+    function escapeHtml(s){
+      return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+    }
+
+    sendBtn.addEventListener('click', () => {
+      const msg = msgEl.value.trim();
+      if (!msg) return;
+      sendToKeilani(msg);
+      msgEl.value = "";
+      msgEl.focus();
+    });
+
+    msgEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
+        sendBtn.click();
+      }
+    });
+  </script>
+</body>
 </html>
