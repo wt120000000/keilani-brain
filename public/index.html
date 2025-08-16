@@ -7,28 +7,42 @@
   <style>
     :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; }
     body { margin: 0; background: #0b0f14; color: #e6edf3; }
-    header { padding: 16px 20px; border-bottom: 1px solid #1f2937; }
+    header { padding: 16px 20px; border-bottom: 1px solid #1f2937; display:flex; align-items:center; justify-content:space-between; gap:12px; flex-wrap:wrap; }
     header h1 { margin: 0; font-size: 18px; }
-    main { max-width: 900px; margin: 24px auto; padding: 0 16px 40px; }
+    .health { display:flex; align-items:center; gap:8px; }
+    .badge { display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border-radius:999px; font-size:12px; border:1px solid #334155; color:#93a2b9; }
+    .dot { width:8px; height:8px; border-radius:999px; background:#64748b; }
+    .dot.ok { background:#10b981; } /* green */
+    .dot.warn { background:#f59e0b; } /* amber */
+    .dot.err { background:#ef4444; } /* red */
+    button, select, input[type="number"] { background:#0b1220; color:#e6edf3; border:1px solid #263445; border-radius:8px; padding:8px 10px; }
+    button { background:#2563eb; border:0; cursor:pointer; }
+    button.secondary { background:#0b1220; border:1px solid #263445; }
+    button:disabled { opacity:.6; cursor:not-allowed; }
+    main { max-width: 1000px; margin: 24px auto; padding: 0 16px 40px; }
     .card { background: #0f1720; border: 1px solid #1f2937; border-radius: 10px; padding: 16px; }
-    .row { display: flex; gap: 10px; }
+    .row { display: flex; gap: 10px; flex-wrap:wrap; }
     textarea, input[type="text"] { width: 100%; background: #0b1220; color: #e6edf3; border: 1px solid #263445; border-radius: 8px; padding: 10px; }
     textarea { min-height: 100px; resize: vertical; }
-    button { background: #2563eb; color: white; border: 0; border-radius: 8px; padding: 10px 14px; cursor: pointer; }
-    button:disabled { opacity: 0.6; cursor: not-allowed; }
     .meta { font-size: 12px; color: #93a2b9; margin-top: 6px; }
     .reply { white-space: pre-wrap; background: #0b1220; border: 1px solid #263445; border-radius: 8px; padding: 12px; }
     .matches { margin-top: 12px; font-size: 13px; }
     table { width: 100%; border-collapse: collapse; }
     th, td { text-align: left; border-bottom: 1px solid #1f2937; padding: 8px 6px; }
     .pill { display:inline-block; font-size:12px; padding:2px 8px; border:1px solid #334155; border-radius:999px; color:#93a2b9; }
-    .row-opts { display:flex; gap:10px; align-items:center; margin: 8px 0 0; }
+    .row-opts { display:flex; gap:10px; align-items:center; margin: 8px 0 0; flex-wrap:wrap; }
     .notice { color:#93a2b9; font-size:12px; }
+    .tts { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    .spacer { flex:1; }
   </style>
 </head>
 <body>
   <header>
     <h1>🧠 Keilani Brain — Chat</h1>
+    <div class="health">
+      <span id="healthBadge" class="badge"><span class="dot" id="healthDot"></span><span id="healthText">checking…</span></span>
+      <button id="healthRefresh" class="secondary" title="Refresh health">Refresh</button>
+    </div>
   </header>
 
   <main>
@@ -50,6 +64,19 @@
           Skip RAG (OpenAI only)
         </label>
         <span class="pill" id="status">idle</span>
+        <span class="spacer"></span>
+        <div class="tts">
+          <label class="notice">Voice:
+            <select id="voice"></select>
+          </label>
+          <label class="notice">Rate:
+            <input id="rate" type="number" step="0.1" min="0.5" max="2" value="1.0" style="width:70px" />
+          </label>
+          <label class="notice">Pitch:
+            <input id="pitch" type="number" step="0.1" min="0" max="2" value="1.0" style="width:70px" />
+          </label>
+          <button id="toggleTTS" class="secondary">🔊 TTS: On</button>
+        </div>
       </div>
 
       <div class="row" style="margin-top:10px;">
@@ -74,6 +101,7 @@
   </main>
 
   <script>
+    // ---------- Elements ----------
     const sendBtn = document.getElementById('send');
     const msgEl = document.getElementById('message');
     const userEl = document.getElementById('userId');
@@ -86,35 +114,103 @@
     const countEl = document.getElementById('count');
     const skipContextEl = document.getElementById('skipContext');
 
+    const healthBadge = document.getElementById('healthBadge');
+    const healthDot = document.getElementById('healthDot');
+    const healthText = document.getElementById('healthText');
+    const healthRefresh = document.getElementById('healthRefresh');
+
+    // TTS controls
+    const voiceSel = document.getElementById('voice');
+    const rateEl = document.getElementById('rate');
+    const pitchEl = document.getElementById('pitch');
+    const toggleTTSBtn = document.getElementById('toggleTTS');
+
+    // ---------- State ----------
+    let ttsEnabled = true;
+    let voices = [];
+    let selectedVoice = null;
+
     function setStatus(s){ statusEl.textContent = s; }
 
+    // ---------- HEALTH ----------
+    async function refreshHealth() {
+      try {
+        healthText.textContent = 'checking…';
+        healthDot.className = 'dot';
+        const resp = await fetch('/api/health', { cache: 'no-store' });
+        const ok = await resp.json();
+        const allTrue = ok.has_OPENAI_API_KEY && ok.has_OPENAI_MODEL && ok.has_EMBED_MODEL && ok.has_SUPABASE_URL && ok.has_SUPABASE_SERVICE_ROLE;
+        healthDot.className = 'dot ' + (allTrue ? 'ok' : 'warn');
+        healthText.textContent = allTrue ? 'OK' : 'Degraded';
+        healthBadge.title = JSON.stringify(ok, null, 2);
+      } catch (e) {
+        healthDot.className = 'dot err';
+        healthText.textContent = 'Error';
+        healthBadge.title = e.message;
+      }
+    }
+    healthRefresh.addEventListener('click', refreshHealth);
+    // initial + interval
+    refreshHealth();
+    setInterval(refreshHealth, 30000); // every 30s
+
+    // ---------- TTS ----------
+    function populateVoices() {
+      voices = window.speechSynthesis.getVoices().filter(v => v.lang.startsWith('en'));
+      voiceSel.innerHTML = voices.map((v, i) =>
+        `<option value="${i}">${v.name} (${v.lang})${v.default ? ' — default' : ''}</option>`
+      ).join('') || `<option value="">(No voices found)</option>`;
+      selectedVoice = voices[0] || null;
+    }
+    if ('speechSynthesis' in window) {
+      populateVoices();
+      window.speechSynthesis.onvoiceschanged = populateVoices;
+    }
+
+    function speakAsKeilani(text) {
+      if (!ttsEnabled) return;
+      if (!('speechSynthesis' in window)) return;
+
+      // Interrupt any current speech
+      window.speechSynthesis.cancel();
+
+      const utter = new SpeechSynthesisUtterance(text);
+      if (selectedVoice) utter.voice = selectedVoice;
+      const rate = Math.min(2, Math.max(0.5, Number(rateEl.value) || 1.0));
+      const pitch = Math.min(2, Math.max(0, Number(pitchEl.value) || 1.0));
+      utter.rate = rate;
+      utter.pitch = pitch;
+
+      window.speechSynthesis.speak(utter);
+    }
+
+    voiceSel.addEventListener('change', (e) => {
+      const idx = Number(e.target.value);
+      selectedVoice = voices[idx] || null;
+    });
+    toggleTTSBtn.addEventListener('click', () => {
+      ttsEnabled = !ttsEnabled;
+      toggleTTSBtn.textContent = ttsEnabled ? '🔊 TTS: On' : '🔇 TTS: Off';
+      toggleTTSBtn.classList.toggle('secondary', true);
+    });
+
+    // ---------- Chat ----------
     async function sendToKeilani(message) {
       const threshold = Number(thresholdEl.value || 0.6);
       const count = Number(countEl.value || 8);
       const skip = skipContextEl.checked;
 
       const qs = new URLSearchParams();
-      if (skip) qs.set('nocontext','1');
-      else {
-        qs.set('threshold', String(threshold));
-        qs.set('count', String(count));
-      }
+      if (skip) qs.set('nocontext','1'); else { qs.set('threshold', String(threshold)); qs.set('count', String(count)); }
 
       const url = `/api/chat?${qs.toString()}`;
-      const body = {
-        userId: userEl.value || "00000000-0000-0000-0000-000000000001",
-        message
-      };
+      const body = { userId: userEl.value || "00000000-0000-0000-0000-000000000001", message };
 
       setStatus('thinking…');
       sendBtn.disabled = true;
 
       try {
-        const resp = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body)
-        });
+        const resp = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
         const data = await resp.json();
 
         if (!resp.ok) {
@@ -124,13 +220,12 @@
           return;
         }
 
-        // Show reply
+        // show reply
         replyEl.textContent = data.reply || '—';
+        // TTS
+        speakAsKeilani(data.reply || '');
 
-        // Speak it (optional): plug in your TTS here
-        // speakAsKeilani(data.reply)
-
-        // Show matches
+        // matches table
         const matches = Array.isArray(data.matches) ? data.matches : [];
         if (matches.length === 0) {
           matchesEmpty.style.display = 'block';
