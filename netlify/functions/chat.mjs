@@ -8,6 +8,8 @@ const EMBED_MODEL = process.env.EMBED_MODEL || "text-embedding-3-small";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE);
 
+const jsonHeaders = { "Content-Type": "application/json" };
+
 const KEILANI_SYSTEM = `
 You are Keilani Clover — Filipina-Irish gamer-girl vibe, witty, warm, flirty-but-classy,
 and a sharp CEO/strategist. Encourage and guide with concrete, step-by-step advice.
@@ -36,14 +38,15 @@ async function chatComplete(messages) {
   return j.choices?.[0]?.message?.content?.trim() || "Got it.";
 }
 
-export default async function handler(event) {
+export default async function handler(request) {
   try {
-    if (event.httpMethod !== "POST") {
-      return { statusCode: 405, body: JSON.stringify({ error: "POST only" }) };
+    if (request.method !== "POST") {
+      return new Response(JSON.stringify({ error: "POST only" }), { status: 405, headers: jsonHeaders });
     }
-    const { userId = "00000000-0000-0000-0000-000000000001", message } = JSON.parse(event.body || "{}");
+
+    const { userId = "00000000-0000-0000-0000-000000000001", message } = await request.json();
     if (!message || !message.trim()) {
-      return { statusCode: 400, body: JSON.stringify({ error: "message required" }) };
+      return new Response(JSON.stringify({ error: "message required" }), { status: 400, headers: jsonHeaders });
     }
 
     // 1) Retrieve KB matches
@@ -79,20 +82,16 @@ export default async function handler(event) {
 
     // 4) Auto-summarize a memory
     const mem = await chatComplete([
-      { role: "system", content: "Summarize 1-2 durable facts about the user or ongoing plans from this exchange. If none, respond 'none'." },
+      { role: "system", content: "Summarize 1–2 durable facts about the user or ongoing plans from this exchange. If none, respond 'none'." },
       { role: "user", content: `User said: ${message}\nAssistant replied: ${reply}` }
     ]);
     if (mem.toLowerCase() !== "none") {
       await supabase.from("memories").insert([{ user_id: userId, summary: mem, tags: ["chat"], importance: 1 }]);
     }
 
-    return {
-      statusCode: 200,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ reply, matches: matches || [] })
-    };
+    return new Response(JSON.stringify({ reply, matches: matches || [] }), { status: 200, headers: jsonHeaders });
   } catch (err) {
     console.error(err);
-    return { statusCode: 500, body: JSON.stringify({ error: String(err.message || err) }) };
+    return new Response(JSON.stringify({ error: String(err.message || err) }), { status: 500, headers: jsonHeaders });
   }
 }

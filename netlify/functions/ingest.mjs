@@ -7,6 +7,8 @@ const EMBED_MODEL = process.env.EMBED_MODEL || "text-embedding-3-small";
 
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE);
 
+const jsonHeaders = { "Content-Type": "application/json" };
+
 async function embed(text) {
   const r = await fetch("https://api.openai.com/v1/embeddings", {
     method: "POST",
@@ -27,14 +29,15 @@ function chunkText(t, size = 3500) {
   return chunks;
 }
 
-export default async function handler(event) {
+export default async function handler(request) {
   try {
-    if (event.httpMethod !== "POST") {
-      return { statusCode: 405, body: JSON.stringify({ error: "POST only" }) };
+    if (request.method !== "POST") {
+      return new Response(JSON.stringify({ error: "POST only" }), { status: 405, headers: jsonHeaders });
     }
-    const { title = "untitled", source = "manual", text } = JSON.parse(event.body || "{}");
+
+    const { title = "untitled", source = "manual", text } = await request.json();
     if (!text || !text.trim()) {
-      return { statusCode: 400, body: JSON.stringify({ error: "No text" }) };
+      return new Response(JSON.stringify({ error: "No text" }), { status: 400, headers: jsonHeaders });
     }
 
     const chunks = chunkText(text);
@@ -47,13 +50,9 @@ export default async function handler(event) {
     const { data, error } = await supabase.from("kb_chunks").insert(rows).select("id");
     if (error) throw error;
 
-    return {
-      statusCode: 200,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ ok: true, inserted: data.length })
-    };
+    return new Response(JSON.stringify({ ok: true, inserted: data.length }), { status: 200, headers: jsonHeaders });
   } catch (err) {
     console.error(err);
-    return { statusCode: 500, body: JSON.stringify({ error: String(err.message || err) }) };
+    return new Response(JSON.stringify({ error: String(err.message || err) }), { status: 500, headers: jsonHeaders });
   }
 }
