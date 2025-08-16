@@ -1,0 +1,15 @@
+[build]
+  command = "npm run build"
+  functions = "netlify/functions"
+  publish = "public"  # or your front-end build dir if you have one
+
+# Optional: make pretty URLs like /api/chat
+[[redirects]]
+  from = "/api/chat"
+  to = "/.netlify/functions/chat"
+  status = 200
+
+[[redirects]]
+  from = "/api/ingest"
+  to = "/.netlify/functions/ingest"
+  status = 200
