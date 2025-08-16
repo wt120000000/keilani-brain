@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="utf-8" />
-  <title>Keilani Brain — Chat</title>
+  <title>Keilani Brain — Live</title>
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <style>
     :root { font-family: system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji"; }
@@ -12,33 +12,36 @@
     .health { display:flex; align-items:center; gap:8px; }
     .badge { display:inline-flex; align-items:center; gap:6px; padding:4px 8px; border-radius:999px; font-size:12px; border:1px solid #334155; color:#93a2b9; }
     .dot { width:8px; height:8px; border-radius:999px; background:#64748b; }
-    .dot.ok { background:#10b981; } /* green */
-    .dot.warn { background:#f59e0b; } /* amber */
-    .dot.err { background:#ef4444; } /* red */
+    .dot.ok { background:#10b981; }
+    .dot.warn { background:#f59e0b; }
+    .dot.err { background:#ef4444; }
     button, select, input[type="number"] { background:#0b1220; color:#e6edf3; border:1px solid #263445; border-radius:8px; padding:8px 10px; }
     button { background:#2563eb; border:0; cursor:pointer; }
     button.secondary { background:#0b1220; border:1px solid #263445; }
     button:disabled { opacity:.6; cursor:not-allowed; }
-    main { max-width: 1000px; margin: 24px auto; padding: 0 16px 40px; }
-    .card { background: #0f1720; border: 1px solid #1f2937; border-radius: 10px; padding: 16px; }
-    .row { display: flex; gap: 10px; flex-wrap:wrap; }
-    textarea, input[type="text"] { width: 100%; background: #0b1220; color: #e6edf3; border: 1px solid #263445; border-radius: 8px; padding: 10px; }
-    textarea { min-height: 100px; resize: vertical; }
-    .meta { font-size: 12px; color: #93a2b9; margin-top: 6px; }
-    .reply { white-space: pre-wrap; background: #0b1220; border: 1px solid #263445; border-radius: 8px; padding: 12px; }
-    .matches { margin-top: 12px; font-size: 13px; }
-    table { width: 100%; border-collapse: collapse; }
-    th, td { text-align: left; border-bottom: 1px solid #1f2937; padding: 8px 6px; }
+    main { max-width: 1040px; margin: 24px auto; padding: 0 16px 40px; }
+    .grid { display:grid; grid-template-columns: 1fr; gap:18px; }
+    @media (min-width: 980px){ .grid { grid-template-columns: 1.2fr .8fr; } }
+    .card { background:#0f1720; border:1px solid #1f2937; border-radius:10px; padding:16px; }
+    .row { display:flex; gap:10px; flex-wrap:wrap; }
+    textarea, input[type="text"] { width:100%; background:#0b1220; color:#e6edf3; border:1px solid #263445; border-radius:8px; padding:10px; }
+    textarea { min-height:100px; resize:vertical; }
+    .meta { font-size:12px; color:#93a2b9; margin-top:6px; }
+    .reply { white-space: pre-wrap; background:#0b1220; border:1px solid #263445; border-radius:8px; padding:12px; }
+    .matches { margin-top:12px; font-size:13px; }
+    table { width:100%; border-collapse:collapse; }
+    th, td { text-align:left; border-bottom:1px solid #1f2937; padding:8px 6px; }
     .pill { display:inline-block; font-size:12px; padding:2px 8px; border:1px solid #334155; border-radius:999px; color:#93a2b9; }
-    .row-opts { display:flex; gap:10px; align-items:center; margin: 8px 0 0; flex-wrap:wrap; }
+    .row-opts { display:flex; gap:10px; align-items:center; margin:8px 0 0; flex-wrap:wrap; }
     .notice { color:#93a2b9; font-size:12px; }
-    .tts { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
     .spacer { flex:1; }
+    .tts { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
+    .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size:12px; background:#0b1220; border:1px solid #263445; border-radius:6px; padding:2px 6px; }
   </style>
 </head>
 <body>
   <header>
-    <h1>🧠 Keilani Brain — Chat</h1>
+    <h1>🧠 Keilani Brain — Live</h1>
     <div class="health">
       <span id="healthBadge" class="badge"><span class="dot" id="healthDot"></span><span id="healthText">checking…</span></span>
       <button id="healthRefresh" class="secondary" title="Refresh health">Refresh</button>
@@ -46,93 +49,90 @@
   </header>
 
   <main>
-    <div class="card">
-      <label for="message">Message to Keilani</label>
-      <textarea id="message" placeholder="Say hi to Keilani… e.g. “Using the Sales & Monetization playbook, create 3 offers at $10, $50, and $200 with clear CTAs.”"></textarea>
+    <div class="grid">
+      <!-- Left: Chat & Output -->
+      <section class="card">
+        <label for="message">Message to Keilani</label>
+        <textarea id="message" placeholder="Say hi to Keilani… e.g. “Using the Sales & Monetization playbook, create 3 offers at $10, $50, and $200 with clear CTAs.”"></textarea>
 
-      <div class="row-opts">
-        <label class="notice">
-          Retrieval threshold:
-          <input id="threshold" type="number" min="0" max="1" step="0.05" value="0.6" style="width:80px" />
-        </label>
-        <label class="notice">
-          Match count:
-          <input id="count" type="number" min="1" max="20" step="1" value="8" style="width:80px" />
-        </label>
-        <label class="notice">
-          <input id="skipContext" type="checkbox" />
-          Skip RAG (OpenAI only)
-        </label>
-        <span class="pill" id="status">idle</span>
-        <span class="spacer"></span>
-        <div class="tts">
-          <label class="notice">Voice:
-            <select id="voice"></select>
+        <div class="row-opts">
+          <label class="notice">
+            Retrieval threshold:
+            <input id="threshold" type="number" min="0" max="1" step="0.05" value="0.6" style="width:80px" />
           </label>
-          <label class="notice">Rate:
-            <input id="rate" type="number" step="0.1" min="0.5" max="2" value="1.0" style="width:70px" />
+          <label class="notice">
+            Match count:
+            <input id="count" type="number" min="1" max="20" step="1" value="8" style="width:80px" />
           </label>
-          <label class="notice">Pitch:
-            <input id="pitch" type="number" step="0.1" min="0" max="2" value="1.0" style="width:70px" />
+          <label class="notice">
+            <input id="skipContext" type="checkbox" />
+            Skip RAG (OpenAI only)
           </label>
-          <button id="toggleTTS" class="secondary">🔊 TTS: On</button>
+          <span class="pill" id="status">idle</span>
+          <span class="spacer"></span>
+          <div class="tts">
+            <button id="toggleTTS" class="secondary">🔊 Browser TTS: On</button>
+          </div>
         </div>
-      </div>
 
-      <div class="row" style="margin-top:10px;">
-        <input id="userId" type="text" value="00000000-0000-0000-0000-000000000001" />
-        <button id="send">Send</button>
-      </div>
+        <div class="row" style="margin-top:10px;">
+          <input id="userId" type="text" value="00000000-0000-0000-0000-000000000001" />
+          <button id="send">Send</button>
+        </div>
 
-      <div class="meta">Tip: lower threshold (e.g. 0.5) = more context; raise (e.g. 0.7) = stricter matches.</div>
+        <div class="meta">Tip: lower threshold (e.g. <span class="kbd">0.5</span>) = more context; raise (e.g. <span class="kbd">0.7</span>) = stricter matches.</div>
 
-      <h3 style="margin:16px 0 6px;">Reply</h3>
-      <div id="reply" class="reply">–</div>
+        <h3 style="margin:16px 0 6px;">Reply</h3>
+        <div id="reply" class="reply">–</div>
 
-      <div class="matches">
-        <h3>Matches</h3>
-        <div id="matchesEmpty" class="notice">No matches yet.</div>
-        <table id="matchesTable" style="display:none;">
-          <thead><tr><th>Title</th><th>Source</th><th>Similarity</th></tr></thead>
-          <tbody id="matchesBody"></tbody>
-        </table>
-      </div>
+        <div class="matches">
+          <h3>Matches</h3>
+          <div id="matchesEmpty" class="notice">No matches yet.</div>
+          <table id="matchesTable" style="display:none;">
+            <thead><tr><th>Title</th><th>Source</th><th>Similarity</th></tr></thead>
+            <tbody id="matchesBody"></tbody>
+          </table>
+        </div>
+      </section>
+
+      <!-- Right: D-ID Bridge -->
+      <section class="card">
+        <h3 style="margin-top:0;">D-ID Bridge</h3>
+        <p class="meta">
+          When D-ID emits a <b>final transcript</b>, we’ll send it to <span class="kbd">/api/chat</span> and speak the reply via your D-ID session.
+        </p>
+
+        <div class="row">
+          <label class="notice">Status: <span id="bridgeStatus" class="pill">not initialized</span></label>
+          <span class="spacer"></span>
+          <button id="initBridgeBtn">Init Bridge</button>
+        </div>
+
+        <div style="margin-top:10px;">
+          <div class="meta">Event mapping (adjust if your SDK uses different names or payloads):</div>
+          <ul class="meta">
+            <li>Transcript event: <span class="kbd" id="evTranscript">transcript</span></li>
+            <li>User starts talking: <span class="kbd" id="evUserStart">voice-start</span></li>
+            <li>Connected: <span class="kbd" id="evConnected">connected</span></li>
+          </ul>
+          <div class="meta">Final detection: <span class="kbd">evt.isFinal || evt.final || evt.type === "transcript-final"</span></div>
+          <div class="meta">Text path: <span class="kbd">evt.text || evt.transcript</span></div>
+        </div>
+
+        <div class="meta" style="margin-top:10px;">
+          Note: Set <span class="kbd">window.myDidSession</span> to your live D-ID session object after connect. Then click <b>Init Bridge</b>.
+        </div>
+      </section>
     </div>
   </main>
 
   <script>
-    // ---------- Elements ----------
-    const sendBtn = document.getElementById('send');
-    const msgEl = document.getElementById('message');
-    const userEl = document.getElementById('userId');
-    const statusEl = document.getElementById('status');
-    const replyEl = document.getElementById('reply');
-    const matchesEmpty = document.getElementById('matchesEmpty');
-    const matchesTable = document.getElementById('matchesTable');
-    const matchesBody = document.getElementById('matchesBody');
-    const thresholdEl = document.getElementById('threshold');
-    const countEl = document.getElementById('count');
-    const skipContextEl = document.getElementById('skipContext');
-
+    // =============== Health Badge ===============
     const healthBadge = document.getElementById('healthBadge');
     const healthDot = document.getElementById('healthDot');
     const healthText = document.getElementById('healthText');
     const healthRefresh = document.getElementById('healthRefresh');
 
-    // TTS controls
-    const voiceSel = document.getElementById('voice');
-    const rateEl = document.getElementById('rate');
-    const pitchEl = document.getElementById('pitch');
-    const toggleTTSBtn = document.getElementById('toggleTTS');
-
-    // ---------- State ----------
-    let ttsEnabled = true;
-    let voices = [];
-    let selectedVoice = null;
-
-    function setStatus(s){ statusEl.textContent = s; }
-
-    // ---------- HEALTH ----------
     async function refreshHealth() {
       try {
         healthText.textContent = 'checking…';
@@ -150,51 +150,41 @@
       }
     }
     healthRefresh.addEventListener('click', refreshHealth);
-    // initial + interval
-    refreshHealth();
-    setInterval(refreshHealth, 30000); // every 30s
+    refreshHealth(); setInterval(refreshHealth, 30000);
 
-    // ---------- TTS ----------
-    function populateVoices() {
-      voices = window.speechSynthesis.getVoices().filter(v => v.lang.startsWith('en'));
-      voiceSel.innerHTML = voices.map((v, i) =>
-        `<option value="${i}">${v.name} (${v.lang})${v.default ? ' — default' : ''}</option>`
-      ).join('') || `<option value="">(No voices found)</option>`;
-      selectedVoice = voices[0] || null;
-    }
-    if ('speechSynthesis' in window) {
-      populateVoices();
-      window.speechSynthesis.onvoiceschanged = populateVoices;
-    }
+    // =============== Small helpers ===============
+    const statusEl = document.getElementById('status');
+    function setStatus(s){ statusEl.textContent = s; }
+    function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
 
-    function speakAsKeilani(text) {
-      if (!ttsEnabled) return;
+    // =============== Chat UI (manual send) ===============
+    const sendBtn = document.getElementById('send');
+    const msgEl = document.getElementById('message');
+    const userEl = document.getElementById('userId');
+    const thresholdEl = document.getElementById('threshold');
+    const countEl = document.getElementById('count');
+    const skipContextEl = document.getElementById('skipContext');
+    const replyEl = document.getElementById('reply');
+    const matchesEmpty = document.getElementById('matchesEmpty');
+    const matchesTable = document.getElementById('matchesTable');
+    const matchesBody = document.getElementById('matchesBody');
+
+    let browserTTS = true;
+    const toggleTTS = document.getElementById('toggleTTS');
+    toggleTTS.addEventListener('click', () => {
+      browserTTS = !browserTTS;
+      toggleTTS.textContent = browserTTS ? '🔊 Browser TTS: On' : '🔇 Browser TTS: Off';
+    });
+
+    function webSpeak(text) {
+      if (!browserTTS) return;
       if (!('speechSynthesis' in window)) return;
-
-      // Interrupt any current speech
       window.speechSynthesis.cancel();
-
-      const utter = new SpeechSynthesisUtterance(text);
-      if (selectedVoice) utter.voice = selectedVoice;
-      const rate = Math.min(2, Math.max(0.5, Number(rateEl.value) || 1.0));
-      const pitch = Math.min(2, Math.max(0, Number(pitchEl.value) || 1.0));
-      utter.rate = rate;
-      utter.pitch = pitch;
-
-      window.speechSynthesis.speak(utter);
+      const u = new SpeechSynthesisUtterance(text);
+      u.rate = 1; u.pitch = 1;
+      speechSynthesis.speak(u);
     }
 
-    voiceSel.addEventListener('change', (e) => {
-      const idx = Number(e.target.value);
-      selectedVoice = voices[idx] || null;
-    });
-    toggleTTSBtn.addEventListener('click', () => {
-      ttsEnabled = !ttsEnabled;
-      toggleTTSBtn.textContent = ttsEnabled ? '🔊 TTS: On' : '🔇 TTS: Off';
-      toggleTTSBtn.classList.toggle('secondary', true);
-    });
-
-    // ---------- Chat ----------
     async function sendToKeilani(message) {
       const threshold = Number(thresholdEl.value || 0.6);
       const count = Number(countEl.value || 8);
@@ -206,64 +196,173 @@
       const url = `/api/chat?${qs.toString()}`;
       const body = { userId: userEl.value || "00000000-0000-0000-0000-000000000001", message };
 
-      setStatus('thinking…');
-      sendBtn.disabled = true;
-
+      setStatus('thinking…'); sendBtn.disabled = true;
       try {
         const resp = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
         const data = await resp.json();
 
         if (!resp.ok) {
           replyEl.textContent = `⚠️ ${data.error || 'Chat error'}`;
-          matchesEmpty.style.display = 'block';
-          matchesTable.style.display = 'none';
+          matchesEmpty.style.display = 'block'; matchesTable.style.display = 'none';
           return;
         }
 
-        // show reply
         replyEl.textContent = data.reply || '—';
-        // TTS
-        speakAsKeilani(data.reply || '');
+        webSpeak(data.reply || '');
 
-        // matches table
         const matches = Array.isArray(data.matches) ? data.matches : [];
         if (matches.length === 0) {
-          matchesEmpty.style.display = 'block';
-          matchesTable.style.display = 'none';
+          matchesEmpty.style.display = 'block'; matchesTable.style.display = 'none';
         } else {
-          matchesEmpty.style.display = 'none';
-          matchesTable.style.display = '';
+          matchesEmpty.style.display = 'none'; matchesTable.style.display = '';
           matchesBody.innerHTML = matches.map(m =>
             `<tr><td>${escapeHtml(m.title || '')}</td><td>${escapeHtml(m.source || '')}</td><td>${Number(m.similarity || 0).toFixed(3)}</td></tr>`
           ).join('');
         }
       } catch (e) {
         replyEl.textContent = `⚠️ Network error: ${e.message}`;
-        matchesEmpty.style.display = 'block';
-        matchesTable.style.display = 'none';
+        matchesEmpty.style.display = 'block'; matchesTable.style.display = 'none';
       } finally {
-        setStatus('idle');
-        sendBtn.disabled = false;
+        setStatus('idle'); sendBtn.disabled = false;
       }
-    }
-
-    function escapeHtml(s){
-      return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
     }
 
     sendBtn.addEventListener('click', () => {
-      const msg = msgEl.value.trim();
-      if (!msg) return;
-      sendToKeilani(msg);
-      msgEl.value = "";
-      msgEl.focus();
+      const msg = msgEl.value.trim(); if (!msg) return;
+      sendToKeilani(msg); msgEl.value = ""; msgEl.focus();
+    });
+    msgEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) sendBtn.click();
     });
 
-    msgEl.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) {
-        sendBtn.click();
-      }
-    });
+    // =============== D-ID Brain Bridge ===============
+    const bridgeStatusEl = document.getElementById('bridgeStatus');
+    const initBridgeBtn = document.getElementById('initBridgeBtn');
+
+    // Config: adjust to your SDK
+    const DIDEvents = {
+      transcript: "transcript",        // e.g., 'transcript'
+      userStart: "voice-start",        // e.g., 'voice-activity-start' or 'vad-start'
+      connected: "connected",
+      error: "error"
+    };
+    document.getElementById('evTranscript').textContent = DIDEvents.transcript;
+    document.getElementById('evUserStart').textContent = DIDEvents.userStart;
+    document.getElementById('evConnected').textContent = DIDEvents.connected;
+
+    let pendingBrain = null;
+    let avatarSpeaking = false;
+
+    function setBridgeStatus(s){ bridgeStatusEl.textContent = s; }
+
+    function isFinalTranscript(evt) {
+      return evt?.isFinal === true || evt?.final === true || evt?.type === "transcript-final";
+    }
+    function getTranscriptText(evt) {
+      return (evt?.text || evt?.transcript || "").trim();
+    }
+
+    async function didSpeak(text) {
+      // 🔧 Use your real D-ID speak method:
+      return window.myDidSession?.speak?.({ text });
+    }
+    async function didStop() {
+      return window.myDidSession?.stopSpeaking?.();
+    }
+
+    function wireEvent(target, name, handler){
+      if (!target) return;
+      if (typeof target.on === "function") target.on(name, handler);
+      if (typeof target.addEventListener === "function") target.addEventListener(name, handler);
+    }
+
+    function initBridge() {
+      const session = window.myDidSession;
+      if (!session) { alert("D-ID session not found. Set window.myDidSession after connect."); return; }
+
+      wireEvent(session, DIDEvents.connected, () => setBridgeStatus("connected"));
+      wireEvent(session, DIDEvents.error, (e) => console.warn("D-ID error:", e));
+
+      wireEvent(session, DIDEvents.userStart, async () => {
+        // barge-in: stop current speech & abort brain call
+        if (avatarSpeaking) { try { await didStop(); } catch {} avatarSpeaking = false; }
+        if (pendingBrain?.abort) pendingBrain.abort();
+        pendingBrain = null;
+        setStatus("listening…");
+        setBridgeStatus("listening…");
+      });
+
+      wireEvent(session, DIDEvents.transcript, async (evt) => {
+        try {
+          if (!isFinalTranscript(evt)) return;
+          const userText = getTranscriptText(evt);
+          if (!userText) return;
+
+          if (pendingBrain?.abort) pendingBrain.abort();
+          const ctrl = new AbortController();
+          pendingBrain = ctrl;
+
+          setStatus("thinking…"); setBridgeStatus("thinking…");
+
+          // Build /api/chat URL with current UI controls
+          const threshold = Number(thresholdEl.value || 0.6);
+          const count = Number(countEl.value || 8);
+          const skip = skipContextEl.checked;
+          const qs = new URLSearchParams();
+          if (skip) qs.set('nocontext','1'); else { qs.set('threshold', String(threshold)); qs.set('count', String(count)); }
+          const url = `/api/chat?${qs.toString()}`;
+          const body = { userId: userEl.value || "00000000-0000-0000-0000-000000000001", message: userText };
+
+          const resp = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, signal: ctrl.signal, body: JSON.stringify(body) });
+          const data = await resp.json().catch(() => ({}));
+          if (!resp.ok) throw new Error(data.error || `brain ${resp.status}`);
+
+          const reply = (data.reply || "Got it.").trim();
+          replyEl.textContent = reply;
+
+          // optional: show matches
+          const matches = Array.isArray(data.matches) ? data.matches : [];
+          if (matches.length === 0) { matchesEmpty.style.display='block'; matchesTable.style.display='none'; }
+          else { matchesEmpty.style.display='none'; matchesTable.style.display=''; matchesBody.innerHTML = matches.map(m => `<tr><td>${escapeHtml(m.title||'')}</td><td>${escapeHtml(m.source||'')}</td><td>${Number(m.similarity||0).toFixed(3)}</td></tr>`).join(''); }
+
+          // speak via D-ID
+          avatarSpeaking = true;
+          await didSpeak(reply);
+          avatarSpeaking = false;
+
+          setStatus("idle"); setBridgeStatus("idle");
+          pendingBrain = null;
+        } catch (e) {
+          console.warn("brain error:", e);
+          setStatus("idle"); setBridgeStatus("idle");
+          pendingBrain = null;
+          try { avatarSpeaking = true; await didSpeak("Sorry, I glitched. Can you repeat that?"); avatarSpeaking = false; } catch {}
+        }
+      });
+
+      setBridgeStatus("ready");
+    }
+
+    initBridgeBtn.addEventListener('click', initBridge);
+  </script>
+
+  <!--
+    IMPORTANT: After your D-ID client connects, set:
+      window.myDidSession = <your live session object>;
+
+    Make sure your session object exposes:
+      - an event for final transcripts (default here: 'transcript')
+      - an event for "user started talking" (default here: 'voice-start')
+      - speak({ text }) and stopSpeaking() methods (adjust in didSpeak/didStop if different)
+  -->
+  <script>
+    // Example (pseudo):
+    // window.myDidSession = await DID.connect({ ... });
+    // window.myDidSession.on('connected', () => console.log('D-ID connected'));
+    // window.myDidSession.on('transcript', (evt) => console.log(evt));
+    // window.myDidSession.on('voice-start', () => console.log('user started talking'));
+
+    // If your event names differ, change DIDEvents above.
   </script>
 </body>
 </html>
