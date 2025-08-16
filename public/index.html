@@ -35,7 +35,6 @@
     .row-opts { display:flex; gap:10px; align-items:center; margin:8px 0 0; flex-wrap:wrap; }
     .notice { color:#93a2b9; font-size:12px; }
     .spacer { flex:1; }
-    .tts { display:flex; gap:10px; align-items:center; flex-wrap:wrap; }
     .kbd { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; font-size:12px; background:#0b1220; border:1px solid #263445; border-radius:6px; padding:2px 6px; }
   </style>
 </head>
@@ -70,9 +69,7 @@
           </label>
           <span class="pill" id="status">idle</span>
           <span class="spacer"></span>
-          <div class="tts">
-            <button id="toggleTTS" class="secondary">🔊 Browser TTS: On</button>
-          </div>
+          <button id="toggleTTS" class="secondary">🔊 Browser TTS: On</button>
         </div>
 
         <div class="row" style="margin-top:10px;">
@@ -95,32 +92,30 @@
         </div>
       </section>
 
-      <!-- Right: D-ID Bridge -->
+      <!-- Right: D-ID Debug & Bridge -->
       <section class="card">
-        <h3 style="margin-top:0;">D-ID Bridge</h3>
+        <h3 style="margin-top:0;">D-ID Debug & Bridge</h3>
         <p class="meta">
-          When D-ID emits a <b>final transcript</b>, we’ll send it to <span class="kbd">/api/chat</span> and speak the reply via your D-ID session.
+          Click <b>Init Debug</b> to log raw transcript events to the browser Console. After we see the event shape, we’ll wire the full brain bridge.
         </p>
 
         <div class="row">
-          <label class="notice">Status: <span id="bridgeStatus" class="pill">not initialized</span></label>
+          <button id="initDidDebug" class="secondary">Init Debug</button>
+          <button id="initBridgeBtn">Init Bridge (stub)</button>
           <span class="spacer"></span>
-          <button id="initBridgeBtn">Init Bridge</button>
+          <span id="bridgeStatus" class="pill">not initialized</span>
         </div>
 
         <div style="margin-top:10px;">
-          <div class="meta">Event mapping (adjust if your SDK uses different names or payloads):</div>
-          <ul class="meta">
-            <li>Transcript event: <span class="kbd" id="evTranscript">transcript</span></li>
-            <li>User starts talking: <span class="kbd" id="evUserStart">voice-start</span></li>
-            <li>Connected: <span class="kbd" id="evConnected">connected</span></li>
-          </ul>
-          <div class="meta">Final detection: <span class="kbd">evt.isFinal || evt.final || evt.type === "transcript-final"</span></div>
-          <div class="meta">Text path: <span class="kbd">evt.text || evt.transcript</span></div>
+          <div class="meta">Looking for events named: <span class="kbd">transcript</span>, <span class="kbd">speech.transcript</span>, <span class="kbd">asr.transcript</span></div>
+          <div class="meta">Also logs VAD: <span class="kbd">voice-activity-start</span>, <span class="kbd">vad-start</span>, <span class="kbd">voice-start</span></div>
+          <div class="meta">Open DevTools Console (<span class="kbd">F12</span>) to see the logs.</div>
         </div>
 
         <div class="meta" style="margin-top:10px;">
-          Note: Set <span class="kbd">window.myDidSession</span> to your live D-ID session object after connect. Then click <b>Init Bridge</b>.
+          After your D-ID client connects, set:<br />
+          <span class="kbd">window.myDidSession = &lt;your live session object&gt;</span><br />
+          Then click <b>Init Debug</b>.
         </div>
       </section>
     </div>
@@ -235,134 +230,68 @@
       if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) sendBtn.click();
     });
 
-    // =============== D-ID Brain Bridge ===============
-    const bridgeStatusEl = document.getElementById('bridgeStatus');
+    // =============== D-ID Transcript Debug Logger ===============
+    // IMPORTANT: after your D-ID client connects elsewhere, set:
+    //   window.myDidSession = <your live session object>
+    // Then click "Init Debug" to start logging events.
+    const initDidDebugBtn = document.getElementById('initDidDebug');
     const initBridgeBtn = document.getElementById('initBridgeBtn');
-
-    // Config: adjust to your SDK
-    const DIDEvents = {
-      transcript: "transcript",        // e.g., 'transcript'
-      userStart: "voice-start",        // e.g., 'voice-activity-start' or 'vad-start'
-      connected: "connected",
-      error: "error"
-    };
-    document.getElementById('evTranscript').textContent = DIDEvents.transcript;
-    document.getElementById('evUserStart').textContent = DIDEvents.userStart;
-    document.getElementById('evConnected').textContent = DIDEvents.connected;
-
-    let pendingBrain = null;
-    let avatarSpeaking = false;
+    const bridgeStatusEl = document.getElementById('bridgeStatus');
 
     function setBridgeStatus(s){ bridgeStatusEl.textContent = s; }
 
-    function isFinalTranscript(evt) {
-      return evt?.isFinal === true || evt?.final === true || evt?.type === "transcript-final";
-    }
-    function getTranscriptText(evt) {
-      return (evt?.text || evt?.transcript || "").trim();
-    }
-
-    async function didSpeak(text) {
-      // 🔧 Use your real D-ID speak method:
-      return window.myDidSession?.speak?.({ text });
-    }
-    async function didStop() {
-      return window.myDidSession?.stopSpeaking?.();
-    }
-
-    function wireEvent(target, name, handler){
-      if (!target) return;
-      if (typeof target.on === "function") target.on(name, handler);
-      if (typeof target.addEventListener === "function") target.addEventListener(name, handler);
-    }
-
-    function initBridge() {
+    initDidDebugBtn.addEventListener('click', () => {
       const session = window.myDidSession;
       if (!session) { alert("D-ID session not found. Set window.myDidSession after connect."); return; }
 
-      wireEvent(session, DIDEvents.connected, () => setBridgeStatus("connected"));
-      wireEvent(session, DIDEvents.error, (e) => console.warn("D-ID error:", e));
+      const POSSIBLE_TRANSCRIPT_EVENTS = ['transcript', 'speech.transcript', 'asr.transcript'];
+      const POSSIBLE_VAD_EVENTS       = ['voice-activity-start', 'vad-start', 'voice-start'];
 
-      wireEvent(session, DIDEvents.userStart, async () => {
-        // barge-in: stop current speech & abort brain call
-        if (avatarSpeaking) { try { await didStop(); } catch {} avatarSpeaking = false; }
-        if (pendingBrain?.abort) pendingBrain.abort();
-        pendingBrain = null;
-        setStatus("listening…");
-        setBridgeStatus("listening…");
-      });
+      function safeOn(ev, handler) {
+        try { session.on(ev, handler); console.log(`[D-ID] listening for "${ev}"`); }
+        catch (e) { console.log(`[D-ID] event "${ev}" not supported`); }
+      }
 
-      wireEvent(session, DIDEvents.transcript, async (evt) => {
-        try {
-          if (!isFinalTranscript(evt)) return;
-          const userText = getTranscriptText(evt);
-          if (!userText) return;
+      session.on('connected', () => console.log('[D-ID] connected'));
+      session.on('error', (e) => console.warn('[D-ID] error:', e));
 
-          if (pendingBrain?.abort) pendingBrain.abort();
-          const ctrl = new AbortController();
-          pendingBrain = ctrl;
+      POSSIBLE_TRANSCRIPT_EVENTS.forEach(ev =>
+        safeOn(ev, (evt) => {
+          try {
+            console.log('RAW TRANSCRIPT EVENT:', evt);
+            const text =
+              (evt && (evt.text || evt.transcript || (evt.segment && evt.segment.text))) || '';
+            const isFinal =
+              !!(evt && (evt.isFinal || evt.final || (evt.segment && evt.segment.is_final) || evt.type === 'transcript-final'));
+            console.log('TRANSCRIPT SUMMARY →', { isFinal, text });
+          } catch (e) {
+            console.warn('Transcript log error:', e);
+          }
+        })
+      );
 
-          setStatus("thinking…"); setBridgeStatus("thinking…");
+      POSSIBLE_VAD_EVENTS.forEach(ev =>
+        safeOn(ev, () => console.log(`RAW VAD EVENT: ${ev}`))
+      );
 
-          // Build /api/chat URL with current UI controls
-          const threshold = Number(thresholdEl.value || 0.6);
-          const count = Number(countEl.value || 8);
-          const skip = skipContextEl.checked;
-          const qs = new URLSearchParams();
-          if (skip) qs.set('nocontext','1'); else { qs.set('threshold', String(threshold)); qs.set('count', String(count)); }
-          const url = `/api/chat?${qs.toString()}`;
-          const body = { userId: userEl.value || "00000000-0000-0000-0000-000000000001", message: userText };
+      setBridgeStatus('debugging (check Console)');
+    });
 
-          const resp = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, signal: ctrl.signal, body: JSON.stringify(body) });
-          const data = await resp.json().catch(() => ({}));
-          if (!resp.ok) throw new Error(data.error || `brain ${resp.status}`);
-
-          const reply = (data.reply || "Got it.").trim();
-          replyEl.textContent = reply;
-
-          // optional: show matches
-          const matches = Array.isArray(data.matches) ? data.matches : [];
-          if (matches.length === 0) { matchesEmpty.style.display='block'; matchesTable.style.display='none'; }
-          else { matchesEmpty.style.display='none'; matchesTable.style.display=''; matchesBody.innerHTML = matches.map(m => `<tr><td>${escapeHtml(m.title||'')}</td><td>${escapeHtml(m.source||'')}</td><td>${Number(m.similarity||0).toFixed(3)}</td></tr>`).join(''); }
-
-          // speak via D-ID
-          avatarSpeaking = true;
-          await didSpeak(reply);
-          avatarSpeaking = false;
-
-          setStatus("idle"); setBridgeStatus("idle");
-          pendingBrain = null;
-        } catch (e) {
-          console.warn("brain error:", e);
-          setStatus("idle"); setBridgeStatus("idle");
-          pendingBrain = null;
-          try { avatarSpeaking = true; await didSpeak("Sorry, I glitched. Can you repeat that?"); avatarSpeaking = false; } catch {}
-        }
-      });
-
-      setBridgeStatus("ready");
-    }
-
-    initBridgeBtn.addEventListener('click', initBridge);
+    // Stub button for later (we’ll replace with the exact brain bridge after we see payloads)
+    initBridgeBtn.addEventListener('click', () => {
+      if (!window.myDidSession) { alert("D-ID session not found. Init your session and set window.myDidSession."); return; }
+      setBridgeStatus('bridge will be enabled after we confirm event shape');
+      console.log('[bridge] waiting on transcript payload shape to finalize wiring');
+    });
   </script>
 
   <!--
     IMPORTANT: After your D-ID client connects, set:
       window.myDidSession = <your live session object>;
 
-    Make sure your session object exposes:
-      - an event for final transcripts (default here: 'transcript')
-      - an event for "user started talking" (default here: 'voice-start')
-      - speak({ text }) and stopSpeaking() methods (adjust in didSpeak/didStop if different)
+    Example (pseudo, not included here):
+      const session = await DID.connect({...});
+      window.myDidSession = session;
   -->
-  <script>
-    // Example (pseudo):
-    // window.myDidSession = await DID.connect({ ... });
-    // window.myDidSession.on('connected', () => console.log('D-ID connected'));
-    // window.myDidSession.on('transcript', (evt) => console.log(evt));
-    // window.myDidSession.on('voice-start', () => console.log('user started talking'));
-
-    // If your event names differ, change DIDEvents above.
-  </script>
 </body>
 </html>
