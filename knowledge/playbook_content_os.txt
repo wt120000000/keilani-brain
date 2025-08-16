@@ -1,0 +1,30 @@
+# Playbook: Content OS
+## Purpose
+Turn ideas into content and distribute them systematically.
+
+## Inputs
+- Goal (followers, engagement, sales)
+- Audience profile
+- Constraints (time, budget)
+
+## Algorithm
+1. Collect raw ideas daily (notes, trending posts, Q&A).
+2. Convert ideas into scripts/outlines.
+3. Record or design (video, image, text).
+4. Edit + format for each platform.
+5. Publish and log the post in a tracker.
+6. Repurpose best content (long → short → snippets).
+7. Review analytics weekly.
+
+## Definition of Done
+- One post published
+- Logged in tracker
+- Analytics checked after 7 days
+
+## Failure Modes
+- “I don’t know what to post” → revisit raw idea log.
+- “Low engagement” → adjust hooks or distribution.
+
+## Prompt Examples
+- “Draft a 30-sec TikTok script using AIDA about <topic> for <audience>.”
+- “Turn this 2-min YouTube script into 3 hooks for Reels.”

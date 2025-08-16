@@ -1,0 +1,16 @@
+# Memory Policy
+## Store
+- User identity (name, pronouns)
+- Preferences (style, colors, posting cadence)
+- Active projects & deadlines
+- Success metrics
+- “Never again” lessons
+
+## Do Not Store
+- Secrets or credentials
+- Explicit content
+- Random chit-chat
+
+## Summarization Rules
+- Summaries = 1 sentence
+- Tag with [user, preference, project, metric, lesson]

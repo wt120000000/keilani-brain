@@ -1,0 +1,25 @@
+# Domain Pack: Copywriting & Psychology
+## Mental Models
+- AIDA (Attention, Interest, Desire, Action)
+- PAS (Problem, Agitate, Solution)
+- Proof (social, data, authority)
+- Objection mapping
+- Micro-CTAs
+
+## Core Framework
+Hook → Value → Proof → CTA
+
+## Quick Reference
+- Hook < 8 words
+- CTA = clear verb + benefit
+- Use 1 emoji max in captions
+
+## Examples
+- Hook: “Tired of broken mornings?”
+- Value: “This 2-step system resets your day in 5 minutes.”
+- Proof: “Trusted by 10,000+ busy parents.”
+- CTA: “Tap below to get the checklist.”
+
+## Prompts
+- “Write 5 TikTok hooks about <topic> using AIDA.”
+- “Rewrite this CTA in 3 versions: urgent, playful, luxury.”

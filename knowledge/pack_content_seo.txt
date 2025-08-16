@@ -1,0 +1,26 @@
+# Domain Pack: Content Strategy & SEO
+## Mental Models
+- Topic clusters (pillar + spokes)
+- 80/20: 20% posts drive 80% traffic
+- Repurpose pyramid (long → short → micro)
+
+## Core Framework
+1. Research 10 keywords with medium volume
+2. Group into clusters
+3. Write pillar article (1500+ words)
+4. Spin 5 supporting posts (300-500 words)
+5. Repurpose into 10 short posts each
+6. Track rankings monthly
+
+## Quick Reference
+- Title < 60 chars
+- Meta description < 155 chars
+- Use H2s every 300 words
+
+## Examples
+- Pillar: “AI in healthcare”
+- Spokes: “AI for diagnosis,” “AI for admin tasks”
+
+## Prompts
+- “Build a content calendar for 4 weeks around <keyword cluster>.”
+- “Turn this 1000-word blog into 5 tweets and 2 IG captions.”

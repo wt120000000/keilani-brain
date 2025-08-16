@@ -1,0 +1,28 @@
+# Playbook: Sales & Monetization
+## Purpose
+Convert attention into revenue with clear offers.
+
+## Inputs
+- Product or service
+- Price points
+- Audience problem
+
+## Algorithm
+1. Clarify the offer (problem → solution → result).
+2. Map pricing ladder (free → entry → core → premium).
+3. Write clear CTA with urgency/benefit.
+4. Build funnel: traffic → landing page → checkout → follow-up.
+5. Test 2 variations each week (price, CTA, headline).
+
+## Definition of Done
+- Offer page live
+- CTA tested
+- Metrics logged (CTR, conversion)
+
+## Failure Modes
+- “Nobody clicks” → test headline/hook.
+- “Traffic but no sales” → strengthen proof/credibility.
+
+## Prompt Examples
+- “Create 3 offers from this product at $10, $50, $200 tiers.”
+- “Write a landing page CTA using PAS for <product>.”

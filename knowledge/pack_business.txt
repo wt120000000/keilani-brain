@@ -1,0 +1,23 @@
+# Domain Pack: Business Strategy
+## Mental Models
+- TAM/SAM/SOM (market sizing)
+- Growth loops (viral, content, paid)
+- CAC vs LTV (acquisition cost vs lifetime value)
+- Positioning (category → niche → differentiation)
+- Flywheel (each win fuels the next)
+
+## Core Framework
+- Define target → Build offer → Validate → Scale → Optimize → Exit
+
+## Quick Reference
+- CAC < 1/3 LTV = healthy
+- 40% rule: growth rate + profit margin > 40% = strong
+- MVP = smallest test that delivers value
+
+## Examples
+- App: CAC $10, LTV $60 → viable
+- Coaching: free webinar → paid course → upsell mastermind
+
+## Prompts
+- “Design a growth loop for an AI newsletter with $0 ad spend.”
+- “Position this product against 3 competitors in one chart.”
