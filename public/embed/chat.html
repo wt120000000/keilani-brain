@@ -1,0 +1,136 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Keilani Chat Widget</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    :root { font-family: Inter, ui-sans-serif, system-ui, -apple-system, Segoe UI, Roboto, Helvetica, Arial; }
+    html, body { height: 100%; margin: 0; background: #0b0f14; color: #e6edf3; }
+    .wrap { height: 100%; display: grid; grid-template-rows: auto 1fr auto; gap: 8px; padding: 14px; }
+    .header { display:flex; align-items:center; gap:8px; }
+    .dot { width:8px; height:8px; border-radius:999px; background:#10b981; }
+    .title { font-size:14px; color:#93a2b9 }
+    .card { border:1px solid #1f2937; background:#0f1720; border-radius:12px; padding:10px; overflow:auto; }
+    .msgs { display:flex; flex-direction:column; gap:10px; font-size:14px; }
+    .msg { padding:10px; border:1px solid #263445; border-radius:10px; background:#0b1220; }
+    .msg.me { background:#111827; border-color:#293447 }
+    .meta { font-size:12px; color:#93a2b9; margin-top:6px; }
+    .row { display:flex; gap:8px; }
+    input, button, textarea {
+      background:#0b1220; color:#e6edf3; border:1px solid #263445; border-radius:10px; padding:10px;
+    }
+    textarea { resize:none; height:64px; flex:1; }
+    button { background:#2563eb; border:0; cursor:pointer; white-space:nowrap; }
+    button:disabled { opacity:.6; cursor:not-allowed; }
+    .controls { display:flex; gap:8px; align-items:center; flex-wrap:wrap; }
+    .pill { font-size:12px; padding:2px 8px; border:1px solid #334155; border-radius:999px; color:#93a2b9; }
+    .match { font-size:12px; color:#93a2b9 }
+    .footer { display:flex; justify-content:space-between; align-items:center; color:#93a2b9; font-size:11px; }
+    a { color:#22d3ee; text-decoration:none }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <div class="header">
+      <span class="dot"></span>
+      <div class="title">Keilani Chat</div>
+      <span id="status" class="pill">idle</span>
+      <span id="rag" class="pill">RAG: on</span>
+    </div>
+
+    <div id="viewport" class="card">
+      <div id="msgs" class="msgs">
+        <div class="msg">Hey! I’m Keilani. Ask me anything — Sales & Monetization, Copywriting, Content & SEO, or try normal chat.</div>
+      </div>
+      <div id="matches" class="meta"></div>
+    </div>
+
+    <div class="card">
+      <div class="row">
+        <textarea id="input" placeholder="Type your message…"></textarea>
+        <button id="send">Send</button>
+      </div>
+      <div class="controls" style="margin-top:8px;">
+        <label class="meta">Threshold <input id="threshold" type="number" min="0" max="1" step="0.05" value="0.6" style="width:80px"></label>
+        <label class="meta">Count <input id="count" type="number" min="1" max="20" step="1" value="8" style="width:80px"></label>
+        <label class="meta"><input id="skip" type="checkbox"> Skip RAG</label>
+        <label class="meta">User <input id="user" type="text" value="00000000-0000-0000-0000-000000000001" style="width:230px"></label>
+      </div>
+    </div>
+
+    <div class="footer">
+      <span>Powered by Keilani Brain</span>
+      <span>Tip: lower threshold = more matches</span>
+    </div>
+  </div>
+
+  <script>
+    // Read optional URL params (?user=...&threshold=0.55&count=6&skip=1)
+    const params = new URLSearchParams(location.search);
+    const input = document.getElementById('input');
+    const send = document.getElementById('send');
+    const msgs = document.getElementById('msgs');
+    const matchesEl = document.getElementById('matches');
+    const statusEl = document.getElementById('status');
+    const ragEl = document.getElementById('rag');
+    const thresholdEl = document.getElementById('threshold');
+    const countEl = document.getElementById('count');
+    const skipEl = document.getElementById('skip');
+    const userEl = document.getElementById('user');
+
+    if (params.get('user')) userEl.value = params.get('user');
+    if (params.get('threshold')) thresholdEl.value = params.get('threshold');
+    if (params.get('count')) countEl.value = params.get('count');
+    if (params.get('skip')) skipEl.checked = params.get('skip') === '1';
+
+    function addMsg(text, me=false){
+      const div = document.createElement('div');
+      div.className = 'msg' + (me ? ' me' : '');
+      div.textContent = text;
+      msgs.appendChild(div);
+      msgs.parentElement.scrollTop = msgs.parentElement.scrollHeight;
+    }
+
+    function setStatus(s){ statusEl.textContent = s; }
+    function setRag(on){ ragEl.textContent = 'RAG: ' + (on ? 'on' : 'off'); }
+
+    async function chat(text){
+      const threshold = Number(thresholdEl.value || 0.6);
+      const count = Number(countEl.value || 8);
+      const skip = skipEl.checked;
+      setRag(!skip);
+
+      const qs = new URLSearchParams();
+      if (skip) qs.set('nocontext','1'); else { qs.set('threshold', String(threshold)); qs.set('count', String(count)); }
+      const url = `/api/chat?${qs.toString()}`;
+      const body = { userId: userEl.value || '00000000-0000-0000-0000-000000000001', message: text };
+
+      setStatus('thinking…'); send.disabled = true;
+      try {
+        const resp = await fetch(url, { method:'POST', headers:{'Content-Type':'application/json'}, body: JSON.stringify(body) });
+        const data = await resp.json();
+        if (!resp.ok) throw new Error(data.error || `chat ${resp.status}`);
+        addMsg(data.reply || '—', false);
+
+        const matches = Array.isArray(data.matches) ? data.matches : [];
+        if (matches.length) {
+          matchesEl.innerHTML = 'Matches: ' + matches.map(m => `${m.title || ''} (${(m.similarity || 0).toFixed(2)})`).join(' • ');
+        } else {
+          matchesEl.textContent = '';
+        }
+      } catch (e) {
+        addMsg('⚠️ ' + (e.message || 'Network error'), false);
+      } finally {
+        setStatus('idle'); send.disabled = false;
+      }
+    }
+
+    send.addEventListener('click', () => {
+      const text = input.value.trim(); if (!text) return;
+      addMsg(text, true); input.value = ''; chat(text);
+    });
+    input.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); send.click(); } });
+  </script>
+</body>
+</html>
