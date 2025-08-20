@@ -52,7 +52,7 @@
       <!-- Left: Chat & Output -->
       <section class="card">
         <label for="message">Message to Keilani</label>
-        <textarea id="message" placeholder="Say hi to Keilani… e.g. “Using the Sales & Monetization playbook, create 3 offers at $10, $50, and $200 with clear CTAs.”"></textarea>
+        <textarea id="message" placeholder="Say hi… e.g. “Using the Sales & Monetization playbook, create 3 offers at $10, $50, and $200 with clear CTAs.”"></textarea>
 
         <div class="row-opts">
           <label class="notice">
@@ -92,37 +92,27 @@
         </div>
       </section>
 
-      <!-- Right: D-ID Debug & Bridge -->
+      <!-- Right: D-ID Bridge -->
       <section class="card">
-        <h3 style="margin-top:0;">D-ID Debug & Bridge</h3>
+        <h3 style="margin-top:0;">D-ID Bridge</h3>
         <p class="meta">
-          Click <b>Init Debug</b> to log raw transcript events to the browser Console. After we see the event shape, we’ll wire the full brain bridge.
+          This page auto-bridges D-ID → Brain → D-ID. After your D-ID client connects, set:<br/>
+          <span class="kbd">window.myDidSession = &lt;your live session object&gt;</span><br/>
+          That’s it — the bridge attaches automatically.
         </p>
-
-        <div class="row">
-          <button id="initDidDebug" class="secondary">Init Debug</button>
-          <button id="initBridgeBtn">Init Bridge (stub)</button>
-          <span class="spacer"></span>
-          <span id="bridgeStatus" class="pill">not initialized</span>
+        <div class="meta">
+          Transcript events listened: <span class="kbd">transcript</span>, <span class="kbd">speech.transcript</span>, <span class="kbd">asr.transcript</span><br/>
+          VAD barge-in: <span class="kbd">voice-activity-start</span>, <span class="kbd">vad-start</span>, <span class="kbd">voice-start</span>
         </div>
-
-        <div style="margin-top:10px;">
-          <div class="meta">Looking for events named: <span class="kbd">transcript</span>, <span class="kbd">speech.transcript</span>, <span class="kbd">asr.transcript</span></div>
-          <div class="meta">Also logs VAD: <span class="kbd">voice-activity-start</span>, <span class="kbd">vad-start</span>, <span class="kbd">voice-start</span></div>
-          <div class="meta">Open DevTools Console (<span class="kbd">F12</span>) to see the logs.</div>
-        </div>
-
         <div class="meta" style="margin-top:10px;">
-          After your D-ID client connects, set:<br />
-          <span class="kbd">window.myDidSession = &lt;your live session object&gt;</span><br />
-          Then click <b>Init Debug</b>.
+          Status: <span id="bridgeStatus" class="pill">not attached</span>
         </div>
       </section>
     </div>
   </main>
 
   <script>
-    // =============== Health Badge ===============
+    // ---------- Health badge ----------
     const healthBadge = document.getElementById('healthBadge');
     const healthDot = document.getElementById('healthDot');
     const healthText = document.getElementById('healthText');
@@ -147,151 +137,201 @@
     healthRefresh.addEventListener('click', refreshHealth);
     refreshHealth(); setInterval(refreshHealth, 30000);
 
-    // =============== Small helpers ===============
+    // ---------- Helpers ----------
     const statusEl = document.getElementById('status');
-    function setStatus(s){ statusEl.textContent = s; }
-    function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
-
-    // =============== Chat UI (manual send) ===============
-    const sendBtn = document.getElementById('send');
-    const msgEl = document.getElementById('message');
-    const userEl = document.getElementById('userId');
-    const thresholdEl = document.getElementById('threshold');
-    const countEl = document.getElementById('count');
-    const skipContextEl = document.getElementById('skipContext');
     const replyEl = document.getElementById('reply');
     const matchesEmpty = document.getElementById('matchesEmpty');
     const matchesTable = document.getElementById('matchesTable');
     const matchesBody = document.getElementById('matchesBody');
+    const thresholdEl = document.getElementById('threshold');
+    const countEl = document.getElementById('count');
+    const skipContextEl = document.getElementById('skipContext');
+    const userEl = document.getElementById('userId');
 
+    function setStatus(s){ if (statusEl) statusEl.textContent = s; const b = document.getElementById('bridgeStatus'); if (b) b.textContent = s; }
+    function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c])); }
+
+    // ---------- Optional browser TTS ----------
     let browserTTS = true;
     const toggleTTS = document.getElementById('toggleTTS');
     toggleTTS.addEventListener('click', () => {
       browserTTS = !browserTTS;
       toggleTTS.textContent = browserTTS ? '🔊 Browser TTS: On' : '🔇 Browser TTS: Off';
     });
-
     function webSpeak(text) {
       if (!browserTTS) return;
       if (!('speechSynthesis' in window)) return;
-      window.speechSynthesis.cancel();
+      speechSynthesis.cancel();
       const u = new SpeechSynthesisUtterance(text);
       u.rate = 1; u.pitch = 1;
       speechSynthesis.speak(u);
     }
 
-    async function sendToKeilani(message) {
-      const threshold = Number(thresholdEl.value || 0.6);
-      const count = Number(countEl.value || 8);
-      const skip = skipContextEl.checked;
-
-      const qs = new URLSearchParams();
-      if (skip) qs.set('nocontext','1'); else { qs.set('threshold', String(threshold)); qs.set('count', String(count)); }
-
-      const url = `/api/chat?${qs.toString()}`;
-      const body = { userId: userEl.value || "00000000-0000-0000-0000-000000000001", message };
-
-      setStatus('thinking…'); sendBtn.disabled = true;
-      try {
-        const resp = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
-        const data = await resp.json();
-
-        if (!resp.ok) {
-          replyEl.textContent = `⚠️ ${data.error || 'Chat error'}`;
-          matchesEmpty.style.display = 'block'; matchesTable.style.display = 'none';
-          return;
-        }
-
-        replyEl.textContent = data.reply || '—';
-        webSpeak(data.reply || '');
-
-        const matches = Array.isArray(data.matches) ? data.matches : [];
-        if (matches.length === 0) {
-          matchesEmpty.style.display = 'block'; matchesTable.style.display = 'none';
-        } else {
-          matchesEmpty.style.display = 'none'; matchesTable.style.display = '';
-          matchesBody.innerHTML = matches.map(m =>
-            `<tr><td>${escapeHtml(m.title || '')}</td><td>${escapeHtml(m.source || '')}</td><td>${Number(m.similarity || 0).toFixed(3)}</td></tr>`
-          ).join('');
-        }
-      } catch (e) {
-        replyEl.textContent = `⚠️ Network error: ${e.message}`;
-        matchesEmpty.style.display = 'block'; matchesTable.style.display = 'none';
-      } finally {
-        setStatus('idle'); sendBtn.disabled = false;
-      }
-    }
-
+    // ---------- Manual chat send (keeps the admin UI useful) ----------
+    const sendBtn = document.getElementById('send');
+    const msgEl = document.getElementById('message');
     sendBtn.addEventListener('click', () => {
       const msg = msgEl.value.trim(); if (!msg) return;
-      sendToKeilani(msg); msgEl.value = ""; msgEl.focus();
+      chatAndRender(msg).then(webSpeak).catch(()=>{});
+      msgEl.value = ""; msgEl.focus();
     });
-    msgEl.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) sendBtn.click();
-    });
+    msgEl.addEventListener('keydown', (e) => { if (e.key === 'Enter' && (e.ctrlKey || e.metaKey)) sendBtn.click(); });
 
-    // =============== D-ID Transcript Debug Logger ===============
-    // IMPORTANT: after your D-ID client connects elsewhere, set:
-    //   window.myDidSession = <your live session object>
-    // Then click "Init Debug" to start logging events.
-    const initDidDebugBtn = document.getElementById('initDidDebug');
-    const initBridgeBtn = document.getElementById('initBridgeBtn');
-    const bridgeStatusEl = document.getElementById('bridgeStatus');
+    async function chatAndRender(message) {
+      const threshold = Number(thresholdEl?.value || 0.6);
+      const count = Number(countEl?.value || 8);
+      const skip = !!skipContextEl?.checked;
+      const qs = new URLSearchParams();
+      if (skip) qs.set('nocontext','1'); else { qs.set('threshold', String(threshold)); qs.set('count', String(count)); }
+      const url = `/api/chat?${qs.toString()}`;
+      const body = { userId: (userEl?.value || "00000000-0000-0000-0000-000000000001"), message };
 
-    function setBridgeStatus(s){ bridgeStatusEl.textContent = s; }
+      setStatus('thinking…'); sendBtn.disabled = true;
+      const resp = await fetch(url, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) }).catch(e => { throw new Error('network ' + e.message); });
+      const data = await resp.json().catch(()=>({}));
+      if (!resp.ok) { replyEl.textContent = `⚠️ ${data.error || 'Chat error'}`; matchesEmpty.style.display='block'; matchesTable.style.display='none'; setStatus('idle'); sendBtn.disabled=false; throw new Error('chat'); }
 
-    initDidDebugBtn.addEventListener('click', () => {
-      const session = window.myDidSession;
-      if (!session) { alert("D-ID session not found. Set window.myDidSession after connect."); return; }
+      replyEl.textContent = data.reply || '—';
+      const matches = Array.isArray(data.matches) ? data.matches : [];
+      if (matches.length === 0) { matchesEmpty.style.display='block'; matchesTable.style.display='none'; }
+      else { matchesEmpty.style.display='none'; matchesTable.style.display=''; matchesBody.innerHTML = matches.map(m => `<tr><td>${escapeHtml(m.title||'')}</td><td>${escapeHtml(m.source||'')}</td><td>${Number(m.similarity||0).toFixed(3)}</td></tr>`).join(''); }
 
-      const POSSIBLE_TRANSCRIPT_EVENTS = ['transcript', 'speech.transcript', 'asr.transcript'];
-      const POSSIBLE_VAD_EVENTS       = ['voice-activity-start', 'vad-start', 'voice-start'];
+      setStatus('idle'); sendBtn.disabled = false;
+      return (data.reply || 'Got it.').trim();
+    }
 
-      function safeOn(ev, handler) {
-        try { session.on(ev, handler); console.log(`[D-ID] listening for "${ev}"`); }
-        catch (e) { console.log(`[D-ID] event "${ev}" not supported`); }
+    // ---------- D-ID ⇄ Brain bridge ----------
+    (function(){
+      const TRANSCRIPT_EVENTS = ['transcript','speech.transcript','asr.transcript','speech:transcript','asr:transcript'];
+      const VAD_START_EVENTS  = ['voice-activity-start','vad-start','voice-start','input_audio_buffer.speech_started'];
+      const CONNECT_EVENTS    = ['connected','ready'];
+
+      function isFinal(evt){
+        return !!(evt?.isFinal || evt?.final || evt?.segment?.is_final || evt?.payload?.final || evt?.type === 'transcript-final' || evt?.event === 'speech.final');
+      }
+      function getText(evt){
+        return (evt?.text || evt?.transcript || evt?.segment?.text || evt?.payload?.text || evt?.message || '').trim();
       }
 
-      session.on('connected', () => console.log('[D-ID] connected'));
-      session.on('error', (e) => console.warn('[D-ID] error:', e));
+      const SILENCE_MS = 600;   // debounce window if no explicit final flag
+      let partialTimer = null;
+      let partialBuf = '';
+      let inFlight = null;      // AbortController for /api/chat
+      let speaking = false;
 
-      POSSIBLE_TRANSCRIPT_EVENTS.forEach(ev =>
-        safeOn(ev, (evt) => {
+      function wire(session, name, handler){
+        try {
+          if (typeof session.on === 'function') session.on(name, handler);
+          else if (typeof session.addEventListener === 'function') session.addEventListener(name, handler);
+          console.log('[bridge] listening:', name);
+        } catch(e) {
+          console.log('[bridge] cannot listen', name, e?.message);
+        }
+      }
+
+      async function didStop(session){
+        try { await session.stopSpeaking?.(); } catch {}
+        try { await session.cancel?.(); } catch {}
+      }
+      async function didSpeak(session, text){
+        speaking = true;
+        await session.speak({ text });
+        speaking = false;
+      }
+
+      async function callBrain(message){
+        // reuse the same function the manual UI uses
+        return await chatAndRender(message);
+      }
+
+      function handleFinal(session, text){
+        if (!text) return;
+        if (partialTimer) { clearTimeout(partialTimer); partialTimer = null; partialBuf=''; }
+        // cancel any in-flight brain call (barge-in safety)
+        if (inFlight?.abort) inFlight.abort();
+        const ctrl = new AbortController();
+        inFlight = ctrl;
+
+        setStatus('thinking…');
+        callBrain(text)
+          .then(async reply => {
+            await didSpeak(session, reply);
+            setStatus('idle'); inFlight = null;
+          })
+          .catch(async e => {
+            console.warn('[bridge] brain error:', e?.message || e);
+            try { await didSpeak(session, "Sorry, I glitched. Can you repeat that?"); } catch {}
+            setStatus('idle'); inFlight = null;
+          });
+      }
+
+      function handlePartialMaybeFinal(session, text, finalFlag){
+        if (!text) return;
+        if (finalFlag) { handleFinal(session, text); return; }
+        partialBuf = text;
+        if (partialTimer) clearTimeout(partialTimer);
+        partialTimer = setTimeout(() => {
+          handleFinal(session, partialBuf);
+          partialBuf = ''; partialTimer = null;
+        }, SILENCE_MS);
+      }
+
+      function attach(session){
+        if (!session) return console.warn('[bridge] no D-ID session found');
+        const bridgeStatus = document.getElementById('bridgeStatus');
+        if (bridgeStatus) bridgeStatus.textContent = 'attached';
+
+        CONNECT_EVENTS.forEach(ev => wire(session, ev, () => setStatus('connected')));
+        wire(session, 'error', e => console.warn('[bridge] D-ID error:', e));
+
+        VAD_START_EVENTS.forEach(ev => wire(session, ev, async () => {
+          if (speaking) await didStop(session);
+          if (inFlight?.abort) inFlight.abort();
+          inFlight = null;
+          setStatus('listening…');
+        }));
+
+        TRANSCRIPT_EVENTS.forEach(ev => wire(session, ev, (evt) => {
           try {
-            console.log('RAW TRANSCRIPT EVENT:', evt);
-            const text =
-              (evt && (evt.text || evt.transcript || (evt.segment && evt.segment.text))) || '';
-            const isFinal =
-              !!(evt && (evt.isFinal || evt.final || (evt.segment && evt.segment.is_final) || evt.type === 'transcript-final'));
-            console.log('TRANSCRIPT SUMMARY →', { isFinal, text });
+            const text = getText(evt);
+            const finalFlag = isFinal(evt);
+            console.log('[bridge] transcript:', { event: ev, final: finalFlag, text });
+            handlePartialMaybeFinal(session, text, finalFlag);
           } catch (e) {
-            console.warn('Transcript log error:', e);
+            console.warn('[bridge] transcript handler error:', e);
           }
-        })
-      );
+        }));
 
-      POSSIBLE_VAD_EVENTS.forEach(ev =>
-        safeOn(ev, () => console.log(`RAW VAD EVENT: ${ev}`))
-      );
+        setStatus('ready');
+      }
 
-      setBridgeStatus('debugging (check Console)');
-    });
+      // Auto-attach when someone assigns window.myDidSession
+      Object.defineProperty(window, 'myDidSession', {
+        configurable: true,
+        set(v){ console.log('[bridge] myDidSession set'); attach(v); this._did=v; },
+        get(){ return this._did; }
+      });
 
-    // Stub button for later (we’ll replace with the exact brain bridge after we see payloads)
-    initBridgeBtn.addEventListener('click', () => {
-      if (!window.myDidSession) { alert("D-ID session not found. Init your session and set window.myDidSession."); return; }
-      setBridgeStatus('bridge will be enabled after we confirm event shape');
-      console.log('[bridge] waiting on transcript payload shape to finalize wiring');
-    });
+      // If session was set before this script, re-set to trigger setter
+      if (window._did) attach(window._did);
+      if (window.myDidSession && !window._did) { const s = window.myDidSession; delete window.myDidSession; window.myDidSession = s; }
+    })();
   </script>
 
   <!--
-    IMPORTANT: After your D-ID client connects, set:
+    IMPORTANT: After your D-ID client connects (wherever you run it),
+    set this on the page so the bridge can attach:
+
       window.myDidSession = <your live session object>;
 
-    Example (pseudo, not included here):
+    Example (pseudo):
       const session = await DID.connect({...});
       window.myDidSession = session;
+
+    The session should expose:
+      - .on(event, handler)  (or addEventListener)
+      - .speak({ text })
+      - .stopSpeaking()  (or .cancel())
   -->
 </body>
 </html>
