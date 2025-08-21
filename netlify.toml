@@ -16,6 +16,11 @@
   from = "/api/ingest"
   to = "/.netlify/functions/ingest"
   status = 200
+  
+[[redirects]]
+  from = "/api/start-voice"
+  to   = "/.netlify/functions/start-voice"
+  status = 200
 
 [[headers]]
   for = "/embed/*"
