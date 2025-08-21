@@ -1,141 +1,120 @@
-// netlify/functions/ingest.mjs
-import { createClient } from "@supabase/supabase-js";
+// Ingest knowledge text into kb_chunks with OpenAI embeddings.
+// Add ?dry=1 to do everything except DB insert (smoke test).
 
-// --- ENV ---
-const SUPABASE_URL = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_ROLE = process.env.SUPABASE_SERVICE_ROLE;
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const EMBED_MODEL = process.env.EMBED_MODEL || "text-embedding-3-small"; // 1536 dims
+const { SUPABASE_URL, SUPABASE_SERVICE_ROLE, OPENAI_API_KEY, EMBED_MODEL } = process.env;
 
-// --- Clients & constants ---
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE);
-const jsonHeaders = { "Content-Type": "application/json" };
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Access-Control-Allow-Methods": "OPTIONS, POST",
+};
 
-// Tune for reliability
-const MAX_CHARS = 1500;      // target ~1–1.5k chars per chunk
-const CHUNK_DELAY_MS = 200;  // throttle between chunks to avoid 429s
+export async function handler(event) {
+  if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers: CORS };
 
-// --- Helpers ---
-function chunkText(t, size = MAX_CHARS) {
-  const out = [];
-  for (let i = 0; i < t.length; i += size) out.push(t.slice(i, i + size));
-  return out;
-}
-
-async function sleep(ms) {
-  return new Promise((r) => setTimeout(r, ms));
-}
-
-async function embed(text) {
-  const r = await fetch("https://api.openai.com/v1/embeddings", {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
-    },
-    body: JSON.stringify({ model: EMBED_MODEL, input: text }),
-  });
-
-  // Try to parse JSON either way so we can show helpful errors
-  let j = {};
   try {
-    j = await r.json();
-  } catch (_) {
-    /* no-op */
-  }
+    const dry = (new URLSearchParams(event.queryStringParameters || {})).get("dry") === "1";
 
-  if (!r.ok) {
-    const msg =
-      j?.error?.message || `OpenAI embeddings failed (status ${r.status})`;
-    throw new Error(msg);
+    let body = {};
+    try { body = JSON.parse(event.body || "{}"); } catch {}
+    const title = String(body?.title ?? "").trim();
+    const source = String(body?.source ?? "keilani").trim() || "keilani";
+    const raw = body?.text;
+    const text = typeof raw === "string" ? raw : (raw == null ? "" : String(raw));
+
+    if (!title || !text.trim()) return json(400, { ok: false, error: "Missing title or text", dry }, CORS);
+
+    // chunk text
+    const chunks = chunkText(text, { maxChars: 1400, minChars: 600, overlap: 120 });
+    if (chunks.length === 0) return json(200, { ok: true, inserted: 0, dry }, CORS);
+
+    // embed
+    const embeds = await embedMany(chunks);
+    if (!Array.isArray(embeds) || embeds.length !== chunks.length) throw stageErr("embed", "embedding count mismatch");
+
+    if (dry) return json(200, { ok: true, inserted: chunks.length, dry: true }, CORS);
+
+    // insert
+    const rows = chunks.map((content, i) => ({ title, source, content, embedding: embeds[i] }));
+    const ins = await supaInsert("kb_chunks", rows);
+    const inserted = Array.isArray(ins) ? ins.length : (ins?.length ?? rows.length);
+
+    return json(200, { ok: true, inserted, dry: false }, CORS);
+  } catch (e) {
+    return json(500, { ok: false, error: String(e?.message || e) }, CORS);
   }
-  const vec = j?.data?.[0]?.embedding;
-  if (!Array.isArray(vec)) {
-    throw new Error("OpenAI returned no embedding");
-  }
-  return vec;
 }
 
-// 1536 zeros for dry-run to match text-embedding-3-small dims
-function dummyEmbedding(len = 1536) {
-  return Array.from({ length: len }, () => 0);
+// -------- helpers --------
+function json(status, obj, headers={}) {
+  return { statusCode: status, headers: { "Content-Type": "application/json", ...headers }, body: JSON.stringify(obj) };
 }
+function stageErr(stage, msg){ const err = new Error(`[${stage}] ${msg}`); err.stage = stage; return err; }
 
-// --- Handler ---
-export default async function handler(request) {
-  try {
-    if (request.method !== "POST") {
-      return new Response(JSON.stringify({ error: "POST only" }), {
-        status: 405,
-        headers: jsonHeaders,
-      });
-    }
+function chunkText(text, { maxChars = 1400, minChars = 600, overlap = 120 } = {}) {
+  const norm = text.replace(/\r\n/g, "\n").replace(/\t/g, "  ").trim();
+  const paras = norm.split(/\n{2,}/g).map(p => p.trim()).filter(Boolean);
+  const chunks = [];
+  let buf = "";
 
-    const url = new URL(request.url);
-    const dry = url.searchParams.get("dry") === "1";
+  const push = (s) => { const t = s.trim(); if (t.length) chunks.push(t); };
 
-    // Parse body and coerce text to a string
-    const body = await request.json();
-    let { title = "untitled", source = "manual", text } = body || {};
-
-    if (Array.isArray(text)) {
-      text = text.join("\n"); // arrived as lines
-    } else if (text == null) {
-      text = ""; // null/undefined
-    } else if (typeof text !== "string") {
-      text = String(text); // numbers/objects → string
-    }
-
-    // Normalize line endings
-    text = text.replace(/\r\n/g, "\n");
-
-    if (!text || !text.trim()) {
-      return new Response(
-        JSON.stringify({ error: "No text (empty after coercion)" }),
-        { status: 400, headers: jsonHeaders }
-      );
-    }
-
-    // Chunk the text
-    const chunks = chunkText(text);
-    const rows = [];
-
-    // For each chunk, get embedding (or dummy) and stage row
-    for (let i = 0; i < chunks.length; i++) {
-      const c = chunks[i];
-      try {
-        const e = dry ? dummyEmbedding() : await embed(c);
-        rows.push({ title, source, chunk: c, embedding: e });
-        if (!dry) await sleep(CHUNK_DELAY_MS);
-      } catch (err) {
-        // Be explicit about which chunk failed
-        return new Response(
-          JSON.stringify({
-            error: `Chunk ${i + 1}/${chunks.length} failed: ${
-              err?.message || String(err)
-            }`,
-          }),
-          { status: 500, headers: jsonHeaders }
-        );
+  for (const p of paras) {
+    if ((buf + "\n\n" + p).length <= maxChars) {
+      buf = buf ? (buf + "\n\n" + p) : p;
+    } else {
+      if (buf.length >= minChars) {
+        push(buf);
+        const tail = buf.slice(-overlap);
+        buf = (tail + "\n\n" + p).slice(0, maxChars);
+      } else {
+        let start = 0;
+        while (start < p.length) {
+          const end = Math.min(start + maxChars, p.length);
+          const piece = p.slice(start, end);
+          if (piece.length >= minChars || end === p.length) push(piece);
+          start = end - Math.min(overlap, piece.length);
+          if (start < 0) start = 0;
+          if (start >= p.length) break;
+        }
+        buf = "";
       }
     }
-
-    // Insert into Supabase
-    const { data, error } = await supabase
-      .from("kb_chunks")
-      .insert(rows)
-      .select("id");
-    if (error) throw error;
-
-    return new Response(JSON.stringify({ ok: true, inserted: data.length, dry }), {
-      status: 200,
-      headers: jsonHeaders,
-    });
-  } catch (err) {
-    console.error(err);
-    return new Response(JSON.stringify({ error: String(err?.message || err) }), {
-      status: 500,
-      headers: jsonHeaders,
-    });
   }
+  if (buf.length) push(buf);
+  return chunks;
+}
+
+async function embedMany(texts) {
+  if (!OPENAI_API_KEY) throw stageErr("embed", "OPENAI_API_KEY missing");
+  if (!EMBED_MODEL) throw stageErr("embed", "EMBED_MODEL missing");
+
+  const resp = await fetch("https://api.openai.com/v1/embeddings", {
+    method: "POST",
+    headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
+    body: JSON.stringify({ model: EMBED_MODEL, input: texts }),
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw stageErr("embed", data?.error?.message || `HTTP ${resp.status}`);
+
+  const dims = data?.data?.[0]?.embedding?.length || 0;
+  if (dims !== 1536) console.warn("Embedding dims:", dims, "— ensure DB vector(1536) matches EMBED_MODEL.");
+  return (data?.data || []).map(d => d.embedding);
+}
+
+async function supaInsert(table, rows) {
+  if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE) throw stageErr("insert", "Supabase env missing");
+  const resp = await fetch(`${SUPABASE_URL}/rest/v1/${table}`, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      apikey: SUPABASE_SERVICE_ROLE,
+      Authorization: `Bearer ${SUPABASE_SERVICE_ROLE}`,
+      Prefer: "return=representation",
+    },
+    body: JSON.stringify(rows),
+  });
+  const data = await resp.json().catch(() => ({}));
+  if (!resp.ok) throw stageErr("insert", data?.message || data?.error || `HTTP ${resp.status}`);
+  return data;
 }

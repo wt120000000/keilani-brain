@@ -1,9 +1,7 @@
 [build]
   command = "npm run build"
-  functions = "netlify/functions"
-  publish = "public"  # or your front-end build dir if you have one
+  publish = "public"
 
-# Optional: make pretty URLs like /api/chat
 [[redirects]]
   from = "/api/chat"
   to = "/.netlify/functions/chat"
@@ -14,7 +12,9 @@
   to = "/.netlify/functions/ingest"
   status = 200
 
-[[redirects]]
-  from = "/api/health"
-  to = "/.netlify/functions/health"
-  status = 200
+# If you embed from Framer, these headers help frames work:
+[[headers]]
+  for = "/embed/*"
+  [headers.values]
+    X-Frame-Options = "ALLOWALL"
+    Content-Security-Policy = "frame-ancestors https://*.framer.app https://keilani.ai https://www.keilani.ai 'self';"
