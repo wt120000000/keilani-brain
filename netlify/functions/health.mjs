@@ -1,28 +1,21 @@
-// Minimal health check (ESM)
-export const handler = async () => {
-  const hasSupabaseKey =
-    !!(process.env.SUPABASE_SERVICE_ROLE || process.env.SUPABASE_KEY);
+// /netlify/functions/health.mjs
 
-  const whichKey =
-    process.env.SUPABASE_SERVICE_ROLE
-      ? "SUPABASE_SERVICE_ROLE"
-      : (process.env.SUPABASE_KEY ? "SUPABASE_KEY" : null);
+export async function handler() {
+  const checks = {
+    openai: !!process.env.OPENAI_API_KEY,
+    supabaseUrl: !!process.env.SUPABASE_URL,
+    supabaseKey: !!process.env.SUPABASE_SERVICE_ROLE_KEY,
+    didApiKey: !!process.env.DID_API_KEY, // 👈 New check
+  };
+
+  const allGood = Object.values(checks).every(Boolean);
 
   return {
-    statusCode: 200,
-    headers: {
-      "Content-Type": "application/json",
-      "Cache-Control": "no-store",
-    },
+    statusCode: allGood ? 200 : 500,
     body: JSON.stringify({
-      ok: true,
-      env: {
-        OPENAI_API_KEY: !!process.env.OPENAI_API_KEY,
-        SUPABASE_URL: !!process.env.SUPABASE_URL,
-        SUPABASE_KEY: hasSupabaseKey,       // true if either var is set
-        SUPABASE_WHICH: whichKey,           // which one was found
-        NODE_VERSION: process.env.NODE_VERSION || null,
-      },
+      ok: allGood,
+      checks,
     }),
   };
-};
+}
+
