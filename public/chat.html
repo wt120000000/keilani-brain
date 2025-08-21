@@ -1,0 +1,88 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Keilani Chat</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    body { font: 16px/1.4 system-ui, sans-serif; margin: 2rem; max-width: 720px }
+    .row { display:flex; gap:.5rem; margin-top:1rem }
+    input { flex:1; padding:.6rem .8rem }
+    button { padding:.6rem 1rem; cursor:pointer }
+    .msg { padding:.6rem .8rem; border-radius:.6rem; margin-top:.5rem; white-space:pre-wrap }
+    .me { background:#eef } .ai { background:#efe } .sys { background:#f8f8f8; color:#555 }
+  </style>
+</head>
+<body>
+  <h1>Keilani Chat</h1>
+  <div id="log" class="msg sys">Ready.</div>
+  <div id="thread"></div>
+
+  <div class="row">
+    <input id="msg" placeholder="Say hi…" autofocus />
+    <button id="sendBtn">Send</button>
+  </div>
+
+  <script type="module">
+    // Same-origin by default; set to your prod URL if embedding from another domain.
+    const API_BASE = ""; // e.g. "https://keilani-brain.netlify.app"
+
+    const thread = document.querySelector("#thread");
+    const log = document.querySelector("#log");
+    const input = document.querySelector("#msg");
+    const btn = document.querySelector("#sendBtn");
+
+    const userId = localStorage.getItem("kb_user") || (() => {
+      const id = (crypto.randomUUID && crypto.randomUUID()) || String(Date.now());
+      localStorage.setItem("kb_user", id);
+      return id;
+    })();
+
+    function addBubble(text, who) {
+      const div = document.createElement("div");
+      div.className = "msg " + who;
+      div.textContent = text;
+      thread.appendChild(div);
+      div.scrollIntoView({ behavior: "smooth", block: "end" });
+    }
+    const setLog = (t) => log.textContent = t;
+
+    async function sendChat(message) {
+      const res = await fetch((API_BASE || "") + "/api/chat", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "x-request-id": crypto.randomUUID?.() || String(Date.now()) },
+        body: JSON.stringify({ userId, message })
+      });
+      const text = await res.text();
+      let data; try { data = JSON.parse(text); } catch {}
+      if (!res.ok) throw new Error(`API ${data?.stage || "error"}: ${data?.error || text}`);
+      return data;
+    }
+
+    async function onSend() {
+      const message = (input.value || "").trim();
+      if (!message) return;
+      input.value = ""; input.focus();
+
+      addBubble(message, "me");
+      btn.disabled = true; btn.textContent = "Sending…"; setLog("Calling /api/chat…");
+      try {
+        const data = await sendChat(message);
+        addBubble(data.reply || "(no reply)", "ai");
+        setLog("OK • " + (data.meta?.model || "model"));
+      } catch (e) {
+        console.error(e);
+        addBubble("Oops: " + e.message, "sys");
+        setLog("Error — see console.");
+      } finally {
+        btn.disabled = false; btn.textContent = "Send";
+      }
+    }
+
+    btn.addEventListener("click", onSend);
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter" && !e.shiftKey) onSend();
+    });
+  </script>
+</body>
+</html>
