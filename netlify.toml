@@ -4,9 +4,8 @@
 
 [functions]
   node_bundler = "esbuild"
-  # optional but recommended to force Node 20 runtime
+  # optional: list deps to keep external (usually not needed)
   external_node_modules = []
-  node_version = "20"
 
 [[redirects]]
   from = "/api/chat"
@@ -18,7 +17,6 @@
   to = "/.netlify/functions/ingest"
   status = 200
 
-# If you embed from Framer, these headers help frames work:
 [[headers]]
   for = "/embed/*"
   [headers.values]

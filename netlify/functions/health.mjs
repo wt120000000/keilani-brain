@@ -1,10 +1,15 @@
-export default async function handler() {
-  const ok = {
-    has_OPENAI_API_KEY: !!process.env.OPENAI_API_KEY,
-    has_OPENAI_MODEL: !!process.env.OPENAI_MODEL,
-    has_EMBED_MODEL: !!process.env.EMBED_MODEL,
-    has_SUPABASE_URL: !!process.env.SUPABASE_URL,
-    has_SUPABASE_SERVICE_ROLE: !!process.env.SUPABASE_SERVICE_ROLE,
+export const handler = async () => {
+  return {
+    statusCode: 200,
+    headers: { "Content-Type": "application/json", "Cache-Control": "no-store" },
+    body: JSON.stringify({
+      ok: true,
+      env: {
+        OPENAI_API_KEY: !!process.env.OPENAI_API_KEY,
+        SUPABASE_URL: !!process.env.SUPABASE_URL,
+        SUPABASE_KEY: !!process.env.SUPABASE_KEY,
+        NODE_VERSION: process.env.NODE_VERSION || null,
+      },
+    }),
   };
-  return new Response(JSON.stringify(ok), { status: 200, headers: { "Content-Type": "application/json" } });
-}
+};
