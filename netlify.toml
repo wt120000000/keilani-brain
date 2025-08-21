@@ -2,6 +2,12 @@
   command = "npm run build"
   publish = "public"
 
+[functions]
+  node_bundler = "esbuild"
+  # optional but recommended to force Node 20 runtime
+  external_node_modules = []
+  node_version = "20"
+
 [[redirects]]
   from = "/api/chat"
   to = "/.netlify/functions/chat"
