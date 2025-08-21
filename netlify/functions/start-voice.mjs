@@ -15,28 +15,39 @@ export const handler = async (event) => {
 
   const DID_API_KEY  = process.env.DID_API_KEY;
   const DID_AGENT_ID = process.env.DID_AGENT_ID;
+  const SOURCE_URL   = process.env.DID_PRESENTER_IMAGE_URL; // 👈 use presenter image
+  const VOICE_PROVIDER = process.env.DID_VOICE_PROVIDER || "elevenlabs";
+  const VOICE_ID       = process.env.DID_VOICE_ID || "";
 
   console.log("start-voice env:", {
     DID_API_KEY: redact(DID_API_KEY),
     DID_AGENT_ID: DID_AGENT_ID ? "SET" : "MISSING",
+    SOURCE_URL: SOURCE_URL ? "SET" : "MISSING",
+    VOICE_PROVIDER, VOICE_ID: VOICE_ID ? "SET" : "MISSING",
   });
 
-  if (!DID_API_KEY || !DID_AGENT_ID) {
-    return { statusCode: 500, headers: cors, body: JSON.stringify({ ok:false, stage:"env", error:"Missing DID_API_KEY or DID_AGENT_ID" }) };
+  if (!DID_API_KEY || !DID_AGENT_ID || !SOURCE_URL) {
+    return { statusCode: 500, headers: cors, body: JSON.stringify({ ok:false, stage:"env", error:"Missing DID_API_KEY or DID_AGENT_ID or DID_PRESENTER_IMAGE_URL" }) };
   }
 
-  // Basic auth is apiKey + ":" (no password)
   const basic = Buffer.from(`${DID_API_KEY}:`).toString("base64");
 
   try {
     const url = `https://api.d-id.com/agents/${encodeURIComponent(DID_AGENT_ID)}/streams`;
+    const body = {
+      // Use the presenter image directly so the stream has a valid face
+      source_url: SOURCE_URL,
+      // Set Keilani's ElevenLabs voice
+      voice: VOICE_ID ? { provider: VOICE_PROVIDER, voice_id: VOICE_ID } : undefined,
+    };
+
     const r = await fetch(url, {
       method: "POST",
       headers: {
         "Authorization": `Basic ${basic}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({}),
+      body: JSON.stringify(body),
     });
 
     const text = await r.text();
@@ -53,8 +64,6 @@ export const handler = async (event) => {
     }
 
     const { id, stream_id, session_id, sdp } = json || {};
-    if (!sdp?.sdp) console.warn("No SDP in D-ID response:", json);
-
     return {
       statusCode: 200,
       headers: { ...cors, "Content-Type": "application/json" },
