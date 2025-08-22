@@ -22,71 +22,103 @@
       <h1>Keilani Engage</h1>
     </div>
 
-    <div class="card" id="status">
-      <div><strong>Status:</strong> Page loaded. Bridge ready.</div>
-      <div class="small">
-        Tip: add <code>?mock=1</code> to the URL to simulate speech without D‑ID.
-      </div>
-    </div>
+    <div class="card" id="status"><strong>Status:</strong> Page loaded. Bridge ready.</div>
 
-    <div id="ui"></div>
+    <!-- Video + quick test UI -->
+    <div id="ui" class="card" style="margin-top:12px;">
+      <div style="margin-bottom:10px;"><strong>Avatar Stream</strong></div>
+      <!-- video will be injected here by the SDK block -->
+      <form id="ask" style="margin-top:12px; display:flex; gap:8px;">
+        <input id="prompt" type="text" placeholder="Type something for Keilani…" style="flex:1; padding:8px; border-radius:8px; border:1px solid rgba(255,255,255,.15); background:#0b0b0b; color:#fff;">
+        <button type="submit" style="padding:8px 12px; border-radius:8px; border:1px solid rgba(255,255,255,.15); background:#111; color:#fff; cursor:pointer;">Send</button>
+      </form>
+      <div class="small" style="margin-top:8px;">Tip: first click may be required for audio playback (browser policy).</div>
+    </div>
   </div>
 
-  <!-- your bridge code -->
+  <!-- Our bridge logic -->
   <script src="/brain-bridge.js"></script>
 
-  <!-- Mock session (opt-in via ?mock=1) -->
-  <script>
-    (function () {
-      const params = new URLSearchParams(location.search);
-      if (params.get('mock') !== '1') return;            // only run in mock mode
-      if (window.__bridgeMockLoaded) return;             // guard against duplicates
-      window.__bridgeMockLoaded = true;
+  <!-- D‑ID Agents SDK (recommended path) -->
+  <script type="module">
+    import * as sdk from "https://cdn.jsdelivr.net/npm/@d-id/client-sdk/+esm";
 
-      // Simple mock that mimics your D‑ID session API surface
-      const mock = window.mockSession = window.mockSession || {
-        speak: async ({ text }) => {
-          console.log("[mockSession.speak]", text);
-          const s = document.getElementById("status");
-          if (s) s.innerHTML = "<strong>Status:</strong> Speaking: " + text;
-          await new Promise(r => setTimeout(r, Math.min(1500, 200 + text.length * 20)));
-          if (s) s.innerHTML = "<strong>Status:</strong> idle";
-        },
-        stopSpeaking: async () => console.log("[mockSession.stopSpeaking]"),
-        _handlers: {},
-        on(event, handler) {
-          (this._handlers[event] ||= []).push(handler);
-          console.log("[mockSession.on]", event);
-        },
-        emit(event, payload) {
-          (this._handlers[event] || []).forEach(h => h(payload));
-        }
-      };
+    // Use your existing Agent + Client Key (safe for frontend; restrict domains in D‑ID Studio)
+    const agentId   = "v2_agt_shuxsy-b";
+    const clientKey = "Z29vZ2xlLW9hdXRoMnwxMDk2NTE3NDAzNTg3NDIxNzA0Mzk6ZDdiZEFBMThxN05DWVRPQzBZUkdV";
 
-      // Initialize bridge with status hook
-      initBrainBridge(mock, {
-        onStatus: (s) => {
-          const el = document.getElementById("status");
-          if (el) el.innerHTML = "<strong>Status:</strong> " + s;
-        }
-      });
+    // Create a video element to render the WebRTC stream
+    const videoEl = document.createElement("video");
+    videoEl.setAttribute("playsinline", "");
+    videoEl.autoplay = true;
+    videoEl.muted = false; // user gesture may still be required
+    videoEl.style.width = "480px";
+    videoEl.style.maxWidth = "100%";
+    const ui = document.getElementById("ui");
+    ui.prepend(videoEl);
 
-      // Click anywhere to simulate a user utterance → final transcript
-      document.addEventListener("click", () => {
-        mock.emit("vad-start");
-        setTimeout(() => mock.emit("transcript", { isFinal: true, text: "Hey Keilani, say hi!" }), 600);
-      });
-    })();
-  </script>
+    // Update page status helper
+    const setStatus = (txt) => {
+      const s = document.getElementById("status");
+      if (s) s.innerHTML = "<strong>Status:</strong> " + txt;
+    };
 
-  <!-- Example: when you have a real D‑ID session object, call:
-  <script>
-    // after you create/connect the D‑ID session:  const session = ...
+    // SDK callbacks
+    const callbacks = {
+      onSrcObjectReady: (src) => { videoEl.srcObject = src; return src; },
+      onConnectionStateChange: (state) => { setStatus(state); console.log("[D‑ID] state:", state); },
+      onError: (err, data) => { console.error("[D‑ID] error:", err, data); setStatus("error – see console"); }
+    };
+
+    // Connect to your Agent
+    const auth = { type: "key", clientKey };
+    const streamOptions = { compatibilityMode: "auto", streamWarmup: true };
+    const agentManager = await sdk.createAgentManager(agentId, { auth, callbacks, streamOptions });
+    await agentManager.connect();
+
+    // Adapt to the bridge "session" API (speak/stopSpeaking)
+    const session = {
+      speak: ({ text }) => agentManager.speak({ type: "text", input: text }),
+      stopSpeaking: () => Promise.resolve() // or agentManager.disconnect() for hard stop
+    };
+
+    // Initialize our bridge for status updates (we'll feed it text via the form below)
     initBrainBridge(session, {
-      onStatus: (s) => { document.getElementById('status').innerHTML = "<strong>Status:</strong> " + s; },
-      // events: { transcript: 'speech', userStartTalking: 'voice-activity-start', connected: 'connected', error: 'error' }
+      onStatus: setStatus
     });
+
+    // Minimal test loop: submit text → /api/chat → session.speak(reply)
+    document.getElementById("ask").addEventListener("submit", async (e) => {
+      e.preventDefault();
+      const input = document.getElementById("prompt");
+      const text = (input.value || "").trim();
+      if (!text) return;
+
+      setStatus("thinking…");
+      try {
+        const resp = await fetch("/api/chat?threshold=0.6&count=8", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userId: "00000000-0000-0000-0000-000000000001", message: text })
+        });
+        const data = await resp.json().catch(() => ({}));
+        const reply = (data.reply || "Got it.").trim();
+        await session.speak({ text: reply });
+        setStatus("idle");
+      } catch (err) {
+        console.error(err);
+        setStatus("error – chat failed");
+      } finally {
+        input.value = "";
+      }
+    });
+
+    // Autoplay unlock: first click anywhere will try to play audio if blocked
+    document.addEventListener("click", () => {
+      if (videoEl.paused) videoEl.play().catch(() => {});
+    }, { once: true });
   </script>
-  -->
+
+  <!-- NOTE: Do NOT include the floating embedded widget tag (agent.d-id.com/v2/index.js) at the same time. -->
 </body>
 </html>
