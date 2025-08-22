@@ -22,12 +22,17 @@
       <h1>Keilani Engage</h1>
     </div>
 
-    <div class="card" id="status"><strong>Status:</strong> Page loaded. Bridge ready.</div>
+    <div class="card" id="status"><strong>Status:</strong> idle</div>
 
-    <!-- Video + quick test UI -->
     <div id="ui" class="card" style="margin-top:12px;">
       <div style="margin-bottom:10px;"><strong>Avatar Stream</strong></div>
-      <!-- video will be injected here by the SDK block -->
+
+      <!-- Audio unlock button (autoplay policy) -->
+      <button id="enable-audio" style="margin-bottom:10px; padding:8px 12px; border-radius:8px; border:1px solid rgba(255,255,255,.15); background:#111; color:#fff; cursor:pointer;">
+        ▶️ Start audio
+      </button>
+
+      <!-- Test form: send text → /api/chat → speak(reply) -->
       <form id="ask" style="margin-top:12px; display:flex; gap:8px;">
         <input id="prompt" type="text" placeholder="Type something for Keilani…" style="flex:1; padding:8px; border-radius:8px; border:1px solid rgba(255,255,255,.15); background:#0b0b0b; color:#fff;">
         <button type="submit" style="padding:8px 12px; border-radius:8px; border:1px solid rgba(255,255,255,.15); background:#111; color:#fff; cursor:pointer;">Send</button>
@@ -43,51 +48,66 @@
   <script type="module">
     import * as sdk from "https://cdn.jsdelivr.net/npm/@d-id/client-sdk/+esm";
 
-    // Use your existing Agent + Client Key (safe for frontend; restrict domains in D‑ID Studio)
+    // Your Agent + Client Key (safe for frontend; restrict domains in D‑ID Studio)
     const agentId   = "v2_agt_shuxsy-b";
     const clientKey = "Z29vZ2xlLW9hdXRoMnwxMDk2NTE3NDAzNTg3NDIxNzA0Mzk6ZDdiZEFBMThxN05DWVRPQzBZUkdV";
 
-    // Create a video element to render the WebRTC stream
+    // Create video for the WebRTC stream
     const videoEl = document.createElement("video");
     videoEl.setAttribute("playsinline", "");
     videoEl.autoplay = true;
-    videoEl.muted = false; // user gesture may still be required
+    videoEl.muted = true; // start muted; we’ll unmute after user gesture
     videoEl.style.width = "480px";
     videoEl.style.maxWidth = "100%";
-    const ui = document.getElementById("ui");
-    ui.prepend(videoEl);
+    document.getElementById("ui").prepend(videoEl);
 
-    // Update page status helper
     const setStatus = (txt) => {
       const s = document.getElementById("status");
       if (s) s.innerHTML = "<strong>Status:</strong> " + txt;
     };
 
-    // SDK callbacks
     const callbacks = {
       onSrcObjectReady: (src) => { videoEl.srcObject = src; return src; },
       onConnectionStateChange: (state) => { setStatus(state); console.log("[D‑ID] state:", state); },
       onError: (err, data) => { console.error("[D‑ID] error:", err, data); setStatus("error – see console"); }
     };
 
-    // Connect to your Agent
     const auth = { type: "key", clientKey };
     const streamOptions = { compatibilityMode: "auto", streamWarmup: true };
+
     const agentManager = await sdk.createAgentManager(agentId, { auth, callbacks, streamOptions });
     await agentManager.connect();
 
-    // Adapt to the bridge "session" API (speak/stopSpeaking)
+    // Adapt to bridge "session" API
     const session = {
       speak: ({ text }) => agentManager.speak({ type: "text", input: text }),
-      stopSpeaking: () => Promise.resolve() // or agentManager.disconnect() for hard stop
+      stopSpeaking: () => Promise.resolve() // swap to agentManager.disconnect() for hard stop if desired
     };
 
-    // Initialize our bridge for status updates (we'll feed it text via the form below)
-    initBrainBridge(session, {
-      onStatus: setStatus
-    });
+    // Initialize our bridge (status UI)
+    initBrainBridge(session, { onStatus: setStatus });
 
-    // Minimal test loop: submit text → /api/chat → session.speak(reply)
+    // Audio unlocks
+    document.addEventListener("click", () => {
+      if (videoEl.paused) videoEl.play().catch(() => {});
+    }, { once: true });
+
+    const btn = document.getElementById("enable-audio");
+    if (btn) {
+      btn.addEventListener("click", async () => {
+        try {
+          videoEl.muted = false;
+          await videoEl.play();
+          btn.textContent = "✅ Audio enabled";
+          btn.disabled = true;
+        } catch (e) {
+          console.error("Audio unlock failed:", e);
+          btn.textContent = "Retry start audio";
+        }
+      });
+    }
+
+    // Simple test loop: text → /api/chat → speak(reply)
     document.getElementById("ask").addEventListener("submit", async (e) => {
       e.preventDefault();
       const input = document.getElementById("prompt");
@@ -112,13 +132,8 @@
         input.value = "";
       }
     });
-
-    // Autoplay unlock: first click anywhere will try to play audio if blocked
-    document.addEventListener("click", () => {
-      if (videoEl.paused) videoEl.play().catch(() => {});
-    }, { once: true });
   </script>
 
-  <!-- NOTE: Do NOT include the floating embedded widget tag (agent.d-id.com/v2/index.js) at the same time. -->
+  <!-- IMPORTANT: Do NOT also include the floating embedded widget (agent.d-id.com/v2/index.js). -->
 </body>
 </html>
