@@ -23,67 +23,70 @@
     </div>
 
     <div class="card" id="status">
-      <div><strong>Status:</strong> Loading…</div>
-      <div class="small">Open DevTools → Console for logs.</div>
+      <div><strong>Status:</strong> Page loaded. Bridge ready.</div>
+      <div class="small">
+        Tip: add <code>?mock=1</code> to the URL to simulate speech without D‑ID.
+      </div>
     </div>
 
     <div id="ui"></div>
   </div>
 
+  <!-- your bridge code -->
   <script src="/brain-bridge.js"></script>
+
+  <!-- Mock session (opt-in via ?mock=1) -->
   <script>
-  // --- MOCK SESSION FOR SMOKE-TESTING ONLY ---
-  // It pretends to be your D‑ID session so we can prove the bridge works.
-  const mockSession = {
-    // bridge will call this to speak; we just log it for now
-    speak: async ({ text }) => {
-      console.log("[mockSession.speak]", text);
-      const s = document.getElementById("status");
-      if (s) s.innerHTML = "<strong>Status:</strong> Speaking: " + text;
-      await new Promise(r => setTimeout(r, Math.min(1500, 200 + text.length * 20)));
-      if (s) s.innerHTML = "<strong>Status:</strong> idle";
-    },
-    stopSpeaking: async () => console.log("[mockSession.stopSpeaking]"),
-
-    // a minimal event bus so we can fire fake transcript events
-    _handlers: {},
-    on(event, handler) {
-      (this._handlers[event] ||= []).push(handler);
-      console.log("[mockSession.on]", event);
-    },
-    emit(event, payload) {
-      (this._handlers[event] || []).forEach(h => h(payload));
-    }
-  };
-
-  // Initialize the bridge
-  const bridge = initBrainBridge(mockSession, {
-    onStatus: (s) => {
-      const el = document.getElementById("status");
-      if (el) el.innerHTML = "<strong>Status:</strong> " + s;
-    }
-  });
-
-  // Demo: simulate user speech → final transcript → brain reply
-  // Click anywhere to trigger a fake final transcript
-  document.addEventListener("click", () => {
-    console.log("[mock] user starts talking");
-    mockSession.emit("vad-start");
-    // after a beat, emit a FINAL transcript event with some text
-    setTimeout(() => {
-      console.log("[mock] final transcript emitted");
-      mockSession.emit("transcript", { isFinal: true, text: "Hey Keilani, say hi!" });
-    }, 600);
-  });
-</script>
-
-  <script>
-    // simple “it loaded” indicator
     (function () {
-      const s = document.getElementById('status');
-      if (s) s.innerHTML = "<strong>Status:</strong> Page loaded. Bridge ready.";
-      console.log("[Engage] page loaded");
+      const params = new URLSearchParams(location.search);
+      if (params.get('mock') !== '1') return;            // only run in mock mode
+      if (window.__bridgeMockLoaded) return;             // guard against duplicates
+      window.__bridgeMockLoaded = true;
+
+      // Simple mock that mimics your D‑ID session API surface
+      const mock = window.mockSession = window.mockSession || {
+        speak: async ({ text }) => {
+          console.log("[mockSession.speak]", text);
+          const s = document.getElementById("status");
+          if (s) s.innerHTML = "<strong>Status:</strong> Speaking: " + text;
+          await new Promise(r => setTimeout(r, Math.min(1500, 200 + text.length * 20)));
+          if (s) s.innerHTML = "<strong>Status:</strong> idle";
+        },
+        stopSpeaking: async () => console.log("[mockSession.stopSpeaking]"),
+        _handlers: {},
+        on(event, handler) {
+          (this._handlers[event] ||= []).push(handler);
+          console.log("[mockSession.on]", event);
+        },
+        emit(event, payload) {
+          (this._handlers[event] || []).forEach(h => h(payload));
+        }
+      };
+
+      // Initialize bridge with status hook
+      initBrainBridge(mock, {
+        onStatus: (s) => {
+          const el = document.getElementById("status");
+          if (el) el.innerHTML = "<strong>Status:</strong> " + s;
+        }
+      });
+
+      // Click anywhere to simulate a user utterance → final transcript
+      document.addEventListener("click", () => {
+        mock.emit("vad-start");
+        setTimeout(() => mock.emit("transcript", { isFinal: true, text: "Hey Keilani, say hi!" }), 600);
+      });
     })();
   </script>
+
+  <!-- Example: when you have a real D‑ID session object, call:
+  <script>
+    // after you create/connect the D‑ID session:  const session = ...
+    initBrainBridge(session, {
+      onStatus: (s) => { document.getElementById('status').innerHTML = "<strong>Status:</strong> " + s; },
+      // events: { transcript: 'speech', userStartTalking: 'voice-activity-start', connected: 'connected', error: 'error' }
+    });
+  </script>
+  -->
 </body>
 </html>
