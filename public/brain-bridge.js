@@ -1,5 +1,4 @@
-<!-- public/brain-bridge.js -->
-<script>
+// public/brain-bridge.js
 /**
  * Keilani Brain Bridge for D-ID
  * - Normalizes transcript events
@@ -20,11 +19,6 @@
     },
     // How to detect "final" transcript. Adjust to your SDK’s payload.
     isFinalTranscript(evt) {
-      // Common patterns to try:
-      // 1) evt.isFinal === true
-      // 2) evt.type === 'transcript-final'
-      // 3) evt.final === true
-      // 4) evt.segment?.is_final === true
       return evt?.isFinal === true
           || evt?.final === true
           || evt?.type === "transcript-final"
@@ -37,7 +31,6 @@
     // How to speak with your session
     async speak(session, text) {
       // Replace with your real SDK call if different:
-      // examples: session.speak({ text }), player.talk(text), session.send({ type:'speak', text })
       return session.speak({ text });
     },
     // How to stop speaking (barge-in)
@@ -45,7 +38,6 @@
       if (typeof session.stopSpeaking === "function") {
         try { await session.stopSpeaking(); } catch {}
       }
-      // Some SDKs use cancel/stop:
       if (typeof session.cancel === "function") {
         try { await session.cancel(); } catch {}
       }
@@ -73,7 +65,6 @@
 
     async function handleFinalTranscript(text) {
       if (!text) return;
-      // Cancel any in-flight brain call
       if (inFlight?.abort) inFlight.abort();
 
       const ctrl = new AbortController();
@@ -93,7 +84,6 @@
         if (!resp.ok) throw new Error(data.error || `brain ${resp.status}`);
 
         const reply = (data.reply || "Got it.").trim();
-        // speak it
         speaking = true;
         await cfg.speak(session, reply);
         speaking = false;
@@ -103,7 +93,6 @@
       } catch (e) {
         setStatus("idle");
         try { cfg.onError(e); } catch {}
-        // graceful fallback: short apology
         try {
           speaking = true;
           await cfg.speak(session, "Sorry, I glitched. Can you repeat that?");
@@ -116,12 +105,10 @@
 
     // Barge-in: user starts talking → stop speech and abort brain
     async function onUserStartTalking() {
-      // stop current TTS
       if (speaking) {
         try { await cfg.stopSpeaking(session); } catch {}
         speaking = false;
       }
-      // cancel pending brain call
       if (inFlight?.abort) inFlight.abort();
       inFlight = null;
       setStatus("listening…");
@@ -140,32 +127,18 @@
     }
 
     // Wire events (adjust to your SDK’s event API)
-    // If your SDK uses `session.on(event, handler)`:
     if (typeof session.on === "function") {
       session.on(cfg.events.transcript, onTranscript);
-      if (cfg.events.userStartTalking) {
-        session.on(cfg.events.userStartTalking, onUserStartTalking);
-      }
-      if (cfg.events.connected) {
-        session.on(cfg.events.connected, () => setStatus("connected"));
-      }
-      if (cfg.events.error) {
-        session.on(cfg.events.error, (e) => cfg.onError(e));
-      }
+      if (cfg.events.userStartTalking) session.on(cfg.events.userStartTalking, onUserStartTalking);
+      if (cfg.events.connected)       session.on(cfg.events.connected, () => setStatus("connected"));
+      if (cfg.events.error)           session.on(cfg.events.error, (e) => cfg.onError(e));
     }
 
-    // If your SDK uses addEventListener:
     if (typeof session.addEventListener === "function") {
       session.addEventListener(cfg.events.transcript, onTranscript);
-      if (cfg.events.userStartTalking) {
-        session.addEventListener(cfg.events.userStartTalking, onUserStartTalking);
-      }
-      if (cfg.events.connected) {
-        session.addEventListener(cfg.events.connected, () => setStatus("connected"));
-      }
-      if (cfg.events.error) {
-        session.addEventListener(cfg.events.error, (e) => cfg.onError(e));
-      }
+      if (cfg.events.userStartTalking) session.addEventListener(cfg.events.userStartTalking, onUserStartTalking);
+      if (cfg.events.connected)        session.addEventListener(cfg.events.connected, () => setStatus("connected"));
+      if (cfg.events.error)            session.addEventListener(cfg.events.error, (e) => cfg.onError(e));
     }
 
     setStatus("ready");
@@ -175,4 +148,3 @@
   // expose
   global.initBrainBridge = initBrainBridge;
 })(window);
-</script>
