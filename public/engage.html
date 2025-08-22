@@ -32,6 +32,52 @@
 
   <script src="/brain-bridge.js"></script>
   <script>
+  // --- MOCK SESSION FOR SMOKE-TESTING ONLY ---
+  // It pretends to be your D‑ID session so we can prove the bridge works.
+  const mockSession = {
+    // bridge will call this to speak; we just log it for now
+    speak: async ({ text }) => {
+      console.log("[mockSession.speak]", text);
+      const s = document.getElementById("status");
+      if (s) s.innerHTML = "<strong>Status:</strong> Speaking: " + text;
+      await new Promise(r => setTimeout(r, Math.min(1500, 200 + text.length * 20)));
+      if (s) s.innerHTML = "<strong>Status:</strong> idle";
+    },
+    stopSpeaking: async () => console.log("[mockSession.stopSpeaking]"),
+
+    // a minimal event bus so we can fire fake transcript events
+    _handlers: {},
+    on(event, handler) {
+      (this._handlers[event] ||= []).push(handler);
+      console.log("[mockSession.on]", event);
+    },
+    emit(event, payload) {
+      (this._handlers[event] || []).forEach(h => h(payload));
+    }
+  };
+
+  // Initialize the bridge
+  const bridge = initBrainBridge(mockSession, {
+    onStatus: (s) => {
+      const el = document.getElementById("status");
+      if (el) el.innerHTML = "<strong>Status:</strong> " + s;
+    }
+  });
+
+  // Demo: simulate user speech → final transcript → brain reply
+  // Click anywhere to trigger a fake final transcript
+  document.addEventListener("click", () => {
+    console.log("[mock] user starts talking");
+    mockSession.emit("vad-start");
+    // after a beat, emit a FINAL transcript event with some text
+    setTimeout(() => {
+      console.log("[mock] final transcript emitted");
+      mockSession.emit("transcript", { isFinal: true, text: "Hey Keilani, say hi!" });
+    }, 600);
+  });
+</script>
+
+  <script>
     // simple “it loaded” indicator
     (function () {
       const s = document.getElementById('status');
@@ -39,5 +85,20 @@
       console.log("[Engage] page loaded");
     })();
   </script>
+  
+  <script>
+  // fake session that just logs instead of talking
+  const mockSession = {
+    speak: async ({ text }) => console.log("[mockSession.speak]", text),
+    stopSpeaking: async () => console.log("[mockSession.stopSpeaking]"),
+    on: (event, handler) => console.log("[mockSession.on]", event),
+  };
+
+  // initialize with simple status hook
+  initBrainBridge(mockSession, {
+    onStatus: (s) => { document.getElementById("status").textContent = "Status: " + s; }
+  });
+</script>
+
 </body>
 </html>
