@@ -1,0 +1,69 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Keilani — Live</title>
+  <style>
+    body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:#0b0b0c; color:#e6e6e6; }
+    header { padding:20px; text-align:center; }
+    .hint { opacity:.7; font-size:14px; }
+  </style>
+</head>
+<body>
+  <header>
+    <h1>Keilani — Live</h1>
+    <p class="hint">Allow mic permission to chat.</p>
+  </header>
+
+  <!-- D-ID Embeddable Agent -->
+  <script type="module"
+    src="https://agent.d-id.com/v2/index.js"
+    data-mode="fabio"
+    data-client-key="<<YOUR_CLIENT_KEY>>"
+    data-agent-id="<<YOUR_EMBED_AGENT_ID>>"
+    data-name="did-agent"
+    data-monitor="true"
+    data-orientation="horizontal"
+    data-position="right">
+  </script>
+
+  <script>
+    (function () {
+      function onReady(cb) {
+        if (window.didAgent) return cb(window.didAgent);
+        window.addEventListener('did-ready', () => cb(window.didAgent), { once: true });
+        window.addEventListener('did:ready', () => cb(window.didAgent), { once: true });
+      }
+
+      async function askBrain(message) {
+        const res = await fetch('/api/chat', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ userId: 'web', message })
+        });
+        const data = await res.json().catch(() => ({}));
+        return data.reply || data.message || data.text || 'Sorry, I glitched.';
+      }
+
+      onReady(async (agent) => {
+        try { await agent.start(); } catch (e) { console.warn('agent.start() needs user interaction', e); }
+
+        agent.on?.('user_transcript', async (evt) => {
+          const text = (evt && evt.text) || '';
+          if (!text.trim()) return;
+          const reply = await askBrain(text);
+          try { await agent.speak({ text: reply }); } catch { try { await agent.speak(reply); } catch (e) { console.error(e); } }
+        });
+
+        window.addEventListener('did-user-transcript', async (evt) => {
+          const text = (evt?.detail?.text) || '';
+          if (!text.trim()) return;
+          const reply = await askBrain(text);
+          try { await agent.speak({ text: reply }); } catch { try { await agent.speak(reply); } catch (e) { console.error(e); } }
+        });
+      });
+    })();
+  </script>
+</body>
+</html>
