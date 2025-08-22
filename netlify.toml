@@ -27,3 +27,8 @@
   [headers.values]
     X-Frame-Options = "ALLOWALL"
     Content-Security-Policy = "frame-ancestors https://*.framer.app https://keilani.ai https://www.keilani.ai 'self';"
+
+[[redirects]]
+  from = "/engage"
+  to = "/engage.html"
+  status = 200

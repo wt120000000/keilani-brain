@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1" />
-  <title>Keilani â€” Live</title>
+  <title>Keilani — Live</title>
   <style>
     body { margin:0; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial, sans-serif; background:#0b0b0c; color:#e6e6e6; }
     header { padding:20px; text-align:center; }
@@ -12,7 +12,7 @@
 </head>
 <body>
   <header>
-    <h1>Keilani â€” Live</h1>
+    <h1>Keilani — Live</h1>
     <p class="hint">Allow mic permission to chat.</p>
   </header>
 
@@ -20,8 +20,8 @@
   <script type="module"
     src="https://agent.d-id.com/v2/index.js"
     data-mode="fabio"
-    data-client-key="<<YOUR_CLIENT_KEY>>"
-    data-agent-id="<<YOUR_EMBED_AGENT_ID>>"
+    data-client-key="Z29vZ2xlLW9hdXRoMnwxMDk2NTE3NDAzNTg3NDIxNzA0Mzk6ZDdiZEFBMThxN05DWVRPQzBZUkdV"
+    data-agent-id="v2_agt_shuxsy-b"
     data-name="did-agent"
     data-monitor="true"
     data-orientation="horizontal"
@@ -43,7 +43,7 @@
           body: JSON.stringify({ userId: 'web', message })
         });
         const data = await res.json().catch(() => ({}));
-        return data.reply || data.message || data.text || 'Sorry, I glitched.';
+        return data.reply || data.message || data.text || "Sorry, I glitched.";
       }
 
       onReady(async (agent) => {
