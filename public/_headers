@@ -1,0 +1,14 @@
+/*
+  Content-Type: text/html; charset=UTF-8
+  X-Content-Type-Options: nosniff
+  X-Frame-Options: SAMEORIGIN
+  Referrer-Policy: strict-origin-when-cross-origin
+  Strict-Transport-Security: max-age=31536000; includeSubDomains; preload
+  Permissions-Policy: microphone=(); geolocation=(); camera=()
+  Content-Security-Policy: default-src 'self'; img-src 'self' data: https:; style-src 'self' 'unsafe-inline'; script-src 'self' https://cdn.jsdelivr.net; connect-src 'self' https://*.netlify.app https://api.* https://*.d-id.com; media-src 'self' blob: https:; frame-ancestors 'self'
+
+/favicon.ico
+  Cache-Control: public, max-age=604800, immutable
+
+/*.(png|svg|jpg|jpeg|webp)
+  Cache-Control: public, max-age=604800, immutable
