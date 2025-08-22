@@ -2,7 +2,7 @@
 <html lang="en">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>Keilani Engage</title>
 
   <!-- Favicons / PWA -->
@@ -23,22 +23,21 @@
     </div>
 
     <div class="card" id="status">
-      <div><strong>Status:</strong> Loading client�</div>
-      <div class="small">If you see errors in the console, check that brain-bridge.js is loading.</div>
+      <div><strong>Status:</strong> Loading…</div>
+      <div class="small">Open DevTools → Console for logs.</div>
     </div>
 
     <div id="ui"></div>
   </div>
 
-  <!-- Load your existing bridge code -->
   <script src="/brain-bridge.js"></script>
   <script>
-    // simple sanity ping
-    console.log("[Engage] page ready");
-    const status = document.getElementById('status');
-    if (typeof window !== 'undefined') {
-      status.innerHTML = "<strong>Status:</strong> Client loaded. If the avatar doesn't appear, open DevTools ? Console.";
-    }
+    // simple “it loaded” indicator
+    (function () {
+      const s = document.getElementById('status');
+      if (s) s.innerHTML = "<strong>Status:</strong> Page loaded. Bridge ready.";
+      console.log("[Engage] page loaded");
+    })();
   </script>
 </body>
 </html>
