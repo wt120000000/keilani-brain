@@ -85,20 +85,5 @@
       console.log("[Engage] page loaded");
     })();
   </script>
-  
-  <script>
-  // fake session that just logs instead of talking
-  const mockSession = {
-    speak: async ({ text }) => console.log("[mockSession.speak]", text),
-    stopSpeaking: async () => console.log("[mockSession.stopSpeaking]"),
-    on: (event, handler) => console.log("[mockSession.on]", event),
-  };
-
-  // initialize with simple status hook
-  initBrainBridge(mockSession, {
-    onStatus: (s) => { document.getElementById("status").textContent = "Status: " + s; }
-  });
-</script>
-
 </body>
 </html>
