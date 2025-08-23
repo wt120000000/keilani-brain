@@ -6,7 +6,7 @@
     "@supabase/supabase-js": "^2.45.0"
   },
   "devDependencies": {
-    "netlify-cli": "^17.27.1"
+    "netlify-cli": "^17.27.1",
 	"prettier": "^3.2.5",
     "eslint": "^9.0.0",
     "lint-staged": "^15.2.0",
@@ -15,7 +15,7 @@
   "scripts": {
     "dev": "netlify dev",
     "build": "echo \"Nothing to build\"",
-    "deploy": "netlify deploy --prod"
+    "deploy": "netlify deploy --prod",
 	"format": "prettier --write .",
     "lint": "eslint . --ext .js,.mjs --max-warnings=0"
   },
