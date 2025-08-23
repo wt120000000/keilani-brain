@@ -6,10 +6,12 @@
     "@supabase/supabase-js": "^2.45.0"
   },
   "devDependencies": {
-    "eslint": "^9.0.0",
+    "@eslint/js": "^9.34.0",
+    "eslint": "^9.34.0",
+    "globals": "^16.3.0",
     "husky": "^9.1.7",
     "lint-staged": "^16.1.5",
-    "netlify-cli": "^17.27.1",
+    "netlify-cli": "^23.3.1",
     "prettier": "^3.6.2"
   },
   "scripts": {
@@ -21,7 +23,13 @@
     "prepare": "husky"
   },
   "lint-staged": {
-    "*.{js,json,md,css,html}": [
+    "netlify/functions/**/*.js": [
+      "eslint --fix"
+    ],
+    "scripts/**/*.js": [
+      "eslint --fix"
+    ],
+    "*.{json,md,css,html}": [
       "prettier --write"
     ]
   }
