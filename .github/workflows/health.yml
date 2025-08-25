@@ -1,0 +1,10 @@
+name: Health
+on:
+  pull_request:
+  push:
+    branches: [main, feat/**]
+jobs:
+  health:
+    runs-on: ubuntu-latest
+    steps:
+      - run: echo ""health ok""
