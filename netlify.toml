@@ -1,34 +1,21 @@
 [build]
   command = "npm run build"
   publish = "public"
-
-[functions]
-  node_bundler = "esbuild"
-  # optional: list deps to keep external (usually not needed)
-  external_node_modules = []
-
-[[redirects]]
-  from = "/api/chat"
-  to = "/.netlify/functions/chat"
-  status = 200
-
-[[redirects]]
-  from = "/api/ingest"
-  to = "/.netlify/functions/ingest"
-  status = 200
-  
-[[redirects]]
-  from = "/api/start-voice"
-  to   = "/.netlify/functions/start-voice"
-  status = 200
+  functions = "netlify/functions"
 
 [[headers]]
-  for = "/embed/*"
+  for = "/*"
   [headers.values]
-    X-Frame-Options = "ALLOWALL"
-    Content-Security-Policy = "frame-ancestors https://*.framer.app https://keilani.ai https://www.keilani.ai 'self';"
+  X-Frame-Options = "SAMEORIGIN"
+  X-Content-Type-Options = "nosniff"
+  Referrer-Policy = "strict-origin-when-cross-origin"
+  Permissions-Policy = "camera=(), microphone=(), geolocation=()"
+  Strict-Transport-Security = "max-age=63072000; includeSubDomains; preload"
+  Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-inline' https://*.netlify.app; connect-src 'self' https://api.openai.com https://*.supabase.co https://*.netlify.app; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'self';"
 
+# API-style paths
 [[redirects]]
-  from = "/engage"
-  to = "/engage.html"
+  from = "/api/*"
+  to = "/.netlify/functions/:splat"
   status = 200
+
