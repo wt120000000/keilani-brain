@@ -1,156 +1,133 @@
 // netlify/functions/chat.mjs
-// ESM serverless function for Netlify
+// Node 18+ on Netlify has global fetch
 
-// --- helpers ---
-const redact = (v) => (v ? `${String(v).slice(0, 4)}…(${String(v).length})` : "MISSING");
-const cors = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "content-type, authorization",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-};
+// --- CORS: allow only your site(s) + local dev ---
+const ALLOWED_ORIGINS = new Set([
+  "https://keilani.ai",
+  "https://www.keilani.ai",
+  "http://localhost:8888", // netlify dev
+  "http://localhost:5173", // vite dev (if you use it)
+]);
 
-// --- handler ---
-export const handler = async (event) => {
-  // CORS preflight
+function makeCors(origin) {
+  const allow = ALLOWED_ORIGINS.has(origin) ? origin : "https://keilani.ai";
+  return {
+    "Access-Control-Allow-Origin": allow,
+    "Access-Control-Allow-Methods": "POST,OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Vary": "Origin",
+  };
+}
+
+// --- tiny helpers ---
+function json(status, headers, data) {
+  return {
+    statusCode: status,
+    headers: { "Content-Type": "application/json", ...headers },
+    body: JSON.stringify(data),
+  };
+}
+
+function parseBody(raw) {
+  try {
+    return raw ? JSON.parse(raw) : {};
+  } catch {
+    return null;
+  }
+}
+
+// --- main handler ---
+export async function handler(event) {
+  const origin = event.headers?.origin || "";
+  const CORS = makeCors(origin);
+
+  // Preflight
   if (event.httpMethod === "OPTIONS") {
-    return { statusCode: 204, headers: cors, body: "" };
+    return { statusCode: 200, headers: CORS, body: "" };
   }
 
-  // Method guard
+  // Enforce POST
   if (event.httpMethod !== "POST") {
-    return {
-      statusCode: 405,
-      headers: cors,
-      body: JSON.stringify({ ok: false, error: "Method Not Allowed" }),
-    };
+    return json(405, CORS, { ok: false, error: "Method Not Allowed" });
   }
 
-  // --- env reads (with Supabase fallback) ---
-  const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-  const SUPABASE_URL = process.env.SUPABASE_URL;
-  const SUPABASE_KEY = process.env.SUPABASE_SERVICE_ROLE || process.env.SUPABASE_KEY;
-  const SUPABASE_KEY_SOURCE = process.env.SUPABASE_SERVICE_ROLE
-    ? "SUPABASE_SERVICE_ROLE"
-    : (process.env.SUPABASE_KEY ? "SUPABASE_KEY" : "MISSING");
-
-  // request context (safe)
-  console.log("---- /api/chat request ----", {
-    method: event.httpMethod,
-    query: event.queryStringParameters,
-    ctype: event.headers?.["content-type"] || event.headers?.["Content-Type"],
-  });
-
-  // env logging (redacted)
-  console.log("env check:", {
-    OPENAI_API_KEY: redact(OPENAI_API_KEY),
-    SUPABASE_URL: SUPABASE_URL ? "SET" : "MISSING",
-    SUPABASE_KEY: SUPABASE_KEY ? `${redact(SUPABASE_KEY)} via ${SUPABASE_KEY_SOURCE}` : "MISSING",
-    NODE_VERSION: process.env.NODE_VERSION || "unknown",
-  });
-
-  // hard requirement for OpenAI
-  if (!OPENAI_API_KEY) {
-    return {
-      statusCode: 500,
-      headers: cors,
-      body: JSON.stringify({ ok: false, stage: "env", error: "OPENAI_API_KEY missing" }),
-    };
+  // Parse input
+  const body = parseBody(event.body);
+  if (!body) {
+    return json(400, CORS, { ok: false, error: "Invalid JSON body" });
   }
 
-  // parse body
-  let body = {};
+  const qs = event.queryStringParameters || {};
+  const ignoreContext = qs.nocontext === "1" || qs.nocontext === "true";
+
+  const userId = (body.userId || "anonymous").toString();
+  const message = (body.message || "").toString().trim();
+
+  if (!message) {
+    return json(400, CORS, { ok: false, error: "Missing 'message'." });
+  }
+
+  // Env/config
+  const apiKey = process.env.OPENAI_API_KEY;
+  const model = process.env.OPENAI_MODEL || "gpt-4o-mini-2024-07-18";
+
+  if (!apiKey) {
+    return json(500, CORS, { ok: false, error: "OPENAI_API_KEY not set." });
+  }
+
+  // Build prompt (inject memory later when !ignoreContext)
+  const input = [
+    {
+      role: "system",
+      content:
+        "You are Keilani, a friendly, concise AI companion. Be helpful, encouraging, on-brand, and safe.",
+    },
+    { role: "user", content: message },
+  ];
+
   try {
-    body = event.body ? JSON.parse(event.body) : {};
-  } catch (e) {
-    console.error("JSON parse error:", e);
-    return {
-      statusCode: 400,
-      headers: cors,
-      body: JSON.stringify({ ok: false, stage: "parse", error: "Invalid JSON body" }),
-    };
-  }
-
-  // validate inputs
-  const { userId = null, message, nocontext } = body;
-  if (!message || typeof message !== "string") {
-    return {
-      statusCode: 400,
-      headers: cors,
-      body: JSON.stringify({ ok: false, stage: "validate", error: "Missing 'message' (string)" }),
-    };
-  }
-
-  // warn if Supabase likely needed but missing (non-fatal)
-  if (!SUPABASE_URL || !SUPABASE_KEY) {
-    console.warn("[warn] Supabase env incomplete — continuing (DB ops are disabled for this request).");
-  }
-
-  // --- call OpenAI (chat completions) ---
-  try {
-    const r = await fetch("https://api.openai.com/v1/chat/completions", {
+    const rsp = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
-        model: process.env.OPENAI_MODEL || "gpt-4o-mini",
-        messages: [
-          { role: "system", content: "You are Keilani—warm, upbeat, concise, and helpful." },
-          // Optionally use nocontext flag in the future to skip retrieval
-          { role: "user", content: message },
-        ],
-        temperature: 0.7,
+        model,
+        input,
+        // temperature: 0.7, // uncomment/tune if you want
       }),
     });
 
-    const text = await r.text();
-    let json;
-    try {
-      json = JSON.parse(text);
-    } catch {
-      // keep raw text for logging if JSON parse fails
+    const data = await rsp.json();
+
+    if (!rsp.ok) {
+      // Don’t leak upstream details to clients; log server-side only.
+      console.error("OpenAI upstream error:", rsp.status, data);
+      return json(502, CORS, { ok: false, error: "Upstream model error" });
     }
 
-    console.log("openai.status:", r.status);
-    if (r.status >= 400) {
-      console.error("openai.errorBody:", text);
-      return {
-        statusCode: 502,
-        headers: cors,
-        body: JSON.stringify({
-          ok: false,
-          stage: "chat",
-          error: `OpenAI HTTP ${r.status}`,
-          upstream: text.slice(0, 400),
-        }),
-      };
-    }
+    // Responses API: prefer output[0].content[0].text; fallback to output_text
+    const reply =
+      data?.output?.[0]?.content?.[0]?.text ??
+      data?.output_text ??
+      "Sorry, I had trouble responding.";
 
-    const reply = json?.choices?.[0]?.message?.content ?? "(no content)";
-    const response = {
+    // Optional metadata passthrough
+    const created = data?.created ?? Math.floor(Date.now() / 1000);
+
+    return json(200, CORS, {
       ok: true,
       userId,
       reply,
-      meta: { model: json?.model, created: json?.created, nocontext: !!nocontext },
-    };
-
-    console.log("response:", response);
-    return {
-      statusCode: 200,
-      headers: { ...cors, "Content-Type": "application/json" },
-      body: JSON.stringify(response),
-    };
+      meta: {
+        model,
+        created,
+        nocontext: !!ignoreContext,
+      },
+    });
   } catch (err) {
-    console.error("chat handler fatal:", err);
-    return {
-      statusCode: 500,
-      headers: cors,
-      body: JSON.stringify({
-        ok: false,
-        stage: "chat",
-        error: err?.message || "unknown error",
-      }),
-    };
+    console.error("chat.mjs fatal error:", err);
+    return json(500, CORS, { ok: false, error: "Server error" });
   }
-};
+}
