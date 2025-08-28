@@ -1,36 +1,30 @@
-// ~150 words/min ˜ 2.5 words/second
 const { getEntitlements, bumpUsage } = require("./_entitlements.js");
+// ~150 words/min ˜ 2.5 words/sec
 const estimateSeconds = (text = "") => Math.ceil((text.split(/\s+/).length || 1) / 2.5);
 
-module.exports = async (req) => {
+exports.handler = async (event) => {
   try {
-    if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+    if (event.httpMethod !== "POST") return { statusCode: 405, body: "Method not allowed" };
 
-    const userId = req.headers.get("x-user-id");
-    if (!userId) return new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 });
+    const userId = (event.headers["x-user-id"] || event.headers["X-User-Id"]);
+    if (!userId) return { statusCode: 401, body: JSON.stringify({ error: "unauthorized" }) };
 
-    const body = await req.json().catch(() => ({}));
-    const text = (body?.text || "").trim();
-    if (!text) return new Response(JSON.stringify({ error: "text required" }), { status: 400 });
+    const body = JSON.parse(event.body || "{}");
+    const text = (body.text || "").trim();
+    if (!text) return { statusCode: 400, body: JSON.stringify({ error: "text required" }) };
 
     const { ent, usage } = await getEntitlements(userId);
     const maxVoiceSec = Number(ent.voice_minutes_per_day || 0) * 60;
-    if (maxVoiceSec <= 0) {
-      return new Response(JSON.stringify({ error: "Voice not available for your plan", upgrade: true }), { status: 402 });
-    }
+    if (maxVoiceSec <= 0) return { statusCode: 402, body: JSON.stringify({ error: "Voice not available for your plan", upgrade: true }) };
 
     const willUse = estimateSeconds(text);
     if ((usage.voice_seconds_used || 0) + willUse > maxVoiceSec) {
-      return new Response(JSON.stringify({ error: "Daily voice limit reached", upgrade: true }), {
-        status: 402, headers: { "content-type": "application/json" }
-      });
+      return { statusCode: 402, body: JSON.stringify({ error: "Daily voice limit reached", upgrade: true }) };
     }
 
     await bumpUsage(userId, { voiceSeconds: willUse });
-    return new Response(JSON.stringify({ ok: true, seconds: willUse }), {
-      headers: { "content-type": "application/json" }
-    });
+    return { statusCode: 200, headers: { "content-type": "application/json" }, body: JSON.stringify({ ok: true, seconds: willUse }) };
   } catch (e) {
-    return new Response(JSON.stringify({ error: e.message }), { status: 500 });
+    return { statusCode: 500, body: JSON.stringify({ error: e.message }) };
   }
 };

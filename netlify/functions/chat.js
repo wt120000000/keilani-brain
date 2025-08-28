@@ -1,23 +1,21 @@
 const { getEntitlements, bumpUsage } = require("./_entitlements.js");
 
-module.exports = async (req) => {
+exports.handler = async (event) => {
   try {
-    if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+    if (event.httpMethod !== "POST") return { statusCode: 405, body: "Method not allowed" };
 
-    const userId = req.headers.get("x-user-id");
-    if (!userId) return new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 });
+    const userId = (event.headers["x-user-id"] || event.headers["X-User-Id"]);
+    if (!userId) return { statusCode: 401, body: JSON.stringify({ error: "unauthorized" }) };
 
-    const body = await req.json().catch(() => ({}));
-    const userMessage = (body?.message || "").trim();
-    const role = (body?.role || "COMPANION").toUpperCase();
-    if (!userMessage) return new Response(JSON.stringify({ error: "message required" }), { status: 400 });
+    const body = JSON.parse(event.body || "{}");
+    const userMessage = (body.message || "").trim();
+    const role = (body.role || "COMPANION").toUpperCase();
+    if (!userMessage) return { statusCode: 400, body: JSON.stringify({ error: "message required" }) };
 
     const { ent, usage } = await getEntitlements(userId);
     const maxMsgs = Number(ent.max_messages_per_day || 30);
     if ((usage.messages_used || 0) >= maxMsgs) {
-      return new Response(JSON.stringify({ error: "Daily message limit reached", upgrade: true }), {
-        status: 402, headers: { "content-type": "application/json" }
-      });
+      return { statusCode: 402, body: JSON.stringify({ error: "Daily message limit reached", upgrade: true }) };
     }
 
     const systemByRole = {
@@ -50,7 +48,7 @@ module.exports = async (req) => {
 
     if (!oaRes.ok) {
       const err = await oaRes.text();
-      return new Response(JSON.stringify({ error: "openai_error", detail: err }), { status: 500 });
+      return { statusCode: 500, body: JSON.stringify({ error: "openai_error", detail: err }) };
     }
 
     const data = await oaRes.json();
@@ -58,8 +56,8 @@ module.exports = async (req) => {
 
     await bumpUsage(userId, { messages: 1 });
 
-    return new Response(JSON.stringify({ reply }), { headers: { "content-type": "application/json" } });
+    return { statusCode: 200, headers: { "content-type": "application/json" }, body: JSON.stringify({ reply }) };
   } catch (e) {
-    return new Response(JSON.stringify({ error: e.message }), { status: 500 });
+    return { statusCode: 500, body: JSON.stringify({ error: e.message }) };
   }
 };

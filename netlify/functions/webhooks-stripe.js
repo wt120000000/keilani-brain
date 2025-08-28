@@ -1,27 +1,26 @@
 const Stripe = require("stripe");
 const { createClient } = require("@supabase/supabase-js");
-
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-module.exports = async (req) => {
-  const sig = req.headers.get("stripe-signature");
-  const raw = await req.text();
+exports.handler = async (event) => {
+  const sig = event.headers["stripe-signature"];
+  const raw = event.body; // raw string
 
-  let event;
+  let stripeEvent;
   try {
-    event = stripe.webhooks.constructEvent(raw, sig, process.env.STRIPE_WEBHOOK_SECRET);
+    stripeEvent = stripe.webhooks.constructEvent(raw, sig, process.env.STRIPE_WEBHOOK_SECRET);
   } catch (err) {
-    return new Response(`Webhook Error: ${err.message}`, { status: 400 });
+    return { statusCode: 400, body: `Webhook Error: ${err.message}` };
   }
 
   const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE);
 
   try {
-    switch (event.type) {
+    switch (stripeEvent.type) {
       case "checkout.session.completed": {
-        const sess = event.data.object;
+        const sess = stripeEvent.data.object;
         const userId = sess.metadata?.userId;
-        const tier = (sess.metadata?.tier || "FAN").toUpperCase();
+        const tier = String(sess.metadata?.tier || "FAN").toUpperCase();
         if (userId) {
           await sb.from("user_plans").upsert({
             user_id: userId, tier_code: tier, status: "active", valid_until: null
@@ -30,8 +29,8 @@ module.exports = async (req) => {
         break;
       }
       case "customer.subscription.deleted": {
-        const sub = event.data.object;
-        const userId = sub.metadata?.userId; // only if you attach it to subs; optional
+        const sub = stripeEvent.data.object;
+        const userId = sub.metadata?.userId;
         if (userId) {
           await sb.from("user_plans").upsert({
             user_id: userId, tier_code: "FREE", status: "canceled", valid_until: null
@@ -40,12 +39,11 @@ module.exports = async (req) => {
         break;
       }
       default:
+        // ignore others for now
         break;
     }
-    return new Response("ok");
+    return { statusCode: 200, body: "ok" };
   } catch (e) {
-    return new Response(`Handler error: ${e.message}`, { status: 500 });
+    return { statusCode: 500, body: `Handler error: ${e.message}` };
   }
 };
-
-module.exports.config = { path: "/.netlify/functions/webhooks-stripe" };

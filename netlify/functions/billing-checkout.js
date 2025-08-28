@@ -1,19 +1,17 @@
 const Stripe = require("stripe");
 const { createClient } = require("@supabase/supabase-js");
-
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
-module.exports = async (req) => {
+exports.handler = async (event) => {
   try {
-    if (req.method !== "POST") return new Response("Method not allowed", { status: 405 });
+    if (event.httpMethod !== "POST") return { statusCode: 405, body: "Method not allowed" };
 
-    const url = new URL(req.url);
-    const body = await req.json().catch(() => ({}));
-    const tier = (body?.tier || url.searchParams.get("tier") || "").toUpperCase();
-    const userId = req.headers.get("x-user-id");
+    const body = JSON.parse(event.body || "{}");
+    const tier = String(body.tier || "").toUpperCase();
+    const userId = (event.headers["x-user-id"] || event.headers["X-User-Id"]);
 
-    if (!userId) return new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 });
-    if (!["FAN","VIP","ULTRA"].includes(tier)) return new Response(JSON.stringify({ error: "invalid tier" }), { status: 400 });
+    if (!userId) return { statusCode: 401, body: JSON.stringify({ error: "unauthorized" }) };
+    if (!["FAN","VIP","ULTRA"].includes(tier)) return { statusCode: 400, body: JSON.stringify({ error: "invalid tier" }) };
 
     const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE);
     const { data: priceRow, error } = await sb.from("tier_prices").select("stripe_price_id").eq("tier_code", tier).single();
@@ -27,8 +25,8 @@ module.exports = async (req) => {
       metadata: { userId, tier }
     });
 
-    return new Response(JSON.stringify({ url: session.url }), { headers: { "content-type": "application/json" } });
+    return { statusCode: 200, headers: { "content-type": "application/json" }, body: JSON.stringify({ url: session.url }) };
   } catch (e) {
-    return new Response(JSON.stringify({ error: e.message }), { status: 500 });
+    return { statusCode: 500, body: JSON.stringify({ error: e.message }) };
   }
 };

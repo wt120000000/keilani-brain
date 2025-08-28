@@ -4,10 +4,10 @@ function supa(service = false) {
   return createClient(process.env.SUPABASE_URL, service ? process.env.SUPABASE_SERVICE_ROLE : process.env.SUPABASE_ANON_KEY);
 }
 
-module.exports = async (req) => {
+exports.handler = async (event) => {
   try {
-    const userId = req.headers.get("x-user-id");
-    if (!userId) return new Response(JSON.stringify({ error: "unauthorized" }), { status: 401 });
+    const userId = (event.headers["x-user-id"] || event.headers["X-User-Id"]);
+    if (!userId) return { statusCode: 401, body: JSON.stringify({ error: "unauthorized" }) };
 
     const sb = supa(true);
 
@@ -22,12 +22,12 @@ module.exports = async (req) => {
     const { data: usage } = await sb.from("usage_daily").select("messages_used,voice_seconds_used")
       .eq("user_id", userId).eq("date", today).maybeSingle();
 
-    return new Response(JSON.stringify({
-      tier: tierCode,
-      entitlements,
-      usage: usage || { messages_used: 0, voice_seconds_used: 0 }
-    }), { headers: { "content-type": "application/json" }});
+    return {
+      statusCode: 200,
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ tier: tierCode, entitlements, usage: usage || { messages_used: 0, voice_seconds_used: 0 } }),
+    };
   } catch (e) {
-    return new Response(JSON.stringify({ error: e.message }), { status: 500 });
+    return { statusCode: 500, body: JSON.stringify({ error: e.message }) };
   }
 };

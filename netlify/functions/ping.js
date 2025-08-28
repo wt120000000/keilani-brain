@@ -1,5 +1,7 @@
-module.exports = async () => {
-  return new Response(JSON.stringify({ ok: true, now: new Date().toISOString() }), {
-    headers: { "content-type": "application/json" }
-  });
+exports.handler = async () => {
+  return {
+    statusCode: 200,
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ ok: true, now: new Date().toISOString() }),
+  };
 };
