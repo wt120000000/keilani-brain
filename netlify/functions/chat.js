@@ -4,6 +4,7 @@ exports.handler = async (event) => {
   try {
     if (event.httpMethod !== "POST") return { statusCode: 405, body: "Method not allowed" };
 
+    const dry = event.queryStringParameters && event.queryStringParameters.dry;
     const userId = (event.headers["x-user-id"] || event.headers["X-User-Id"]);
     if (!userId) return { statusCode: 401, body: JSON.stringify({ error: "unauthorized" }) };
 
@@ -18,6 +19,11 @@ exports.handler = async (event) => {
       return { statusCode: 402, body: JSON.stringify({ error: "Daily message limit reached", upgrade: true }) };
     }
 
+    if (dry) {
+      await bumpUsage(userId, { messages: 1 });
+      return { statusCode: 200, headers: { "content-type": "application/json" }, body: JSON.stringify({ reply: `[dry] ${userMessage}` }) };
+    }
+
     const systemByRole = {
       COMPANION: "You are Keilani: playful, kind, supportive. Keep replies short and warm.",
       MENTOR: "You are Keilani: practical, compassionate coach. No medical/legal advice.",
@@ -29,6 +35,14 @@ exports.handler = async (event) => {
     const system = systemByRole[role] || systemByRole.COMPANION;
 
     const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+    if (!process.env.OPENAI_API_KEY) {
+      return { statusCode: 500, body: JSON.stringify({ error: "openai_error", detail: "OPENAI_API_KEY missing" }) };
+    }
+
+    // 15s timeout safety
+    const controller = new AbortController();
+    const t = setTimeout(() => controller.abort(new Error("timeout")), 15000);
+
     const oaRes = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -44,14 +58,15 @@ exports.handler = async (event) => {
         temperature: 0.8,
         max_tokens: 400
       }),
-    });
+      signal: controller.signal,
+    }).finally(() => clearTimeout(t));
 
     if (!oaRes.ok) {
-      const err = await oaRes.text();
+      const err = await oaRes.text().catch(() => "");
       return { statusCode: 500, body: JSON.stringify({ error: "openai_error", detail: err }) };
     }
 
-    const data = await oaRes.json();
+    const data = await oaRes.json().catch(() => ({}));
     const reply = data?.choices?.[0]?.message?.content?.trim() || "…";
 
     await bumpUsage(userId, { messages: 1 });
