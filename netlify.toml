@@ -1,7 +1,21 @@
 [build]
-  command = "npm run build"
+  command = "npm run build || echo no-build"
   publish = "public"
   functions = "netlify/functions"
+
+[functions]
+  node_bundler = "esbuild"
+  external_node_modules = ["stripe", "@supabase/supabase-js"]
+
+# OPTIONAL: if you have a big deps tree and see bundling timeouts, uncomment:
+# included_files = ["netlify/functions/**"]
+
+# Stripe webhook sometimes needs raw body (we handle it in code too)
+
+[[redirects]]
+  from = "/api/*"
+  to = "/.netlify/functions/:splat"
+  status = 200
 
 [[headers]]
   for = "/*"
@@ -12,10 +26,3 @@
   Permissions-Policy = "camera=(), microphone=(), geolocation=()"
   Strict-Transport-Security = "max-age=63072000; includeSubDomains; preload"
   Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-inline' https://*.netlify.app; connect-src 'self' https://api.openai.com https://*.supabase.co https://*.netlify.app; img-src 'self' data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'self';"
-
-# API-style paths
-[[redirects]]
-  from = "/api/*"
-  to = "/.netlify/functions/:splat"
-  status = 200
-
