@@ -3,7 +3,8 @@
   "private": true,
   "type": "module",
   "dependencies": {
-    "@supabase/supabase-js": "^2.45.0"
+    "@supabase/supabase-js": "^2.56.0",
+    "stripe": "^18.5.0"
   },
   "devDependencies": {
     "@eslint/js": "^9.34.0",
