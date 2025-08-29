@@ -1,4 +1,4 @@
-const { getEntitlements, bumpUsage } = require("./_entitlements.js");
+const { getEntitlements, bumpUsage } = require("../lib/_entitlements.js");
 
 exports.handler = async (event) => {
   try {
@@ -77,3 +77,4 @@ exports.handler = async (event) => {
   }
 };
 // touch: 2025-08-27T20:15:25.1596579-07:00
+

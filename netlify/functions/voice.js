@@ -1,4 +1,4 @@
-const { getEntitlements, bumpUsage } = require("./_entitlements.js");
+const { getEntitlements, bumpUsage } = require("../lib/_entitlements.js");
 // ~150 words/min ˜ 2.5 words/sec
 const estimateSeconds = (text = "") => Math.ceil((text.split(/\s+/).length || 1) / 2.5);
 
