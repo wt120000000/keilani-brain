@@ -3,11 +3,12 @@
 
 const { getEntitlements, bumpUsage } = require("./_entitlements.js");
 
-// --- CORS allowlist: supports ALLOWED_ORIGINS or cors_allowed_origins,
-// values separated by spaces OR commas.
+// --- CORS allowlist: supports ALLOWED_ORIGINS, cors_allowed_origins, or CORS_ALLOWED_ORIGINS
+// values can be separated by spaces OR commas.
 const RAW_ORIGINS = (
   process.env.ALLOWED_ORIGINS ||
   process.env.cors_allowed_origins ||
+  process.env.CORS_ALLOWED_ORIGINS ||
   ""
 ).replace(/\s+/g, ","); // convert any whitespace into commas
 
@@ -29,11 +30,7 @@ function corsHeaders(origin = "") {
 }
 
 function json(statusCode, origin, obj) {
-  return {
-    statusCode,
-    headers: corsHeaders(origin),
-    body: JSON.stringify(obj)
-  };
+  return { statusCode, headers: corsHeaders(origin), body: JSON.stringify(obj) };
 }
 
 exports.handler = async (event) => {
@@ -52,19 +49,14 @@ exports.handler = async (event) => {
   try {
     // --- Auth: user id header
     const userId = event.headers["x-user-id"] || event.headers["X-User-Id"];
-    if (!userId) {
-      return json(401, origin, { error: "unauthorized" });
-    }
+    if (!userId) return json(401, origin, { error: "unauthorized" });
 
     // --- Parse body
     let body = {};
-    try {
-      body = JSON.parse(event.body || "{}");
-    } catch {
-      return json(400, origin, { error: "invalid_json" });
-    }
+    try { body = JSON.parse(event.body || "{}"); }
+    catch { return json(400, origin, { error: "invalid_json" }); }
 
-    // Accept either `messages` (array of {role, content}) or `message` (string)
+    // Accept either `messages` (array) or `message` (string)
     const singleMessage = typeof body.message === "string" ? body.message.trim() : "";
     let messages = Array.isArray(body.messages) ? body.messages : null;
     if (!messages) {
@@ -94,9 +86,7 @@ exports.handler = async (event) => {
     // --- OpenAI config
     const model = body.model || process.env.OPENAI_MODEL || "gpt-4o-mini";
     const key = process.env.OPENAI_API_KEY;
-    if (!key) {
-      return json(500, origin, { error: "openai_error", detail: "OPENAI_API_KEY missing" });
-    }
+    if (!key) return json(500, origin, { error: "openai_error", detail: "OPENAI_API_KEY missing" });
 
     const payload = {
       model,
@@ -108,40 +98,20 @@ exports.handler = async (event) => {
     // --- OpenAI call
     const oaRes = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
-      headers: {
-        Authorization: `Bearer ${key}`,
-        "Content-Type": "application/json"
-      },
+      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
       body: JSON.stringify(payload)
     });
 
-    let data;
-    try {
-      data = await oaRes.json();
-    } catch {
-      data = null;
-    }
-
-    if (!oaRes.ok) {
-      return json(oaRes.status, origin, { error: "openai_error", detail: data || (await oaRes.text().catch(() => "")) });
-    }
+    let data; try { data = await oaRes.json(); } catch { data = null; }
+    if (!oaRes.ok) return json(oaRes.status, origin, { error: "openai_error", detail: data || (await oaRes.text().catch(() => "")) });
 
     const reply = data?.choices?.[0]?.message?.content?.trim() || "…";
 
-    // --- Bump usage
-    try {
-      await bumpUsage(userId, { messages: 1 });
-    } catch (e) {
-      console.error("bumpUsage failed:", e);
-    }
+    // --- Bump usage (non-fatal)
+    try { await bumpUsage(userId, { messages: 1 }); } catch (e) { console.error("bumpUsage failed:", e); }
 
     // --- Success
-    return json(200, origin, {
-      ok: true,
-      reply,
-      model,
-      usage: data?.usage
-    });
+    return json(200, origin, { ok: true, reply, model, usage: data?.usage });
 
   } catch (e) {
     return json(500, origin, { error: "server_error", detail: String(e?.message || e) });
