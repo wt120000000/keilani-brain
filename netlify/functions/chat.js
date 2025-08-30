@@ -1,29 +1,19 @@
 ﻿// netlify/functions/chat.js
-// Chat endpoint for Keilani: robust CORS, messages[], optional RAG (kb_chunks), optional message persistence.
+// Keilani chat endpoint: CORS, entitlements, burst rate-limit, RAG, persistence.
 
-const { getEntitlements } = require("./_entitlements.js");
+const { getEntitlements, bumpUsage, saveMessages } = require("./_entitlements.js");
 const { createClient } = require("@supabase/supabase-js");
 
-// ---- CORS allowlist (spaces or commas). Also auto-allow framer domains. Tolerant to null origins.
-const RAW = (
-  process.env.ALLOWED_ORIGINS ||
-  process.env.cors_allowed_origins ||
+// ---------- CORS allowlist ----------
+// Accepts either CORS_ALLOWED_ORIGINS or ALLOWED_ORIGINS (space/comma separated)
+const RAW_ORIGINS = (
   process.env.CORS_ALLOWED_ORIGINS ||
+  process.env.ALLOWED_ORIGINS ||
   ""
 ).replace(/\s+/g, ",");
-const ALLOWLIST = RAW.split(",").map(s => s.trim()).filter(Boolean);
-
+const ALLOWLIST = RAW_ORIGINS.split(",").map(s => s.trim()).filter(Boolean);
 function corsHeaders(origin = "") {
-  const o = (origin || "").toLowerCase();
-  const okList = ALLOWLIST.map(s => s.toLowerCase());
-  const isAllowed = okList.includes(o);
-  const isFramer = /^https:\/\/([a-z0-9-]+\.)?(framer\.com|framerusercontent\.com|framerstatic\.com)$/.test(o);
-
-  let allowOrigin;
-  if (isAllowed || isFramer) allowOrigin = origin;
-  else if (!origin || origin === "null") allowOrigin = "*";
-  else allowOrigin = ALLOWLIST[0] || "*";
-
+  const allowOrigin = ALLOWLIST.includes(origin) ? origin : (ALLOWLIST[0] || "*");
   return {
     "Access-Control-Allow-Origin": allowOrigin,
     "Vary": "Origin",
@@ -33,86 +23,160 @@ function corsHeaders(origin = "") {
     "Content-Type": "application/json; charset=utf-8"
   };
 }
-const json = (code, origin, obj) => ({ statusCode: code, headers: corsHeaders(origin), body: JSON.stringify(obj) });
+function json(status, origin, obj) { return { statusCode: status, headers: corsHeaders(origin), body: JSON.stringify(obj) }; }
+
+// ---------- Supabase (server-side only) ----------
+const SUPA_URL = process.env.SUPABASE_URL;
+const SUPA_KEY = process.env.SUPABASE_SERVICE_ROLE;
+const sb = (SUPA_URL && SUPA_KEY)
+  ? createClient(SUPA_URL, SUPA_KEY, { auth: { persistSession: false } })
+  : null;
+
+// ---------- Model config ----------
+const OPENAI_KEY   = process.env.OPENAI_API_KEY;
+const DEFAULT_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+
+// ---------- Burst rate-limit (per minute) ----------
+const RATE_LIMIT_PER_MIN = Number(process.env.RATE_LIMIT_PER_MIN || 15);
+
+// In-memory fallback (best-effort across a single lambda instance)
+const localBuckets = new Map();
+function localCheckRate(userId) {
+  const now = Date.now();
+  const windowMs = 60_000;
+  const arr = localBuckets.get(userId) || [];
+  const fresh = arr.filter(t => now - t < windowMs);
+  if (fresh.length >= RATE_LIMIT_PER_MIN) return false;
+  fresh.push(now);
+  localBuckets.set(userId, fresh);
+  return true;
+}
+
+// ---------- Helpers ----------
+async function embedText(text, model = "text-embedding-3-small") {
+  const r = await fetch("https://api.openai.com/v1/embeddings", {
+    method: "POST",
+    headers: { Authorization: `Bearer ${OPENAI_KEY}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ model, input: text })
+  });
+  if (!r.ok) throw new Error(await r.text());
+  const d = await r.json();
+  return d?.data?.[0]?.embedding;
+}
+
+function buildSystem(role, ctx) {
+  const byRole = {
+    COMPANION: "You are Keilani: playful, kind, supportive. Keep replies short and warm.",
+    MENTOR:    "You are Keilani: practical, compassionate coach. No medical/legal advice.",
+    GAMER:     "You are Keilani: hype gamer friend and coach. Be energetic and tactical.",
+    CREATOR:   "You are Keilani: creative strategist; suggest hooks, formats, and trends.",
+    POLYGLOT:  "You are Keilani: language buddy; be encouraging and correct gently.",
+    CUSTOM:    "You are Keilani: use the user's saved preferences to mirror their style."
+  };
+  const base = byRole[role] || byRole.COMPANION;
+  if (!ctx) return base;
+  return base + " When helpful, ground answers in the Context below. If context is irrelevant, answer normally.\n\nCONTEXT:\n" + ctx;
+}
 
 exports.handler = async (event) => {
   const origin = event.headers.origin || event.headers.Origin || "";
 
-  // Preflight
-  if (event.httpMethod === "OPTIONS") return { statusCode: 200, headers: corsHeaders(origin), body: "" };
-  if (event.httpMethod !== "POST") return json(405, origin, { error: "method_not_allowed" });
+  if (event.httpMethod === "OPTIONS") {
+    return { statusCode: 200, headers: corsHeaders(origin), body: "" };
+  }
+  if (event.httpMethod !== "POST") {
+    return json(405, origin, { error: "method_not_allowed" });
+  }
+
+  if (!OPENAI_KEY) return json(500, origin, { error: "openai_key_missing" });
 
   try {
-    // Auth
+    // ---------- Auth ----------
     const userId = event.headers["x-user-id"] || event.headers["X-User-Id"];
     if (!userId) return json(401, origin, { error: "unauthorized" });
 
-    // Body
+    // ---------- Body ----------
     let body = {};
-    try { body = JSON.parse(event.body || "{}"); } catch { return json(400, origin, { error: "invalid_json" }); }
+    try { body = JSON.parse(event.body || "{}"); }
+    catch { return json(400, origin, { error: "invalid_json" }); }
 
-    // Accept messages[] or message
-    const singleMessage = typeof body.message === "string" ? body.message.trim() : "";
+    const role = String(body.role || "COMPANION").toUpperCase();
+    const model = String(body.model || DEFAULT_MODEL);
+
     let messages = Array.isArray(body.messages) ? body.messages : null;
+    const single = typeof body.message === "string" ? body.message.trim() : "";
     if (!messages) {
-      if (!singleMessage) return json(400, origin, { error: "message_required" });
-      messages = [{ role: "user", content: singleMessage }];
+      if (!single) return json(400, origin, { error: "message_required" });
+      messages = [{ role: "user", content: single }];
     }
 
-    // Role/system
-    const role = String(body.role || "COMPANION").toUpperCase();
-    const systemByRole = {
-      COMPANION: "You are Keilani: playful, kind, supportive. Keep replies short and warm.",
-      MENTOR:   "You are Keilani: practical, compassionate coach. No medical/legal advice.",
-      GAMER:    "You are Keilani: hype gamer friend and coach. Be energetic and tactical.",
-      CREATOR:  "You are Keilani: creative strategist; suggest hooks, formats, and trends.",
-      POLYGLOT: "You are Keilani: language buddy; be encouraging and correct gently.",
-      CUSTOM:   "You are Keilani: use the user's saved preferences to mirror their style."
-    };
-    const baseSystem = body.system || systemByRole[role] || systemByRole.COMPANION;
+    // ---------- Burst rate-limit (prefer Supabase, else local) ----------
+    if (sb) {
+      try {
+        const sinceIso = new Date(Date.now() - 60_000).toISOString();
+        const { count, error } = await sb
+          .from("messages")
+          .select("*", { count: "exact", head: true })
+          .eq("user_id", userId).eq("role", "user").gte("created_at", sinceIso);
+        if (error) throw error;
+        if ((count || 0) >= RATE_LIMIT_PER_MIN) {
+          return json(429, origin, { error: "rate_limited", window: "60s", limit: RATE_LIMIT_PER_MIN });
+        }
+      } catch (e) {
+        // fall back to local limiter if db check fails
+        if (!localCheckRate(userId)) {
+          return json(429, origin, { error: "rate_limited", window: "60s", limit: RATE_LIMIT_PER_MIN, note: "local" });
+        }
+      }
+    } else {
+      if (!localCheckRate(userId)) {
+        return json(429, origin, { error: "rate_limited", window: "60s", limit: RATE_LIMIT_PER_MIN, note: "local" });
+      }
+    }
 
-    // Entitlements
-    const { ent, usage } = await getEntitlements(userId).catch(() => ({ ent: { max_messages_per_day: 30 }, usage: { messages_used: 0 } }));
+    // ---------- Daily entitlement ----------
+    const { ent, usage } = await getEntitlements(userId);
     const maxMsgs = Number(ent.max_messages_per_day || 30);
     if ((usage.messages_used || 0) >= maxMsgs) {
       return json(402, origin, { error: "limit_reached", upgrade: true });
     }
 
-    // OpenAI config
-    const key = process.env.OPENAI_API_KEY;
-    const model = body.model || process.env.OPENAI_MODEL || "gpt-4o-mini";
-    if (!key) return json(500, origin, { error: "openai_error", detail: "OPENAI_API_KEY missing" });
-
-    // ---- Optional RAG (Supabase kb_chunks + RPC function match_kb_chunks)
-    let system = baseSystem;
-    const supaReady = !!(process.env.SUPABASE_URL && process.env.SUPABASE_SERVICE_ROLE);
-    if (supaReady) {
+    // ---------- RAG retrieval (optional) ----------
+    let ragUsed = false, ragHits = 0, sources = [];
+    let context = "";
+    if (sb && body.rag !== false) {
       try {
-        const supa = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE, { auth: { persistSession: false } });
+        // Use the last user utterance for retrieval
         const lastUser = [...messages].reverse().find(m => m.role === "user")?.content || "";
         if (lastUser) {
-          const embRes = await fetch("https://api.openai.com/v1/embeddings", {
-            method: "POST",
-            headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
-            body: JSON.stringify({ model: "text-embedding-3-small", input: lastUser })
-          });
-          const embData = await embRes.json();
-          const qvec = embData?.data?.[0]?.embedding;
-          if (qvec) {
-            const { data: hits, error } = await supa.rpc("match_kb_chunks", { query_embedding: qvec, match_count: 6 });
-            if (!error && hits?.length) {
-              const ctx = hits.map((h, i) => `(${i + 1}) ${h.chunk}`).join("\n\n");
-              system = `${baseSystem}\n\nUse the following CONTEXT if relevant. If it conflicts, prefer the context.\n\n${ctx}`;
-            }
+          const qEmb = await embedText(lastUser);
+          // Prefer RPC if present
+          let hits = [];
+          try {
+            const { data } = await sb.rpc("match_kb", {
+              query_embedding: qEmb,
+              match_count: body.rag_count ?? 5,
+              similarity_threshold: body.rag_threshold ?? 0.70
+            });
+            hits = data || [];
+          } catch (rpcErr) {
+            // RPC not available; skip quietly
+            console.error("RAG RPC error:", rpcErr?.message || rpcErr);
+          }
+          if (Array.isArray(hits) && hits.length) {
+            ragUsed = true;
+            ragHits = hits.length;
+            sources = hits.map(h => ({ title: h.title, source: h.source, score: h.similarity || h.score }));
+            context = hits.map(h => `Source: ${h.source}\n${h.chunk}`).join("\n---\n");
           }
         }
       } catch (e) {
-        // If retrieval fails, continue without RAG
         console.error("RAG retrieval failed:", e?.message || e);
       }
     }
 
-    // OpenAI call
+    // ---------- Compose messages for OpenAI ----------
+    const system = buildSystem(role, context);
     const payload = {
       model,
       temperature: body.temperature ?? 0.8,
@@ -120,32 +184,34 @@ exports.handler = async (event) => {
       messages: [{ role: "system", content: system }, ...messages]
     };
 
+    // ---------- Call OpenAI ----------
     const oaRes = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
-      headers: { Authorization: `Bearer ${key}`, "Content-Type": "application/json" },
+      headers: { Authorization: `Bearer ${OPENAI_KEY}`, "Content-Type": "application/json" },
       body: JSON.stringify(payload)
     });
 
-    let data; try { data = await oaRes.json(); } catch { data = null; }
+    let data;
+    try { data = await oaRes.json(); } catch { data = null; }
     if (!oaRes.ok) return json(oaRes.status, origin, { error: "openai_error", detail: data || (await oaRes.text().catch(() => "")) });
 
     const reply = data?.choices?.[0]?.message?.content?.trim() || "…";
 
-    // Optional: persist last user + assistant message
-    if (supaReady) {
-      try {
-        const supa = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE, { auth: { persistSession: false } });
-        const lastUser = [...messages].reverse().find(m => m.role === "user");
-        const rows = [];
-        if (lastUser?.content) rows.push({ user_id: userId, role: "user", content: lastUser.content });
-        rows.push({ user_id: userId, role: "assistant", content: reply });
-        if (rows.length) await supa.from("messages").insert(rows);
-      } catch (e) {
-        console.error("save messages failed:", e?.message || e);
-      }
-    }
+    // ---------- Persistence (best-effort) ----------
+    try {
+      await saveMessages?.(userId, [
+        ...messages.map(m => ({ role: m.role, content: m.content })),
+        { role: "assistant", content: reply }
+      ]);
+    } catch (e) { console.error("saveMessages failed:", e); }
 
-    return json(200, origin, { ok: true, reply, model, usage: data?.usage });
+    // ---------- Usage bump (daily counter) ----------
+    try { await bumpUsage(userId, { messages: 1 }); }
+    catch (e) { console.error("bumpUsage failed:", e); }
+
+    // ---------- Done ----------
+    return json(200, origin, { ok: true, reply, model, usage: data?.usage, rag: { used: ragUsed, hits: ragHits, sources } });
+
   } catch (e) {
     return json(500, origin, { error: "server_error", detail: String(e?.message || e) });
   }
