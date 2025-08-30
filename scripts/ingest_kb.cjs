@@ -1,8 +1,7 @@
-@'
-/* Usage:
-   node scripts/ingest_kb.cjs "./docs/**/*.{md,txt}"
-   env: OPENAI_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE
-*/
+﻿// scripts/ingest_kb.cjs
+// Usage: node scripts/ingest_kb.cjs "./docs/**/*.{md,txt}"
+// Env:   OPENAI_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE
+
 const { createClient } = require("@supabase/supabase-js");
 const { glob } = require("glob");
 const fs = require("fs/promises");
@@ -27,12 +26,12 @@ function splitIntoChunks(text, target=TARGET_TOKENS, overlap=OVERLAP_TOKENS){
   const paras=(text||"").split(/\n{2,}/g); const out=[]; let buf=[],tok=0;
   for(const p of paras){ const t=approxTokens(p);
     if(tok+t>target && buf.length){
-      out.push(buf.join("\\n\\n"));
-      const joined=buf.join("\\n\\n"), keep=Math.floor(overlap*4);
-      const tail=joined.slice(-keep); buf=tail?[tail,p]:[p]; tok=approxTokens(buf.join("\\n\\n"));
+      out.push(buf.join("\n\n"));
+      const joined=buf.join("\n\n"), keep=Math.floor(overlap*4);
+      const tail=joined.slice(-keep); buf=tail?[tail,p]:[p]; tok=approxTokens(buf.join("\n\n"));
     } else { buf.push(p); tok+=t; }
   }
-  if(buf.length) out.push(buf.join("\\n\\n"));
+  if(buf.length) out.push(buf.join("\n\n"));
   return out.map(s=>s.trim()).filter(Boolean);
 }
 
@@ -59,7 +58,7 @@ async function upsertChunk({title,source,chunk,embedding,idx,total}){
   console.log(`Found ${files.length} file(s)`);
   for(const f of files){
     const raw=await fs.readFile(f,"utf8");
-    const clean=raw.replace(/^---[\\s\\S]*?---\\n/,"");
+    const clean=raw.replace(/^---[\\s\\S]*?---\\n/,""); // remove YAML frontmatter if present
     const title=path.basename(f);
     const source=path.relative(process.cwd(),f).replaceAll("\\\\","/");
     const chunks=splitIntoChunks(clean);
@@ -72,4 +71,3 @@ async function upsertChunk({title,source,chunk,embedding,idx,total}){
   }
   console.log("Done.");
 })().catch(e=>{ console.error(e); process.exit(1); });
-'@ | Set-Content -Encoding UTF8 scripts/ingest_kb.cjs
