@@ -1,27 +1,35 @@
+// netlify/functions/billing-checkout.js
 const Stripe = require("stripe");
 const { createClient } = require("@supabase/supabase-js");
-const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
 
 exports.handler = async (event) => {
+  if (event.httpMethod !== "POST") return { statusCode: 405, body: "method_not_allowed" };
+
   try {
-    if (event.httpMethod !== "POST") return { statusCode: 405, body: "Method not allowed" };
-
     const body = JSON.parse(event.body || "{}");
-    const tier = String(body.tier || "").toUpperCase();
-    const userId = (event.headers["x-user-id"] || event.headers["X-User-Id"]);
-
+    const tier = String(body.tier || body.plan || "FAN").toUpperCase(); // FAN | VIP | ULTRA
+    const userId = event.headers["x-user-id"] || event.headers["X-User-Id"];
     if (!userId) return { statusCode: 401, body: JSON.stringify({ error: "unauthorized" }) };
-    if (!["FAN","VIP","ULTRA"].includes(tier)) return { statusCode: 400, body: JSON.stringify({ error: "invalid tier" }) };
 
-    const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE);
-    const { data: priceRow, error } = await sb.from("tier_prices").select("stripe_price_id").eq("tier_code", tier).single();
-    if (error || !priceRow) throw new Error("price not found");
+    const sb = createClient(process.env.SUPABASE_URL, process.env.SUPABASE_SERVICE_ROLE, { auth: { persistSession:false } });
+    const stripe = new Stripe(process.env.STRIPE_SECRET_KEY);
+
+    // get price id from your table, fallback to env
+    let priceId;
+    const { data: priceRow } = await sb.from("tier_prices").select("stripe_price_id").eq("tier_code", tier).single();
+    priceId = priceRow?.stripe_price_id ||
+      (tier === "ULTRA" ? process.env.PRICE_ULTRA :
+       tier === "VIP"   ? process.env.PRICE_VIP   :
+                          process.env.PRICE_FAN);
+
+    if (!priceId) return { statusCode: 400, body: JSON.stringify({ error: "missing price id" }) };
 
     const session = await stripe.checkout.sessions.create({
       mode: "subscription",
-      line_items: [{ price: priceRow.stripe_price_id, quantity: 1 }],
-      success_url: "https://www.keilani.ai/?billing=success",
-      cancel_url: "https://www.keilani.ai/?billing=cancel",
+      line_items: [{ price: priceId, quantity: 1 }],
+      success_url: "https://keilani.ai/engage?billing=success",
+      cancel_url:  "https://keilani.ai/engage?billing=cancel",
+      client_reference_id: userId,
       metadata: { userId, tier }
     });
 
