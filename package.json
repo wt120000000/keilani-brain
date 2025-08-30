@@ -3,7 +3,8 @@
   "private": true,
   "type": "commonjs",
   "dependencies": {
-    "@supabase/supabase-js": "^2.56.0",
+    "@supabase/supabase-js": "^2.56.1",
+    "glob": "^11.0.3",
     "stripe": "^18.5.0"
   },
   "devDependencies": {
@@ -35,4 +36,3 @@
     ]
   }
 }
-
