@@ -1,6 +1,6 @@
 // scripts/ingest_kb.cjs
 /* Usage:
-   node scripts/ingest_kb.cjs './docs/**/*.{md,txt}'
+   node scripts/ingest_kb.cjs "./docs/**/*.{md,txt}"
    env: OPENAI_API_KEY, SUPABASE_URL, SUPABASE_SERVICE_ROLE
 */
 const { createClient } = require("@supabase/supabase-js");
