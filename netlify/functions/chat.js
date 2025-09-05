@@ -165,15 +165,17 @@ exports.handler = async (event) => {
     }
 
     // ---------- Compose messages for OpenAI ----------
-		const isG5 = model.startsWith("gpt-5");
-		const payload = {
-			model,
-			temperature: body.temperature ?? 0.8,
-			messages: [{ role: "system", content: system }, ...messages],
-			...(isG5
-				? { max_completion_tokens: body.max_tokens ?? 400 }
-				: { max_tokens: body.max_tokens ?? 400 })
+	const isG5 = model.startsWith("gpt-5");
+	const payload = {
+	  model,
+      // keep temp in a safe range
+      temperature: Math.min(Math.max(Number(body.temperature ?? 0.8), 0), 1),
+      messages: [{ role: "system", content: system }, ...messages],
+      ...(isG5
+        ? { max_completion_tokens: Number(body.max_tokens ?? 400) }
+        : { max_tokens: Number(body.max_tokens ?? 400) })
 };
+	
 
     // ---------- Call OpenAI (non-streaming) ----------
     const oaRes = await fetch("https://api.openai.com/v1/chat/completions", {

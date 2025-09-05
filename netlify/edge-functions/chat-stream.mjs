@@ -43,15 +43,16 @@ export default async function handler(request, context) {
   const isG5 = model.startsWith("gpt-5");
   const streamPayload = {
     model,
-    temperature: body.temperature ?? 0.8,
+   temperature: Math.min(Math.max(Number(body.temperature ?? 0.8), 0), 1),
     stream: true,
     messages,
     ...(isG5
-      ? { max_completion_tokens: body.max_tokens ?? 400 }
-      : { max_tokens: body.max_tokens ?? 400 })
-  };
+      ? { max_completion_tokens: Number(body.max_tokens ?? 400) }
+      : { max_tokens: Number(body.max_tokens ?? 400) })
+};
 
-  body: JSON.stringify(streamPayload)
+body: JSON.stringify(streamPayload)
+
     
   });
 
