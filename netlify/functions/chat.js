@@ -1,16 +1,11 @@
 ﻿// netlify/functions/chat.js
-// Keilani chat endpoint: CORS, entitlements, burst rate-limit, RAG, persistence.
+// Keilani chat endpoint: CORS, entitlements, per-minute rate-limit, RAG, persistence (non-streaming JSON).
 
 const { getEntitlements, bumpUsage, saveMessages } = require("./_entitlements.js");
 const { createClient } = require("@supabase/supabase-js");
 
 // ---------- CORS allowlist ----------
-// Accepts either CORS_ALLOWED_ORIGINS or ALLOWED_ORIGINS (space/comma separated)
-const RAW_ORIGINS = (
-  process.env.CORS_ALLOWED_ORIGINS ||
-  process.env.ALLOWED_ORIGINS ||
-  ""
-).replace(/\s+/g, ",");
+const RAW_ORIGINS = (process.env.CORS_ALLOWED_ORIGINS || process.env.ALLOWED_ORIGINS || "").replace(/\s+/g, ",");
 const ALLOWLIST = RAW_ORIGINS.split(",").map(s => s.trim()).filter(Boolean);
 function corsHeaders(origin = "") {
   const allowOrigin = ALLOWLIST.includes(origin) ? origin : (ALLOWLIST[0] || "*");
@@ -28,18 +23,15 @@ function json(status, origin, obj) { return { statusCode: status, headers: corsH
 // ---------- Supabase (server-side only) ----------
 const SUPA_URL = process.env.SUPABASE_URL;
 const SUPA_KEY = process.env.SUPABASE_SERVICE_ROLE;
-const sb = (SUPA_URL && SUPA_KEY)
-  ? createClient(SUPA_URL, SUPA_KEY, { auth: { persistSession: false } })
-  : null;
+const sb = (SUPA_URL && SUPA_KEY) ? createClient(SUPA_URL, SUPA_KEY, { auth: { persistSession: false } }) : null;
 
 // ---------- Model config ----------
 const OPENAI_KEY   = process.env.OPENAI_API_KEY;
 const DEFAULT_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const ALLOWED_MODELS = new Set(["gpt-5","gpt-5-pro","gpt-4.1","gpt-4o","gpt-4o-mini"]);
 
 // ---------- Burst rate-limit (per minute) ----------
 const RATE_LIMIT_PER_MIN = Number(process.env.RATE_LIMIT_PER_MIN || 15);
-
-// In-memory fallback (best-effort across a single lambda instance)
 const localBuckets = new Map();
 function localCheckRate(userId) {
   const now = Date.now();
@@ -87,12 +79,11 @@ exports.handler = async (event) => {
   if (event.httpMethod !== "POST") {
     return json(405, origin, { error: "method_not_allowed" });
   }
-
   if (!OPENAI_KEY) return json(500, origin, { error: "openai_key_missing" });
 
   try {
     // ---------- Auth ----------
-    const userId = event.headers["x-user-id"] || event.headers["X-User-Id"];
+    const userId = event.headers["x-user-id"] || event.headers["X-User-Id"] || (process.env.NODE_ENV === 'development' ? 'dev-visitor' : '');
     if (!userId) return json(401, origin, { error: "unauthorized" });
 
     // ---------- Body ----------
@@ -101,7 +92,8 @@ exports.handler = async (event) => {
     catch { return json(400, origin, { error: "invalid_json" }); }
 
     const role = String(body.role || "COMPANION").toUpperCase();
-    const model = String(body.model || DEFAULT_MODEL);
+    const requested = String(body.model || DEFAULT_MODEL);
+    const model = ALLOWED_MODELS.has(requested) ? requested : DEFAULT_MODEL;
 
     let messages = Array.isArray(body.messages) ? body.messages : null;
     const single = typeof body.message === "string" ? body.message.trim() : "";
@@ -123,7 +115,6 @@ exports.handler = async (event) => {
           return json(429, origin, { error: "rate_limited", window: "60s", limit: RATE_LIMIT_PER_MIN });
         }
       } catch (e) {
-        // fall back to local limiter if db check fails
         if (!localCheckRate(userId)) {
           return json(429, origin, { error: "rate_limited", window: "60s", limit: RATE_LIMIT_PER_MIN, note: "local" });
         }
@@ -146,21 +137,19 @@ exports.handler = async (event) => {
     let context = "";
     if (sb && body.rag !== false) {
       try {
-        // Use the last user utterance for retrieval
         const lastUser = [...messages].reverse().find(m => m.role === "user")?.content || "";
         if (lastUser) {
           const qEmb = await embedText(lastUser);
-          // Prefer RPC if present
           let hits = [];
           try {
+            // NOTE: your RPC signature is (query_embedding vector, match_count int, match_threshold double precision)
             const { data } = await sb.rpc("match_kb", {
               query_embedding: qEmb,
               match_count: body.rag_count ?? 5,
-              similarity_threshold: body.rag_threshold ?? 0.70
+              match_threshold: body.rag_threshold ?? 0.70   // <-- fixed name
             });
             hits = data || [];
           } catch (rpcErr) {
-            // RPC not available; skip quietly
             console.error("RAG RPC error:", rpcErr?.message || rpcErr);
           }
           if (Array.isArray(hits) && hits.length) {
@@ -184,7 +173,7 @@ exports.handler = async (event) => {
       messages: [{ role: "system", content: system }, ...messages]
     };
 
-    // ---------- Call OpenAI ----------
+    // ---------- Call OpenAI (non-streaming) ----------
     const oaRes = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: { Authorization: `Bearer ${OPENAI_KEY}`, "Content-Type": "application/json" },
@@ -197,7 +186,7 @@ exports.handler = async (event) => {
 
     const reply = data?.choices?.[0]?.message?.content?.trim() || "…";
 
-    // ---------- Persistence (best-effort) ----------
+    // ---------- Persistence ----------
     try {
       await saveMessages?.(userId, [
         ...messages.map(m => ({ role: m.role, content: m.content })),
@@ -209,9 +198,7 @@ exports.handler = async (event) => {
     try { await bumpUsage(userId, { messages: 1 }); }
     catch (e) { console.error("bumpUsage failed:", e); }
 
-    // ---------- Done ----------
     return json(200, origin, { ok: true, reply, model, usage: data?.usage, rag: { used: ragUsed, hits: ragHits, sources } });
-
   } catch (e) {
     return json(500, origin, { error: "server_error", detail: String(e?.message || e) });
   }

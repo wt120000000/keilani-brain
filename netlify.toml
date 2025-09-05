@@ -40,3 +40,9 @@
 # Daily retention job: purge messages older than 90 days.
 [functions."purge-old"]
   schedule = "15 4 * * *"   # 04:15 UTC
+  
+  # netlify.toml (append this if not present)
+[[edge_functions]]
+path = "/api/chat-stream"
+function = "chat-stream"
+
