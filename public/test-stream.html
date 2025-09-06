@@ -79,6 +79,12 @@
         display: inline-block;
         margin-right: 8px;
       }
+      .switch {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-top: 10px;
+      }
     </style>
   </head>
   <body>
@@ -110,6 +116,7 @@
           <input id="maxTokens" type="number" step="1" min="16" value="256" />
         </div>
       </div>
+
       <div class="row" style="margin-top: 12px">
         <div>
           <label for="metaSource">Metadata: source (optional)</label>
@@ -122,6 +129,21 @@
             <option value="json">/.netlify/functions/chat (JSON)</option>
           </select>
         </div>
+      </div>
+
+      <div class="switch">
+        <input id="legacy" type="checkbox" />
+        <label for="legacy" style="margin: 0"
+          >Use legacy messages[] payload</label
+        >
+      </div>
+
+      <div class="row" id="sysRow" style="margin-top: 12px; display: none">
+        <div>
+          <label for="system">System prompt (optional)</label>
+          <input id="system" placeholder="e.g. Be concise." />
+        </div>
+        <div></div>
       </div>
     </div>
 
@@ -149,14 +171,17 @@
           align-items: center;
         "
       >
-        <strong>Output</strong>
+        <div>
+          <strong>Output</strong>
+          <span id="reqid" class="muted" style="margin-left: 12px"></span>
+        </div>
         <span id="tok" class="muted">tokens: 0</span>
       </div>
       <pre id="out"></pre>
     </div>
 
     <script type="module">
-      import { streamChat } from "/js/streamClient.js?v=1";
+      import { streamChat } from "/js/streamClient.js";
 
       const el = (id) => document.getElementById(id);
       const modelEl = el("model");
@@ -164,21 +189,53 @@
       const maxTokensEl = el("maxTokens");
       const sourceEl = el("metaSource");
       const endpointEl = el("endpoint");
+      const legacyEl = el("legacy");
+      const sysRow = el("sysRow");
+      const systemEl = el("system");
       const msgEl = el("message");
       const goBtn = el("go");
       const stopBtn = el("stop");
       const out = el("out");
       const status = el("status");
       const tok = el("tok");
+      const reqid = el("reqid");
 
       let controller = null;
       let tokenCount = 0;
+
+      legacyEl.onchange = () => {
+        sysRow.style.display = legacyEl.checked ? "grid" : "none";
+      };
 
       function reset() {
         out.textContent = "";
         status.textContent = "";
         tok.textContent = "tokens: 0";
+        reqid.textContent = "";
         tokenCount = 0;
+      }
+
+      function buildPayload() {
+        const model = modelEl.value;
+        const tVal = Number(temperatureEl.value);
+        const maxVal = Number(maxTokensEl.value);
+        const src = sourceEl.value?.trim();
+        const isLegacy = legacyEl.checked;
+
+        const base = { model };
+        if (!Number.isNaN(tVal)) base.temperature = tVal;
+        if (!Number.isNaN(maxVal) && maxVal >= 1)
+          base.max_output_tokens = maxVal;
+        if (src) base.metadata = { source: src };
+
+        if (isLegacy) {
+          const messages = [];
+          const sys = systemEl.value?.trim();
+          if (sys) messages.push({ role: "system", content: sys });
+          messages.push({ role: "user", content: msgEl.value });
+          return { ...base, messages };
+        }
+        return { ...base, message: msgEl.value };
       }
 
       stopBtn.onclick = () => {
@@ -192,33 +249,25 @@
         reset();
         goBtn.disabled = true;
 
-        const payload = {
-          message: msgEl.value,
-          model: modelEl.value,
-        };
-
-        const tVal = Number(temperatureEl.value);
-        if (!Number.isNaN(tVal)) payload.temperature = tVal;
-
-        const maxVal = Number(maxTokensEl.value);
-        if (!Number.isNaN(maxVal) && maxVal >= 1)
-          payload.max_output_tokens = maxVal;
-
-        const src = sourceEl.value?.trim();
-        if (src) payload.metadata = { source: src };
-
+        const payload = buildPayload();
         const which = endpointEl.value;
 
         if (which === "json") {
-          // Non-streaming JSON call to /.netlify/functions/chat
+          // Non-streaming JSON path
           try {
             const resp = await fetch("/api/chat", {
               method: "POST",
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify(payload),
             });
+            const requestId =
+              resp.headers.get("x-openai-request-id") ||
+              resp.headers.get("openai-request-id") ||
+              "";
+            if (requestId) reqid.textContent = `request-id: ${requestId}`;
+
             const data = await resp.json();
-            // Pull a best-effort text
+            // best-effort text extraction
             let text = "";
             try {
               const msg = data?.output?.[0];
@@ -241,12 +290,15 @@
           return;
         }
 
-        // Streaming via /api/chat-stream
+        // Streaming SSE path
         controller = new AbortController();
         status.textContent = "streaming…";
         try {
           await streamChat(payload, {
             signal: controller.signal,
+            onHeaders: (rid) => {
+              if (rid) reqid.textContent = `request-id: ${rid}`;
+            },
             onToken: (t) => {
               out.textContent += t;
               tokenCount += 1;
