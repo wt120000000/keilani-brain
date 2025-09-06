@@ -12,7 +12,8 @@
   # Helpful when functions import sibling files.
   included_files = ["netlify/functions/**"]
 
-# Pretty API route -> Functions. Force ensures it always wins.
+# Pretty API routes -> Functions. Force ensures it always wins.
+# NOTE: Edge functions run before redirects; the chat-stream path below is excluded from this redirect automatically.
 [[redirects]]
   from = "/api/*"
   to   = "/.netlify/functions/:splat"
@@ -23,26 +24,27 @@
 [[headers]]
   for = "/*"
   [headers.values]
-  X-Frame-Options = "SAMEORIGIN"
-  X-Content-Type-Options = "nosniff"
-  Referrer-Policy = "strict-origin-when-cross-origin"
-  Permissions-Policy = "camera=(), microphone=(), geolocation=()"
-  Strict-Transport-Security = "max-age=63072000; includeSubDomains; preload"
-  # IMPORTANT: keep the connect-src list in sync with your stack/domains.
-  Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-inline' https://*.netlify.app; connect-src 'self' https://keilani-brain.netlify.app https://api.openai.com https://*.supabase.co https://*.netlify.app https://framer.com https://app.framerstatic.com https://api.stripe.com; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; frame-ancestors 'self';"
+    X-Frame-Options = "SAMEORIGIN"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+    Permissions-Policy = "camera=(), microphone=(), geolocation=()"
+    Strict-Transport-Security = "max-age=63072000; includeSubDomains; preload"
+    # IMPORTANT: keep the connect-src list in sync with your stack/domains.
+    # Include your custom domain if you proxy through it (e.g., https://api.keilani.ai).
+    Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-inline' https://*.netlify.app; connect-src 'self' https://keilani-brain.netlify.app https://api.openai.com https://*.supabase.co https://*.netlify.app https://framer.com https://app.framerstatic.com https://api.stripe.com https://api.keilani.ai; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; frame-ancestors 'self';"
 
 # Cache images & icons aggressively.
 [[headers]]
   for = "/*.(png|svg|jpg|jpeg|webp|gif|ico)"
   [headers.values]
-  Cache-Control = "public, max-age=604800, immutable"
+    Cache-Control = "public, max-age=604800, immutable"
 
 # Daily retention job: purge messages older than 90 days.
 [functions."purge-old"]
   schedule = "15 4 * * *"   # 04:15 UTC
-  
-  # netlify.toml (append this if not present)
-[[edge_functions]]
-path = "/api/chat-stream"
-function = "chat-stream"
 
+# Edge function for SSE streaming (if you use /api/chat-stream).
+# Make sure there's a corresponding file at: /netlify/edge-functions/chat-stream.ts (or .js)
+[[edge_functions]]
+  path = "/api/chat-stream"
+  function = "chat-stream"

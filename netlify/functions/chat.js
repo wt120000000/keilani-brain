@@ -1,209 +1,109 @@
-﻿// netlify/functions/chat.js
-// Keilani chat endpoint: CORS, entitlements, per-minute rate-limit, RAG, persistence (non-streaming JSON).
+﻿/**
+ * Netlify Function: /api/chat  →  /.netlify/functions/chat
+ * Uses OpenAI Responses API (model + input). No deprecated chat/completions.
+ * - POST body: { message: string, model?: string, stream?: boolean }
+ * - CORS preflight supported
+ */
 
-const { getEntitlements, bumpUsage, saveMessages } = require("./_entitlements.js");
-const { createClient } = require("@supabase/supabase-js");
+const CORS_HEADERS = {
+  "Access-Control-Allow-Origin": "*", // tighten to your domain when ready
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+};
 
-// ---------- CORS allowlist ----------
-const RAW_ORIGINS = (process.env.CORS_ALLOWED_ORIGINS || process.env.ALLOWED_ORIGINS || "").replace(/\s+/g, ",");
-const ALLOWLIST = RAW_ORIGINS.split(",").map(s => s.trim()).filter(Boolean);
-function corsHeaders(origin = "") {
-  const allowOrigin = ALLOWLIST.includes(origin) ? origin : (ALLOWLIST[0] || "*");
+const DEFAULT_MODEL = "gpt-4.1-mini";
+
+/** Parse JSON safely */
+function safeParse(json) {
+  try { return JSON.parse(json || "{}"); } catch { return {}; }
+}
+
+/** Build OpenAI request body from incoming payload */
+function buildOpenAIRequestBody({ message, model, stream }) {
+  const cleanMsg =
+    typeof message === "string" && message.trim().length
+      ? message.trim()
+      : "health check";
+
   return {
-    "Access-Control-Allow-Origin": allowOrigin,
-    "Vary": "Origin",
-    "Access-Control-Allow-Methods": "POST,OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type,Authorization,X-User-Id,x-user-id",
-    "Access-Control-Max-Age": "86400",
-    "Content-Type": "application/json; charset=utf-8"
+    model: model && typeof model === "string" ? model : DEFAULT_MODEL,
+    input: cleanMsg,
+    ...(stream ? { stream: true } : {}),
   };
 }
-function json(status, origin, obj) { return { statusCode: status, headers: corsHeaders(origin), body: JSON.stringify(obj) }; }
 
-// ---------- Supabase (server-side only) ----------
-const SUPA_URL = process.env.SUPABASE_URL;
-const SUPA_KEY = process.env.SUPABASE_SERVICE_ROLE;
-const sb = (SUPA_URL && SUPA_KEY) ? createClient(SUPA_URL, SUPA_KEY, { auth: { persistSession: false } }) : null;
-
-// ---------- Model config ----------
-const OPENAI_KEY   = process.env.OPENAI_API_KEY;
-const DEFAULT_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
-const ALLOWED_MODELS = new Set(["gpt-5","gpt-5-pro","gpt-4.1","gpt-4o","gpt-4o-mini"]);
-
-// ---------- Burst rate-limit (per minute) ----------
-const RATE_LIMIT_PER_MIN = Number(process.env.RATE_LIMIT_PER_MIN || 15);
-const localBuckets = new Map();
-function localCheckRate(userId) {
-  const now = Date.now();
-  const windowMs = 60_000;
-  const arr = localBuckets.get(userId) || [];
-  const fresh = arr.filter(t => now - t < windowMs);
-  if (fresh.length >= RATE_LIMIT_PER_MIN) return false;
-  fresh.push(now);
-  localBuckets.set(userId, fresh);
-  return true;
-}
-
-// ---------- Helpers ----------
-async function embedText(text, model = "text-embedding-3-small") {
-  const r = await fetch("https://api.openai.com/v1/embeddings", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${OPENAI_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify({ model, input: text })
-  });
-  if (!r.ok) throw new Error(await r.text());
-  const d = await r.json();
-  return d?.data?.[0]?.embedding;
-}
-
-function buildSystem(role, ctx) {
-  const byRole = {
-    COMPANION: "You are Keilani: playful, kind, supportive. Keep replies short and warm.",
-    MENTOR:    "You are Keilani: practical, compassionate coach. No medical/legal advice.",
-    GAMER:     "You are Keilani: hype gamer friend and coach. Be energetic and tactical.",
-    CREATOR:   "You are Keilani: creative strategist; suggest hooks, formats, and trends.",
-    POLYGLOT:  "You are Keilani: language buddy; be encouraging and correct gently.",
-    CUSTOM:    "You are Keilani: use the user's saved preferences to mirror their style."
+/** Return JSON response */
+function json(statusCode, data, extraHeaders = {}) {
+  return {
+    statusCode,
+    headers: { ...CORS_HEADERS, "Content-Type": "application/json", ...extraHeaders },
+    body: JSON.stringify(data),
   };
-  const base = byRole[role] || byRole.COMPANION;
-  if (!ctx) return base;
-  return base + " When helpful, ground answers in the Context below. If context is irrelevant, answer normally.\n\nCONTEXT:\n" + ctx;
+}
+
+/** Return SSE response (streaming passthrough) */
+function sse(statusCode, body, extraHeaders = {}) {
+  return {
+    statusCode,
+    headers: {
+      ...CORS_HEADERS,
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+      ...extraHeaders,
+    },
+    body,
+    isBase64Encoded: false,
+  };
 }
 
 exports.handler = async (event) => {
-  const origin = event.headers.origin || event.headers.Origin || "";
-
+  // CORS preflight
   if (event.httpMethod === "OPTIONS") {
-    return { statusCode: 200, headers: corsHeaders(origin), body: "" };
+    return { statusCode: 204, headers: CORS_HEADERS, body: "" };
   }
+
+  // Method guard
   if (event.httpMethod !== "POST") {
-    return json(405, origin, { error: "method_not_allowed" });
+    return json(405, { error: "Method Not Allowed. Use POST." });
   }
-  if (!OPENAI_KEY) return json(500, origin, { error: "openai_key_missing" });
+
+  // Env guard
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) {
+    return json(500, { error: "Missing OPENAI_API_KEY" });
+  }
+
+  // Parse incoming payload
+  const { message, model, stream } = safeParse(event.body);
+
+  // Build OpenAI request
+  const openAIReq = buildOpenAIRequestBody({ message, model, stream });
 
   try {
-    // ---------- Auth ----------
-    const userId = event.headers["x-user-id"] || event.headers["X-User-Id"] || (process.env.NODE_ENV === 'development' ? 'dev-visitor' : '');
-    if (!userId) return json(401, origin, { error: "unauthorized" });
-
-    // ---------- Body ----------
-    let body = {};
-    try { body = JSON.parse(event.body || "{}"); }
-    catch { return json(400, origin, { error: "invalid_json" }); }
-
-    const role = String(body.role || "COMPANION").toUpperCase();
-    const requested = String(body.model || DEFAULT_MODEL);
-    const model = ALLOWED_MODELS.has(requested) ? requested : DEFAULT_MODEL;
-
-    let messages = Array.isArray(body.messages) ? body.messages : null;
-    const single = typeof body.message === "string" ? body.message.trim() : "";
-    if (!messages) {
-      if (!single) return json(400, origin, { error: "message_required" });
-      messages = [{ role: "user", content: single }];
-    }
-
-    // ---------- Burst rate-limit (prefer Supabase, else local) ----------
-    if (sb) {
-      try {
-        const sinceIso = new Date(Date.now() - 60_000).toISOString();
-        const { count, error } = await sb
-          .from("messages")
-          .select("*", { count: "exact", head: true })
-          .eq("user_id", userId).eq("role", "user").gte("created_at", sinceIso);
-        if (error) throw error;
-        if ((count || 0) >= RATE_LIMIT_PER_MIN) {
-          return json(429, origin, { error: "rate_limited", window: "60s", limit: RATE_LIMIT_PER_MIN });
-        }
-      } catch (e) {
-        if (!localCheckRate(userId)) {
-          return json(429, origin, { error: "rate_limited", window: "60s", limit: RATE_LIMIT_PER_MIN, note: "local" });
-        }
-      }
-    } else {
-      if (!localCheckRate(userId)) {
-        return json(429, origin, { error: "rate_limited", window: "60s", limit: RATE_LIMIT_PER_MIN, note: "local" });
-      }
-    }
-
-    // ---------- Daily entitlement ----------
-    const { ent, usage } = await getEntitlements(userId);
-    const maxMsgs = Number(ent.max_messages_per_day || 30);
-    if ((usage.messages_used || 0) >= maxMsgs) {
-      return json(402, origin, { error: "limit_reached", upgrade: true });
-    }
-
-    // ---------- RAG retrieval (optional) ----------
-    let ragUsed = false, ragHits = 0, sources = [];
-    let context = "";
-    if (sb && body.rag !== false) {
-      try {
-        const lastUser = [...messages].reverse().find(m => m.role === "user")?.content || "";
-        if (lastUser) {
-          const qEmb = await embedText(lastUser);
-          let hits = [];
-          try {
-            // NOTE: your RPC signature is (query_embedding vector, match_count int, match_threshold double precision)
-            const { data } = await sb.rpc("match_kb", {
-              query_embedding: qEmb,
-              match_count: body.rag_count ?? 5,
-              match_threshold: body.rag_threshold ?? 0.70   // <-- fixed name
-            });
-            hits = data || [];
-          } catch (rpcErr) {
-            console.error("RAG RPC error:", rpcErr?.message || rpcErr);
-          }
-          if (Array.isArray(hits) && hits.length) {
-            ragUsed = true;
-            ragHits = hits.length;
-            sources = hits.map(h => ({ title: h.title, source: h.source, score: h.similarity || h.score }));
-            context = hits.map(h => `Source: ${h.source}\n${h.chunk}`).join("\n---\n");
-          }
-        }
-      } catch (e) {
-        console.error("RAG retrieval failed:", e?.message || e);
-      }
-    }
-
-    // ---------- Compose messages for OpenAI ----------
-	const isG5 = model.startsWith("gpt-5");
-	const payload = {
-	  model,
-      // keep temp in a safe range
-      temperature: Math.min(Math.max(Number(body.temperature ?? 0.8), 0), 1),
-      messages: [{ role: "system", content: system }, ...messages],
-      ...(isG5
-        ? { max_completion_tokens: Number(body.max_tokens ?? 400) }
-        : { max_tokens: Number(body.max_tokens ?? 400) })
-};
-	
-
-    // ---------- Call OpenAI (non-streaming) ----------
-    const oaRes = await fetch("https://api.openai.com/v1/chat/completions", {
+    const rsp = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
-      headers: { Authorization: `Bearer ${OPENAI_KEY}`, "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
+      headers: {
+        Authorization: `Bearer ${apiKey}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify(openAIReq),
     });
 
-    let data;
-    try { data = await oaRes.json(); } catch { data = null; }
-    if (!oaRes.ok) return json(oaRes.status, origin, { error: "openai_error", detail: data || (await oaRes.text().catch(() => "")) });
+    // Streaming passthrough
+    if (openAIReq.stream) {
+      // Netlify supports returning a ReadableStream body directly
+      // We pass through OpenAI's SSE stream unchanged.
+      return sse(rsp.status, await rsp.text());
+    }
 
-    const reply = data?.choices?.[0]?.message?.content?.trim() || "…";
+    // Non-streaming JSON
+    const data = await rsp.json();
 
-    // ---------- Persistence ----------
-    try {
-      await saveMessages?.(userId, [
-        ...messages.map(m => ({ role: m.role, content: m.content })),
-        { role: "assistant", content: reply }
-      ]);
-    } catch (e) { console.error("saveMessages failed:", e); }
-
-    // ---------- Usage bump (daily counter) ----------
-    try { await bumpUsage(userId, { messages: 1 }); }
-    catch (e) { console.error("bumpUsage failed:", e); }
-
-    return json(200, origin, { ok: true, reply, model, usage: data?.usage, rag: { used: ragUsed, hits: ragHits, sources } });
-  } catch (e) {
-    return json(500, origin, { error: "server_error", detail: String(e?.message || e) });
+    // Pass through OpenAI status (200 for success, 4xx/5xx for errors)
+    return json(rsp.status, data);
+  } catch (err) {
+    // Network or unexpected error
+    return json(500, { error: String(err) });
   }
 };
