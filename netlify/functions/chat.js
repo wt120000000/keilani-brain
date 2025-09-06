@@ -1,109 +1,143 @@
 ﻿/**
  * Netlify Function: /api/chat  →  /.netlify/functions/chat
- * Uses OpenAI Responses API (model + input). No deprecated chat/completions.
- * - POST body: { message: string, model?: string, stream?: boolean }
- * - CORS preflight supported
+ * Modern OpenAI Responses API (model + input).
+ * Accepts:
+ *   { message: string, model?: string, stream?: boolean, temperature?: number, max_output_tokens?: number, metadata?: object }
+ *   or legacy { messages: Array<{role, content}>, ... }
+ * Streams if stream=true (Edge route is preferred for low-latency).
  */
 
 const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*", // tighten to your domain when ready
+  "Access-Control-Allow-Origin": "*", // tighten later
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
 const DEFAULT_MODEL = "gpt-4.1-mini";
+const MIN_OUTPUT_TOKENS = 16; // enforce sane floor to prevent 400s
 
-/** Parse JSON safely */
-function safeParse(json) {
-  try { return JSON.parse(json || "{}"); } catch { return {}; }
+/* ------------ helpers ------------ */
+const json = (statusCode, data, extraHeaders = {}) => ({
+  statusCode,
+  headers: { ...CORS_HEADERS, "Content-Type": "application/json", ...extraHeaders },
+  body: JSON.stringify(data),
+});
+
+const sse = (statusCode, body, extraHeaders = {}) => ({
+  statusCode,
+  headers: {
+    ...CORS_HEADERS,
+    "Content-Type": "text/event-stream",
+    "Cache-Control": "no-cache",
+    Connection: "keep-alive",
+    ...extraHeaders,
+  },
+  body,
+  isBase64Encoded: false,
+});
+
+const safeParse = (raw) => {
+  try { return JSON.parse(raw || "{}"); } catch { return {}; }
+};
+
+/** Normalize to a single string for Responses API "input" */
+function normalizeInput(payload) {
+  if (typeof payload.message === "string" && payload.message.trim()) {
+    return payload.message.trim();
+  }
+  if (Array.isArray(payload.messages) && payload.messages.length) {
+    const lines = payload.messages
+      .filter(m => m && typeof m.content === "string")
+      .map(m => `${(m.role || "user").toUpperCase()}: ${m.content.trim()}`);
+    if (lines.length) return lines.join("\n");
+  }
+  return "health check";
 }
 
-/** Build OpenAI request body from incoming payload */
-function buildOpenAIRequestBody({ message, model, stream }) {
-  const cleanMsg =
-    typeof message === "string" && message.trim().length
-      ? message.trim()
-      : "health check";
+/** Build Responses API request body with guards */
+function buildOpenAIRequestBody(payload) {
+  const {
+    model,
+    stream,
+    temperature,
+    max_output_tokens,
+    metadata,
+  } = payload || {};
 
-  return {
-    model: model && typeof model === "string" ? model : DEFAULT_MODEL,
-    input: cleanMsg,
-    ...(stream ? { stream: true } : {}),
+  const body = {
+    model: (typeof model === "string" && model.trim()) ? model.trim() : DEFAULT_MODEL,
+    input: normalizeInput(payload || {}),
   };
+
+  // Optional params
+  if (stream === true) body.stream = true;
+  if (typeof temperature === "number" && Number.isFinite(temperature)) {
+    body.temperature = temperature;
+  }
+  if (typeof max_output_tokens === "number" && Number.isFinite(max_output_tokens)) {
+    // Floor to prevent backend 400s on tiny values
+    body.max_output_tokens = Math.max(MIN_OUTPUT_TOKENS, Math.floor(max_output_tokens));
+  }
+  if (metadata && typeof metadata === "object") {
+    // Only include string-valued, flat keys
+    const clean = {};
+    for (const [k, v] of Object.entries(metadata)) {
+      if (typeof v === "string") clean[k] = v;
+    }
+    if (Object.keys(clean).length) body.metadata = clean;
+  }
+
+  return body;
 }
 
-/** Return JSON response */
-function json(statusCode, data, extraHeaders = {}) {
-  return {
-    statusCode,
-    headers: { ...CORS_HEADERS, "Content-Type": "application/json", ...extraHeaders },
-    body: JSON.stringify(data),
-  };
-}
-
-/** Return SSE response (streaming passthrough) */
-function sse(statusCode, body, extraHeaders = {}) {
-  return {
-    statusCode,
-    headers: {
-      ...CORS_HEADERS,
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive",
-      ...extraHeaders,
-    },
-    body,
-    isBase64Encoded: false,
-  };
-}
-
+/* ------------ handler ------------ */
 exports.handler = async (event) => {
   // CORS preflight
   if (event.httpMethod === "OPTIONS") {
     return { statusCode: 204, headers: CORS_HEADERS, body: "" };
   }
 
-  // Method guard
   if (event.httpMethod !== "POST") {
     return json(405, { error: "Method Not Allowed. Use POST." });
   }
 
-  // Env guard
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     return json(500, { error: "Missing OPENAI_API_KEY" });
   }
 
-  // Parse incoming payload
-  const { message, model, stream } = safeParse(event.body);
-
-  // Build OpenAI request
-  const openAIReq = buildOpenAIRequestBody({ message, model, stream });
+  const payload = safeParse(event.body);
+  const openaiReq = buildOpenAIRequestBody(payload);
 
   try {
+    const controller = (typeof AbortController !== "undefined") ? new AbortController() : null;
+    const timeout = setTimeout(() => controller?.abort(), 60_000);
+
     const rsp = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(openAIReq),
+      body: JSON.stringify(openaiReq),
+      signal: controller?.signal,
     });
 
-    // Streaming passthrough
-    if (openAIReq.stream) {
-      // Netlify supports returning a ReadableStream body directly
-      // We pass through OpenAI's SSE stream unchanged.
-      return sse(rsp.status, await rsp.text());
+    clearTimeout(timeout);
+
+    const requestId = rsp.headers.get("x-request-id") || rsp.headers.get("openai-request-id") || undefined;
+
+    if (openaiReq.stream === true) {
+      const bodyText = await rsp.text();
+      return sse(rsp.status, bodyText, requestId ? { "x-openai-request-id": requestId } : undefined);
     }
 
-    // Non-streaming JSON
-    const data = await rsp.json();
+    const data = await rsp.json().catch(() => ({}));
+    return json(rsp.status, data, requestId ? { "x-openai-request-id": requestId } : undefined);
 
-    // Pass through OpenAI status (200 for success, 4xx/5xx for errors)
-    return json(rsp.status, data);
   } catch (err) {
-    // Network or unexpected error
-    return json(500, { error: String(err) });
+    const msg = (err && err.message) ? err.message : String(err);
+    const isAbort = msg.toLowerCase().includes("aborted");
+    return json(isAbort ? 504 : 500, { error: msg });
   }
 };
