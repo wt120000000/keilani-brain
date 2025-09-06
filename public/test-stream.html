@@ -1,30 +1,272 @@
 <!doctype html>
-<html>
+<html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Stream Test</title>
+    <title>Keilani • Stream Test</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <style>
+      :root {
+        font-family:
+          ui-sans-serif,
+          system-ui,
+          -apple-system,
+          Segoe UI,
+          Roboto,
+          Arial;
+      }
+      body {
+        margin: 24px;
+      }
+      label {
+        font-size: 12px;
+        color: #555;
+        display: block;
+        margin-bottom: 6px;
+      }
+      input,
+      select,
+      textarea {
+        width: 100%;
+        padding: 10px;
+        border: 1px solid #ddd;
+        border-radius: 8px;
+      }
+      textarea {
+        min-height: 90px;
+        resize: vertical;
+      }
+      .row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 12px;
+      }
+      .row3 {
+        display: grid;
+        grid-template-columns: 1fr 1fr 1fr;
+        gap: 12px;
+      }
+      .card {
+        border: 1px solid #eee;
+        border-radius: 12px;
+        padding: 16px;
+        margin-bottom: 16px;
+      }
+      .btn {
+        padding: 10px 16px;
+        border-radius: 10px;
+        border: 0;
+        background: #111;
+        color: #fff;
+        cursor: pointer;
+      }
+      .btn:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+      pre {
+        white-space: pre-wrap;
+        word-wrap: break-word;
+        background: #fafafa;
+        padding: 12px;
+        border-radius: 10px;
+        min-height: 120px;
+      }
+      .muted {
+        color: #666;
+        font-size: 12px;
+      }
+      .inline {
+        display: inline-block;
+        margin-right: 8px;
+      }
+    </style>
   </head>
-  <body style="font-family: system-ui; padding: 20px">
+  <body>
     <h1>Stream Test</h1>
-    <button id="go">Stream</button>
-    <pre id="out"></pre>
+
+    <div class="card">
+      <div class="row3">
+        <div>
+          <label for="model">Model</label>
+          <select id="model">
+            <option value="gpt-4.1-mini" selected>gpt-4.1-mini</option>
+            <option value="gpt-5-mini">gpt-5-mini</option>
+            <option value="gpt-4o">gpt-4o</option>
+          </select>
+        </div>
+        <div>
+          <label for="temperature">Temperature</label>
+          <input
+            id="temperature"
+            type="number"
+            step="0.1"
+            min="0"
+            max="2"
+            value="0.7"
+          />
+        </div>
+        <div>
+          <label for="maxTokens">Max output tokens (min 16)</label>
+          <input id="maxTokens" type="number" step="1" min="16" value="256" />
+        </div>
+      </div>
+      <div class="row" style="margin-top: 12px">
+        <div>
+          <label for="metaSource">Metadata: source (optional)</label>
+          <input id="metaSource" placeholder="e.g. keilani-dev" />
+        </div>
+        <div>
+          <label for="endpoint">Endpoint</label>
+          <select id="endpoint">
+            <option value="stream" selected>/api/chat-stream (SSE)</option>
+            <option value="json">/.netlify/functions/chat (JSON)</option>
+          </select>
+        </div>
+      </div>
+    </div>
+
+    <div class="card">
+      <label for="message">Prompt</label>
+      <textarea id="message">Say hello in 5 words.</textarea>
+      <div style="margin-top: 10px">
+        <button id="go" class="btn">Stream</button>
+        <button
+          id="stop"
+          class="btn"
+          style="background: #444; margin-left: 8px"
+        >
+          Stop
+        </button>
+        <span id="status" class="muted inline"></span>
+      </div>
+    </div>
+
+    <div class="card">
+      <div
+        style="
+          display: flex;
+          justify-content: space-between;
+          align-items: center;
+        "
+      >
+        <strong>Output</strong>
+        <span id="tok" class="muted">tokens: 0</span>
+      </div>
+      <pre id="out"></pre>
+    </div>
+
     <script type="module">
       import { streamChat } from "/js/streamClient.js";
-      const out = document.getElementById("out");
-      document.getElementById("go").onclick = () => {
+
+      const el = (id) => document.getElementById(id);
+      const modelEl = el("model");
+      const temperatureEl = el("temperature");
+      const maxTokensEl = el("maxTokens");
+      const sourceEl = el("metaSource");
+      const endpointEl = el("endpoint");
+      const msgEl = el("message");
+      const goBtn = el("go");
+      const stopBtn = el("stop");
+      const out = el("out");
+      const status = el("status");
+      const tok = el("tok");
+
+      let controller = null;
+      let tokenCount = 0;
+
+      function reset() {
         out.textContent = "";
-        streamChat("Say hello in 5 words.", {
-          model: "gpt-4.1-mini",
-          onToken: (t) => {
-            out.textContent += t;
-          },
-          onDone: () => {
-            out.textContent += "\n\n✓ done";
-          },
-          onError: (e) => {
-            out.textContent += "\nERR: " + e.message;
-          },
-        });
+        status.textContent = "";
+        tok.textContent = "tokens: 0";
+        tokenCount = 0;
+      }
+
+      stopBtn.onclick = () => {
+        controller?.abort();
+        controller = null;
+        status.textContent = "stopped";
+        goBtn.disabled = false;
+      };
+
+      goBtn.onclick = async () => {
+        reset();
+        goBtn.disabled = true;
+
+        const payload = {
+          message: msgEl.value,
+          model: modelEl.value,
+        };
+
+        const tVal = Number(temperatureEl.value);
+        if (!Number.isNaN(tVal)) payload.temperature = tVal;
+
+        const maxVal = Number(maxTokensEl.value);
+        if (!Number.isNaN(maxVal) && maxVal >= 1)
+          payload.max_output_tokens = maxVal;
+
+        const src = sourceEl.value?.trim();
+        if (src) payload.metadata = { source: src };
+
+        const which = endpointEl.value;
+
+        if (which === "json") {
+          // Non-streaming JSON call to /.netlify/functions/chat
+          try {
+            const resp = await fetch("/api/chat", {
+              method: "POST",
+              headers: { "Content-Type": "application/json" },
+              body: JSON.stringify(payload),
+            });
+            const data = await resp.json();
+            // Pull a best-effort text
+            let text = "";
+            try {
+              const msg = data?.output?.[0];
+              if (msg?.content?.length) {
+                const part =
+                  msg.content.find((p) => p.type === "output_text") ||
+                  msg.content[0];
+                text = part?.text || "";
+              }
+            } catch {}
+            out.textContent = text || JSON.stringify(data, null, 2);
+            tok.textContent = `tokens: ${data?.usage?.total_tokens ?? 0}`;
+            status.textContent = resp.ok ? "completed" : "error";
+          } catch (err) {
+            out.textContent = String(err);
+            status.textContent = "error";
+          } finally {
+            goBtn.disabled = false;
+          }
+          return;
+        }
+
+        // Streaming via /api/chat-stream
+        controller = new AbortController();
+        status.textContent = "streaming…";
+        try {
+          await streamChat(payload, {
+            signal: controller.signal,
+            onToken: (t) => {
+              out.textContent += t;
+              tokenCount += 1;
+              tok.textContent = `tokens: ${tokenCount}`;
+            },
+            onDone: () => {
+              status.textContent = "done";
+              goBtn.disabled = false;
+            },
+            onError: (e) => {
+              status.textContent = "error";
+              out.textContent += "\n\nERR: " + (e?.message || e);
+              goBtn.disabled = false;
+            },
+          });
+        } catch (e) {
+          status.textContent = "error";
+          out.textContent += "\n\nERR: " + (e?.message || e);
+          goBtn.disabled = false;
+        }
       };
     </script>
   </body>
