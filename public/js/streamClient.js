@@ -1,59 +1,46 @@
 // public/js/streamClient.js
-// Minimal SSE client for /api/chat-stream (Edge) with optional auth + headers callback.
+// Minimal SSE client for /api/chat-stream (Edge) with client-key + request-id support.
 
-function getClientKey() {
-  // Prefer a global override, then localStorage, else empty.
-  return (
-    (typeof window !== "undefined" && window.KEILANI_PUBLIC_API_KEY) ||
-    (typeof localStorage !== "undefined" && localStorage.getItem("KEILANI_PUBLIC_API_KEY")) ||
-    ""
-  );
-}
-
-/**
- * streamChat(payload, options?)
- * payload: { message, model, temperature, max_output_tokens, ... }
- * options:
- *   - endpoint: string (default "/api/chat-stream")
- *   - onToken(text): called for each output_text delta
- *   - onDone(): called when stream completes
- *   - onError(err): called on error
- *   - onHeaders(reqId, res): called once after fetch with request id (if any)
- *   - signal: AbortSignal
- */
 export async function streamChat(
   payload,
-  { endpoint = "/api/chat-stream", onToken, onDone, onError, onHeaders, signal } = {}
+  { onToken, onDone, onError, onHeaders, signal } = {}
 ) {
   try {
-    const key = getClientKey();
+    const clientKey = localStorage.getItem("KEILANI_PUBLIC_API_KEY") || "";
+    if (!clientKey) {
+      onError?.(new Error("Missing KEILANI_PUBLIC_API_KEY in localStorage"));
+      return;
+    }
 
-    const res = await fetch(endpoint, {
+    const res = await fetch("/api/chat-stream", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        // Attach the shared client key if present
-        ...(key ? { "X-Client-Key": key } : {}),
+        "X-Client-Key": clientKey,
       },
       body: JSON.stringify(payload || {}),
       signal,
     });
 
-    // Surface the OpenAI request id, if our edge exposed it
-    try {
-      const reqId =
-        res.headers.get("x-openai-request-id") ||
-        res.headers.get("openai-request-id") ||
-        "";
-      if (reqId && typeof onHeaders === "function") onHeaders(reqId, res);
-    } catch {}
+    // Pass request-id to UI if present
+    const rid =
+      res.headers.get("x-openai-request-id") ||
+      res.headers.get("openai-request-id") ||
+      "";
+    if (rid) onHeaders?.(rid);
 
     if (!res.ok || !res.body) {
-      const text = await res.text().catch(() => "");
-      onError?.(new Error(`HTTP ${res.status} ${res.statusText}: ${text}`));
+      const msg = await res.text().catch(() => "");
+      const err = new Error(
+        `HTTP ${res.status} ${res.statusText}${
+          msg ? `: ${msg.slice(0, 400)}` : ""
+        }`
+      );
+      onError?.(err);
       return;
     }
 
+    // Stream & parse SSE
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "";
@@ -61,35 +48,39 @@ export async function streamChat(
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
-
       buffer += decoder.decode(value, { stream: true });
 
-      // SSE frames are separated by blank lines
       let idx;
       while ((idx = buffer.indexOf("\n\n")) !== -1) {
-        const frame = buffer.slice(0, idx).trim();
+        const raw = buffer.slice(0, idx).trim();
         buffer = buffer.slice(idx + 2);
-        if (!frame) continue;
+        if (!raw) continue;
 
-        // We only care about `data:` lines; `event:` are informational
-        if (frame.startsWith("data:")) {
-          const dataStr = frame.slice(5).trim();
+        // We only care about "data:" lines (ignore "event:")
+        const line = raw.startsWith("data:") ? raw.slice(5).trim() : null;
+        if (!line) continue;
 
-          if (dataStr === "[DONE]") {
-            onDone?.();
-            return;
+        if (line === "[DONE]") {
+          onDone?.();
+          return;
+        }
+
+        // OpenAI Responses SSE: JSON objects per frame
+        try {
+          const json = JSON.parse(line);
+
+          // stream text
+          if (
+            json.type === "response.output_text.delta" &&
+            typeof json.delta === "string"
+          ) {
+            onToken?.(json.delta);
           }
 
-          // OpenAI Responses streaming emits JSON chunks
-          try {
-            const json = JSON.parse(dataStr);
-            if (json.type === "response.output_text.delta" && typeof json.delta === "string") {
-              onToken?.(json.delta);
-            }
-            // Handle other event types if you want
-          } catch {
-            // Non-JSON data line — ignore
-          }
+          // optional: handle other event types as you like
+          // e.g. response.error, rate_limits.updated, etc.
+        } catch {
+          // Non-JSON frame — safely ignore
         }
       }
     }
