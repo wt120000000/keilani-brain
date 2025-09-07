@@ -1,14 +1,52 @@
 // public/js/streamClient.js
-// Minimal SSE client for /api/chat-stream (Edge). Also works in Node with fetch streams.
+// Minimal SSE client for /api/chat-stream (Edge) with optional auth + headers callback.
 
-export async function streamChat(payload, { onToken, onDone, onError, signal } = {}) {
+function getClientKey() {
+  // Prefer a global override, then localStorage, else empty.
+  return (
+    (typeof window !== "undefined" && window.KEILANI_PUBLIC_API_KEY) ||
+    (typeof localStorage !== "undefined" && localStorage.getItem("KEILANI_PUBLIC_API_KEY")) ||
+    ""
+  );
+}
+
+/**
+ * streamChat(payload, options?)
+ * payload: { message, model, temperature, max_output_tokens, ... }
+ * options:
+ *   - endpoint: string (default "/api/chat-stream")
+ *   - onToken(text): called for each output_text delta
+ *   - onDone(): called when stream completes
+ *   - onError(err): called on error
+ *   - onHeaders(reqId, res): called once after fetch with request id (if any)
+ *   - signal: AbortSignal
+ */
+export async function streamChat(
+  payload,
+  { endpoint = "/api/chat-stream", onToken, onDone, onError, onHeaders, signal } = {}
+) {
   try {
-    const res = await fetch("/api/chat-stream", {
+    const key = getClientKey();
+
+    const res = await fetch(endpoint, {
       method: "POST",
-      headers: { "Content-Type": "application/json" },
+      headers: {
+        "Content-Type": "application/json",
+        // Attach the shared client key if present
+        ...(key ? { "X-Client-Key": key } : {}),
+      },
       body: JSON.stringify(payload || {}),
       signal,
     });
+
+    // Surface the OpenAI request id, if our edge exposed it
+    try {
+      const reqId =
+        res.headers.get("x-openai-request-id") ||
+        res.headers.get("openai-request-id") ||
+        "";
+      if (reqId && typeof onHeaders === "function") onHeaders(reqId, res);
+    } catch {}
 
     if (!res.ok || !res.body) {
       const text = await res.text().catch(() => "");
@@ -31,26 +69,26 @@ export async function streamChat(payload, { onToken, onDone, onError, signal } =
       while ((idx = buffer.indexOf("\n\n")) !== -1) {
         const frame = buffer.slice(0, idx).trim();
         buffer = buffer.slice(idx + 2);
-
         if (!frame) continue;
 
         // We only care about `data:` lines; `event:` are informational
         if (frame.startsWith("data:")) {
-          const payload = frame.slice(5).trim();
-          if (payload === "[DONE]") {
+          const dataStr = frame.slice(5).trim();
+
+          if (dataStr === "[DONE]") {
             onDone?.();
             return;
           }
 
           // OpenAI Responses streaming emits JSON chunks
           try {
-            const json = JSON.parse(payload);
+            const json = JSON.parse(dataStr);
             if (json.type === "response.output_text.delta" && typeof json.delta === "string") {
               onToken?.(json.delta);
             }
-            // You can handle other event types here if you want
+            // Handle other event types if you want
           } catch {
-            // non-JSON data line — ignore
+            // Non-JSON data line — ignore
           }
         }
       }
