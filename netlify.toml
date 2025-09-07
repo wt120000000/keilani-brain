@@ -6,21 +6,16 @@
   functions = "netlify/functions"
 
 [functions]
-  # Bundle our functions with esbuild and ship only the deps we need.
   node_bundler = "esbuild"
   external_node_modules = ["stripe", "@supabase/supabase-js"]
-  # Helpful when functions import sibling files.
   included_files = ["netlify/functions/**"]
 
-# Pretty API routes -> Functions. Force ensures it always wins.
-# NOTE: Edge functions run before redirects; the chat-stream path below is excluded from this redirect automatically.
 [[redirects]]
   from = "/api/*"
   to   = "/.netlify/functions/:splat"
   status = 200
   force  = true
 
-# Global security headers (CSP includes the domains we actually talk to).
 [[headers]]
   for = "/*"
   [headers.values]
@@ -29,29 +24,24 @@
     Referrer-Policy = "strict-origin-when-cross-origin"
     Permissions-Policy = "camera=(), microphone=(), geolocation=()"
     Strict-Transport-Security = "max-age=63072000; includeSubDomains; preload"
-    # IMPORTANT: keep the connect-src list in sync with your stack/domains.
-    # Include your custom domain if you proxy through it (e.g., https://api.keilani.ai).
     Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-inline' https://*.netlify.app; connect-src 'self' https://keilani-brain.netlify.app https://api.openai.com https://*.supabase.co https://*.netlify.app https://framer.com https://app.framerstatic.com https://api.stripe.com https://api.keilani.ai; img-src 'self' data: blob:; media-src 'self' blob:; style-src 'self' 'unsafe-inline'; frame-ancestors 'self';"
 
-# Cache images & icons aggressively.
-[[headers]]
-  for = "/*.(png|svg|jpg|jpeg|webp|gif|ico)"
-  [headers.values]
-    Cache-Control = "public, max-age=604800, immutable"
-
-# Daily retention job: purge messages older than 90 days.
-[functions."purge-old"]
-  schedule = "15 4 * * *"   # 04:15 UTC
-
-# Edge function for SSE streaming (if you use /api/chat-stream).
-# Make sure there's a corresponding file at: /netlify/edge-functions/chat-stream.ts (or .js)
-[[edge_functions]]
-  path = "/api/chat-stream"
-  function = "chat-stream"
-
-# Ensure JS modules get the right MIME
+# Ensure JS modules get correct MIME
 [[headers]]
   for = "/js/*"
   [headers.values]
     Content-Type = "application/javascript; charset=utf-8"
     Cache-Control = "public, max-age=300"
+
+# Cache images & icons
+[[headers]]
+  for = "/*.(png|svg|jpg|jpeg|webp|gif|ico)"
+  [headers.values]
+    Cache-Control = "public, max-age=604800, immutable"
+
+[functions."purge-old"]
+  schedule = "15 4 * * *"
+
+[[edge_functions]]
+  path = "/api/chat-stream"
+  function = "chat-stream"

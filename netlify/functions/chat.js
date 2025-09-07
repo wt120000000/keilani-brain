@@ -1,143 +1,119 @@
 ﻿/**
- * Netlify Function: /api/chat  →  /.netlify/functions/chat
- * Modern OpenAI Responses API (model + input).
- * Accepts:
- *   { message: string, model?: string, stream?: boolean, temperature?: number, max_output_tokens?: number, metadata?: object }
- *   or legacy { messages: Array<{role, content}>, ... }
- * Streams if stream=true (Edge route is preferred for low-latency).
+ * Netlify Function: /api/chat → /.netlify/functions/chat
+ * Uses OpenAI Responses API (model + input).
+ * - POST body: { message?: string, model?: string, stream?: boolean, ... }
+ * - CORS preflight supported
+ * - Simple shared-key auth with X-Client-Key against env PUBLIC_API_KEY
  */
 
 const CORS_HEADERS = {
   "Access-Control-Allow-Origin": "*", // tighten later
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Key",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Expose-Headers": "x-openai-request-id, openai-request-id",
 };
 
 const DEFAULT_MODEL = "gpt-4.1-mini";
-const MIN_OUTPUT_TOKENS = 16; // enforce sane floor to prevent 400s
 
-/* ------------ helpers ------------ */
-const json = (statusCode, data, extraHeaders = {}) => ({
-  statusCode,
-  headers: { ...CORS_HEADERS, "Content-Type": "application/json", ...extraHeaders },
-  body: JSON.stringify(data),
-});
-
-const sse = (statusCode, body, extraHeaders = {}) => ({
-  statusCode,
-  headers: {
-    ...CORS_HEADERS,
-    "Content-Type": "text/event-stream",
-    "Cache-Control": "no-cache",
-    Connection: "keep-alive",
-    ...extraHeaders,
-  },
-  body,
-  isBase64Encoded: false,
-});
-
-const safeParse = (raw) => {
-  try { return JSON.parse(raw || "{}"); } catch { return {}; }
-};
-
-/** Normalize to a single string for Responses API "input" */
-function normalizeInput(payload) {
-  if (typeof payload.message === "string" && payload.message.trim()) {
-    return payload.message.trim();
-  }
-  if (Array.isArray(payload.messages) && payload.messages.length) {
-    const lines = payload.messages
-      .filter(m => m && typeof m.content === "string")
-      .map(m => `${(m.role || "user").toUpperCase()}: ${m.content.trim()}`);
-    if (lines.length) return lines.join("\n");
-  }
-  return "health check";
+/** Parse JSON safely */
+function safeParse(json) {
+  try { return JSON.parse(json || "{}"); } catch { return {}; }
 }
 
-/** Build Responses API request body with guards */
-function buildOpenAIRequestBody(payload) {
-  const {
-    model,
-    stream,
-    temperature,
-    max_output_tokens,
-    metadata,
-  } = payload || {};
+/** Build OpenAI request body from incoming payload */
+function buildOpenAIRequestBody({ message, model, stream, ...rest }) {
+  const cleanMsg =
+    typeof message === "string" && message.trim().length
+      ? message.trim()
+      : "health check";
 
   const body = {
-    model: (typeof model === "string" && model.trim()) ? model.trim() : DEFAULT_MODEL,
-    input: normalizeInput(payload || {}),
+    model: model && typeof model === "string" ? model : DEFAULT_MODEL,
+    input: cleanMsg,
+    ...(stream ? { stream: true } : {}),
   };
 
-  // Optional params
-  if (stream === true) body.stream = true;
-  if (typeof temperature === "number" && Number.isFinite(temperature)) {
-    body.temperature = temperature;
-  }
-  if (typeof max_output_tokens === "number" && Number.isFinite(max_output_tokens)) {
-    // Floor to prevent backend 400s on tiny values
-    body.max_output_tokens = Math.max(MIN_OUTPUT_TOKENS, Math.floor(max_output_tokens));
-  }
-  if (metadata && typeof metadata === "object") {
-    // Only include string-valued, flat keys
-    const clean = {};
-    for (const [k, v] of Object.entries(metadata)) {
-      if (typeof v === "string") clean[k] = v;
-    }
-    if (Object.keys(clean).length) body.metadata = clean;
-  }
+  // copy through a few optional knobs, if provided
+  if (typeof rest.temperature === "number") body.temperature = rest.temperature;
+  if (typeof rest.max_output_tokens === "number") body.max_output_tokens = rest.max_output_tokens;
+  if (rest.metadata && typeof rest.metadata === "object") body.metadata = rest.metadata;
 
   return body;
 }
 
-/* ------------ handler ------------ */
+/** Return JSON response */
+function json(statusCode, data, extraHeaders = {}) {
+  return {
+    statusCode,
+    headers: { ...CORS_HEADERS, "Content-Type": "application/json", ...extraHeaders },
+    body: JSON.stringify(data),
+  };
+}
+
+/** Return SSE response (not used here; streaming lives in Edge) */
+function sse(statusCode, body, extraHeaders = {}) {
+  return {
+    statusCode,
+    headers: {
+      ...CORS_HEADERS,
+      "Content-Type": "text/event-stream",
+      "Cache-Control": "no-cache",
+      Connection: "keep-alive",
+      ...extraHeaders,
+    },
+    body,
+    isBase64Encoded: false,
+  };
+}
+
 exports.handler = async (event) => {
   // CORS preflight
   if (event.httpMethod === "OPTIONS") {
     return { statusCode: 204, headers: CORS_HEADERS, body: "" };
   }
 
+  // Method guard
   if (event.httpMethod !== "POST") {
     return json(405, { error: "Method Not Allowed. Use POST." });
   }
 
+  // 🔒 simple shared-key auth
+  const hdrs = event.headers || {};
+  const clientKey = hdrs["x-client-key"] || hdrs["X-Client-Key"];
+  const expected = process.env.PUBLIC_API_KEY || "";
+  if (!expected || clientKey !== expected) {
+    return json(401, { error: "Unauthorized" });
+  }
+
+  // Env guard
   const apiKey = process.env.OPENAI_API_KEY;
   if (!apiKey) {
     return json(500, { error: "Missing OPENAI_API_KEY" });
   }
 
-  const payload = safeParse(event.body);
-  const openaiReq = buildOpenAIRequestBody(payload);
+  // Parse incoming payload
+  const parsed = safeParse(event.body);
+  const openAIReq = buildOpenAIRequestBody(parsed);
 
   try {
-    const controller = (typeof AbortController !== "undefined") ? new AbortController() : null;
-    const timeout = setTimeout(() => controller?.abort(), 60_000);
-
     const rsp = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${apiKey}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(openaiReq),
-      signal: controller?.signal,
+      body: JSON.stringify(openAIReq),
     });
 
-    clearTimeout(timeout);
-
-    const requestId = rsp.headers.get("x-request-id") || rsp.headers.get("openai-request-id") || undefined;
-
-    if (openaiReq.stream === true) {
-      const bodyText = await rsp.text();
-      return sse(rsp.status, bodyText, requestId ? { "x-openai-request-id": requestId } : undefined);
-    }
-
+    // Pass-through response JSON
     const data = await rsp.json().catch(() => ({}));
-    return json(rsp.status, data, requestId ? { "x-openai-request-id": requestId } : undefined);
 
+    // Bubble up OpenAI status
+    // Also expose request id to caller if present
+    const reqId = rsp.headers.get("x-request-id") || rsp.headers.get("x-openai-request-id") || "";
+    const extra = reqId ? { "x-openai-request-id": reqId } : {};
+    return json(rsp.status, data, extra);
   } catch (err) {
-    const msg = (err && err.message) ? err.message : String(err);
-    const isAbort = msg.toLowerCase().includes("aborted");
-    return json(isAbort ? 504 : 500, { error: msg });
+    return json(500, { error: String(err) });
   }
 };
