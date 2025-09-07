@@ -33,7 +33,6 @@ function buildOpenAIRequestBody({ message, model, stream, ...rest }) {
     ...(stream ? { stream: true } : {}),
   };
 
-  // copy through a few optional knobs, if provided
   if (typeof rest.temperature === "number") body.temperature = rest.temperature;
   if (typeof rest.max_output_tokens === "number") body.max_output_tokens = rest.max_output_tokens;
   if (rest.metadata && typeof rest.metadata === "object") body.metadata = rest.metadata;
@@ -50,22 +49,6 @@ function json(statusCode, data, extraHeaders = {}) {
   };
 }
 
-/** Return SSE response (not used here; streaming lives in Edge) */
-function sse(statusCode, body, extraHeaders = {}) {
-  return {
-    statusCode,
-    headers: {
-      ...CORS_HEADERS,
-      "Content-Type": "text/event-stream",
-      "Cache-Control": "no-cache",
-      Connection: "keep-alive",
-      ...extraHeaders,
-    },
-    body,
-    isBase64Encoded: false,
-  };
-}
-
 exports.handler = async (event) => {
   // CORS preflight
   if (event.httpMethod === "OPTIONS") {
@@ -77,7 +60,7 @@ exports.handler = async (event) => {
     return json(405, { error: "Method Not Allowed. Use POST." });
   }
 
-  // 🔒 simple shared-key auth
+  // 🔒 shared-key auth
   const hdrs = event.headers || {};
   const clientKey = hdrs["x-client-key"] || hdrs["X-Client-Key"];
   const expected = process.env.PUBLIC_API_KEY || "";
@@ -92,8 +75,8 @@ exports.handler = async (event) => {
   }
 
   // Parse incoming payload
-  const parsed = safeParse(event.body);
-  const openAIReq = buildOpenAIRequestBody(parsed);
+  const payload = safeParse(event.body);
+  const openAIReq = buildOpenAIRequestBody(payload);
 
   try {
     const rsp = await fetch("https://api.openai.com/v1/responses", {
@@ -105,13 +88,11 @@ exports.handler = async (event) => {
       body: JSON.stringify(openAIReq),
     });
 
-    // Pass-through response JSON
-    const data = await rsp.json().catch(() => ({}));
+    const textTypeReqId = rsp.headers.get("x-request-id") || rsp.headers.get("x-openai-request-id") || "";
+    const extra = textTypeReqId ? { "x-openai-request-id": textTypeReqId } : {};
 
-    // Bubble up OpenAI status
-    // Also expose request id to caller if present
-    const reqId = rsp.headers.get("x-request-id") || rsp.headers.get("x-openai-request-id") || "";
-    const extra = reqId ? { "x-openai-request-id": reqId } : {};
+    // Non-streaming JSON passthrough
+    const data = await rsp.json().catch(() => ({}));
     return json(rsp.status, data, extra);
   } catch (err) {
     return json(500, { error: String(err) });
