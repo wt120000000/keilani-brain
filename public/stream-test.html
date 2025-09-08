@@ -5,22 +5,28 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>Keilani • Stream Test</title>
     <style>
-      body {
+      :root {
         font-family:
           system-ui,
           -apple-system,
           Segoe UI,
           Roboto,
           Arial;
+      }
+      body {
         margin: 24px;
       }
-      textarea,
       input,
       button {
         width: 100%;
         padding: 10px;
         border: 1px solid #ddd;
         border-radius: 8px;
+      }
+      .row {
+        display: grid;
+        gap: 10px;
+        margin: 10px 0;
       }
       #out {
         white-space: pre-wrap;
@@ -30,55 +36,123 @@
         border-radius: 10px;
         min-height: 180px;
       }
-      .row {
+      .cols {
         display: grid;
+        grid-template-columns: 1fr;
         gap: 10px;
-        margin: 10px 0;
+      }
+      .bar {
+        display: flex;
+        gap: 8px;
+      }
+      .half {
+        flex: 1;
       }
     </style>
   </head>
   <body>
     <h1>Keilani Streaming Check</h1>
+
     <div class="row">
-      <label>Message to Keilani</label>
+      <label for="msg">Message to Keilani</label>
       <input id="msg" value="Hello from browser — stream this!" />
-      <button id="go">Stream</button>
     </div>
-    <div id="out"></div>
+
+    <div class="bar">
+      <button id="go" class="half">Stream</button>
+      <button id="stop" class="half">Stop</button>
+      <button id="clear" class="half">Clear</button>
+    </div>
+
+    <div class="row">
+      <div
+        style="
+          padding: 10px;
+          border: 1px solid #ddd;
+          border-radius: 8px;
+          background: #f4f4f6;
+          text-align: center;
+        "
+      >
+        <strong>Stream</strong>
+      </div>
+      <div id="out"></div>
+    </div>
 
     <script>
-           const $ = (s) => document.querySelector(s);
-           $("#go").onclick = async () => {
-             $("#out").textContent = "";
-             const res = await fetch("/api/chat-stream", {
-               method: "POST",
-               headers: { "Content-Type": "application/json" },
-               body: JSON.stringify({ message: $("#msg").value }),
-             });
-             if (!res.body) {
-               $("#out").textContent = "No readable stream";
-               return;
-             }
-             const reader = res.body.getReader();
-             const dec = new TextDecoder();
-             while (true) {
-               const { done, value } = await reader.read();
-               if (done) break;
-      	const chunk = dec.decode(value);
-      	for (const line of chunk.split("\n")) {
-      	  if (line.startsWith("data: ")) {
-      		const payload = line.slice(6).trim();
-      		if (payload === "[DONE]") continue;
-      		try {
-      		  const json = JSON.parse(payload);
-      		  const delta = json.choices?.[0]?.delta?.content;
-      		  if (delta) {
-      			$("#out").textContent += delta; // append only the text
-      	}
-      		} catch (_) {
-            // ignore non-JSON lines
-      	}
+      const $ = (s) => document.querySelector(s);
+      let controller = null;
+
+      function append(text) {
+        $("#out").textContent += text;
+      }
+      function println(text) {
+        $("#out").textContent += text + "\n";
+      }
+
+      async function streamMessage(message) {
+        if (controller) controller.abort();
+        controller = new AbortController();
+
+        $("#out").textContent = "";
+
+        let res;
+        try {
+          res = await fetch("/api/chat-stream", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ message }),
+            signal: controller.signal,
+          });
+        } catch (e) {
+          println("request failed: " + e);
+          return;
         }
+
+        if (!res.ok || !res.body) {
+          println("http error: " + res.status + " " + res.statusText);
+          return;
+        }
+
+        const reader = res.body.getReader();
+        const dec = new TextDecoder();
+
+        try {
+          while (true) {
+            const { done, value } = await reader.read();
+            if (done) break;
+
+            const chunk = dec.decode(value, { stream: true });
+            // Parse SSE: lines separated by \n, payload lines start with "data: "
+            for (const line of chunk.split("\n")) {
+              if (!line.startsWith("data: ")) continue;
+              const payload = line.slice(6).trim();
+              if (!payload || payload === "[DONE]") continue;
+
+              try {
+                const json = JSON.parse(payload);
+                const delta = json?.choices?.[0]?.delta?.content;
+                if (delta) append(delta);
+              } catch {
+                // Non-JSON lines (e.g., keepalives) can be ignored
+              }
+            }
+          }
+        } catch (err) {
+          if (err.name === "AbortError") {
+            println("\n[stopped]");
+          } else {
+            println("\nstream error: " + err);
+          }
+        }
+      }
+
+      $("#go").onclick = () => streamMessage($("#msg").value);
+      $("#stop").onclick = () => {
+        if (controller) controller.abort();
+      };
+      $("#clear").onclick = () => {
+        $("#out").textContent = "";
       };
     </script>
   </body>
