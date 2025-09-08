@@ -50,7 +50,7 @@
       const $ = (s) => document.querySelector(s);
       $("#go").onclick = async () => {
         $("#out").textContent = "";
-        const res = await fetch("/.netlify/functions/stream-chat", {
+        const res = await fetch("/api/chat-stream", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ message: $("#msg").value }),
