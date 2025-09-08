@@ -1,88 +1,220 @@
 <!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <title>Keilani Chat</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <style>
-    body { font: 16px/1.4 system-ui, sans-serif; margin: 2rem; max-width: 720px }
-    .row { display:flex; gap:.5rem; margin-top:1rem }
-    input { flex:1; padding:.6rem .8rem }
-    button { padding:.6rem 1rem; cursor:pointer }
-    .msg { padding:.6rem .8rem; border-radius:.6rem; margin-top:.5rem; white-space:pre-wrap }
-    .me { background:#eef } .ai { background:#efe } .sys { background:#f8f8f8; color:#555 }
-  </style>
-</head>
-<body>
-  <h1>Keilani Chat</h1>
-  <div id="log" class="msg sys">Ready.</div>
-  <div id="thread"></div>
-
-  <div class="row">
-    <input id="msg" placeholder="Say hi…" autofocus />
-    <button id="sendBtn">Send</button>
-  </div>
-
-  <script type="module">
-    // Same-origin by default; set to your prod URL if embedding from another domain.
-    const API_BASE = ""; // e.g. "https://keilani-brain.netlify.app"
-
-    const thread = document.querySelector("#thread");
-    const log = document.querySelector("#log");
-    const input = document.querySelector("#msg");
-    const btn = document.querySelector("#sendBtn");
-
-    const userId = localStorage.getItem("kb_user") || (() => {
-      const id = (crypto.randomUUID && crypto.randomUUID()) || String(Date.now());
-      localStorage.setItem("kb_user", id);
-      return id;
-    })();
-
-    function addBubble(text, who) {
-      const div = document.createElement("div");
-      div.className = "msg " + who;
-      div.textContent = text;
-      thread.appendChild(div);
-      div.scrollIntoView({ behavior: "smooth", block: "end" });
-    }
-    const setLog = (t) => log.textContent = t;
-
-    async function sendChat(message) {
-      const res = await fetch((API_BASE || "") + "/api/chat", {
-        method: "POST",
-        headers: { "Content-Type": "application/json", "x-request-id": crypto.randomUUID?.() || String(Date.now()) },
-        body: JSON.stringify({ userId, message })
-      });
-      const text = await res.text();
-      let data; try { data = JSON.parse(text); } catch {}
-      if (!res.ok) throw new Error(`API ${data?.stage || "error"}: ${data?.error || text}`);
-      return data;
-    }
-
-    async function onSend() {
-      const message = (input.value || "").trim();
-      if (!message) return;
-      input.value = ""; input.focus();
-
-      addBubble(message, "me");
-      btn.disabled = true; btn.textContent = "Sending…"; setLog("Calling /api/chat…");
-      try {
-        const data = await sendChat(message);
-        addBubble(data.reply || "(no reply)", "ai");
-        setLog("OK • " + (data.meta?.model || "model"));
-      } catch (e) {
-        console.error(e);
-        addBubble("Oops: " + e.message, "sys");
-        setLog("Error — see console.");
-      } finally {
-        btn.disabled = false; btn.textContent = "Send";
+  <head>
+    <meta charset="utf-8" />
+    <title>Keilani Chat</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <style>
+      body {
+        font:
+          16px/1.4 system-ui,
+          sans-serif;
+        margin: 2rem;
+        max-width: 720px;
       }
-    }
+      .row {
+        display: flex;
+        gap: 0.5rem;
+        margin-top: 1rem;
+      }
+      input {
+        flex: 1;
+        padding: 0.6rem 0.8rem;
+      }
+      button {
+        padding: 0.6rem 1rem;
+        cursor: pointer;
+      }
+      .msg {
+        padding: 0.6rem 0.8rem;
+        border-radius: 0.6rem;
+        margin-top: 0.5rem;
+        white-space: pre-wrap;
+      }
+      .me {
+        background: #eef;
+      }
+      .ai {
+        background: #0b0b0b;
+        color: #00ff00;
+      }
+      .sys {
+        background: #f8f8f8;
+        color: #555;
+      }
+      .dim {
+        opacity: 0.65;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Keilani Chat</h1>
+    <div id="log" class="msg sys">Ready.</div>
+    <div id="thread"></div>
 
-    btn.addEventListener("click", onSend);
-    input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.shiftKey) onSend();
-    });
-  </script>
-</body>
+    <div class="row">
+      <input id="msg" placeholder="Say hi…" autofocus />
+      <button id="sendBtn">Send</button>
+      <button id="stopBtn" type="button">Stop</button>
+    </div>
+
+    <script type="module">
+      // If you embed this page elsewhere, set API_BASE to that origin. Empty = same origin.
+      const API_BASE = ""; // e.g. "https://api.keilani.ai"
+
+      const thread = document.querySelector("#thread");
+      const log = document.querySelector("#log");
+      const input = document.querySelector("#msg");
+      const sendBtn = document.querySelector("#sendBtn");
+      const stopBtn = document.querySelector("#stopBtn");
+
+      const userId =
+        localStorage.getItem("kb_user") ||
+        (() => {
+          const id = crypto.randomUUID?.() || String(Date.now());
+          localStorage.setItem("kb_user", id);
+          return id;
+        })();
+
+      const setLog = (t) => (log.textContent = t);
+      const addBubble = (text, who) => {
+        const div = document.createElement("div");
+        div.className = "msg " + who;
+        div.textContent = text;
+        thread.appendChild(div);
+        div.scrollIntoView({ behavior: "smooth", block: "end" });
+        return div;
+      };
+
+      // Keep multi-turn context (system seed + turns)
+      const history = [
+        {
+          role: "system",
+          content: "You are Keilani: concise, flirty-fun, helpful.",
+        },
+      ];
+
+      let cancelCurrent = null;
+
+      // --- Streaming via Edge: /api/chat-stream ---
+      async function streamChat(messages, assistantBubble, abortSignal) {
+        const res = await fetch((API_BASE || "") + "/api/chat-stream", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ userId, messages }),
+          signal: abortSignal,
+        });
+
+        if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+
+        const reader = res.body.getReader();
+        const dec = new TextDecoder();
+        let full = "";
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+
+          const chunk = dec.decode(value, { stream: true });
+          for (const line of chunk.split("\n")) {
+            if (!line.startsWith("data: ")) continue;
+            const payload = line.slice(6).trim();
+            if (!payload || payload === "[DONE]") continue;
+            try {
+              const json = JSON.parse(payload);
+              const delta = json?.choices?.[0]?.delta?.content;
+              if (delta) {
+                full += delta;
+                assistantBubble.textContent += delta;
+              }
+            } catch {
+              /* ignore keep-alives / non-JSON */
+            }
+          }
+          assistantBubble.scrollIntoView({ behavior: "smooth", block: "end" });
+        }
+        return full;
+      }
+
+      // --- Fallback to your existing non-streaming Lambda: /api/chat ---
+      async function sendChatFallback(message) {
+        const res = await fetch((API_BASE || "") + "/api/chat", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "x-request-id": crypto.randomUUID?.() || String(Date.now()),
+          },
+          body: JSON.stringify({ userId, message }),
+        });
+        const text = await res.text();
+        let data;
+        try {
+          data = JSON.parse(text);
+        } catch {}
+        if (!res.ok)
+          throw new Error(
+            `API ${data?.stage || "error"}: ${data?.error || text}`,
+          );
+        return data.reply || "(no reply)";
+      }
+
+      async function onSend() {
+        const message = (input.value || "").trim();
+        if (!message) return;
+
+        // UI: show user bubble, prep assistant bubble
+        addBubble(message, "me");
+        const assistant = addBubble("", "ai");
+        sendBtn.disabled = true;
+        stopBtn.disabled = false;
+        input.value = "";
+        input.focus();
+
+        setLog("Streaming from Edge…");
+        // update history with user turn
+        history.push({ role: "user", content: message });
+
+        // allow Stop
+        const abort = new AbortController();
+        cancelCurrent = () => abort.abort();
+
+        try {
+          // Try streaming with full multi-turn context
+          const full = await streamChat(history, assistant, abort.signal);
+          history.push({ role: "assistant", content: full });
+          setLog("OK • streamed");
+        } catch (e) {
+          if (e.name === "AbortError") {
+            assistant.classList.add("dim");
+            assistant.textContent += "\n[stopped]";
+            setLog("Stopped.");
+          } else {
+            // Fallback: non-streaming endpoint
+            setLog("Edge failed, calling /api/chat fallback…");
+            try {
+              const reply = await sendChatFallback(message);
+              assistant.textContent = reply;
+              history.push({ role: "assistant", content: reply });
+              setLog("OK • fallback");
+            } catch (e2) {
+              assistant.classList.add("dim");
+              assistant.textContent += "\n[error] " + (e2.message || e2);
+              setLog("Error — see console.");
+              console.error(e, e2);
+            }
+          }
+        } finally {
+          sendBtn.disabled = false;
+          stopBtn.disabled = true;
+          cancelCurrent = null;
+        }
+      }
+
+      sendBtn.addEventListener("click", onSend);
+      input.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) onSend();
+      });
+      stopBtn.addEventListener("click", () => cancelCurrent?.());
+    </script>
+  </body>
 </html>
