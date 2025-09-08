@@ -2,71 +2,275 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Keilani Chat</title>
+    <title>Keilani • Chat</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <style>
+      :root {
+        --bg: #0b0a0f;
+        --panel: #11101a;
+        --panel-2: #151426;
+        --line: #24223b;
+        --user-grad: linear-gradient(135deg, #6ea8ff, #a879ff 60%, #ff70d0);
+        --ai-bg: #0d0d14;
+        --ai-text: #b7ff68; /* neon lime */
+        --ai-glow: 0 0 12px #aefe53, 0 0 28px rgba(174, 254, 83, 0.25);
+        --muted: #8c8aa3;
+        --ink: #e8e7ef;
+        --accent: #ff70d0; /* pink sparkle */
+        --accent-2: #6ea8ff; /* electric blue */
+        --radius: 14px;
+      }
+      * {
+        box-sizing: border-box;
+      }
+      html,
       body {
+        height: 100%;
+      }
+      body {
+        margin: 0;
         font:
-          16px/1.4 system-ui,
+          16px/1.45 system-ui,
+          -apple-system,
+          Segoe UI,
+          Roboto,
+          Arial,
           sans-serif;
-        margin: 2rem;
-        max-width: 720px;
-      }
-      .row {
+        color: var(--ink);
+        background:
+          radial-gradient(
+            1200px 600px at 15% -10%,
+            rgba(110, 168, 255, 0.18),
+            transparent 60%
+          ),
+          radial-gradient(
+            900px 500px at 100% 0%,
+            rgba(255, 112, 208, 0.12),
+            transparent 60%
+          ),
+          var(--bg);
         display: flex;
-        gap: 0.5rem;
-        margin-top: 1rem;
+        align-items: stretch;
+        justify-content: center;
+        padding: 24px;
       }
-      input {
-        flex: 1;
-        padding: 0.6rem 0.8rem;
+      .app {
+        width: min(920px, 100%);
+        display: flex;
+        flex-direction: column;
+        gap: 14px;
+      }
+      .bar {
+        background: linear-gradient(180deg, var(--panel), var(--panel-2));
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        padding: 14px 16px;
+        display: flex;
+        align-items: center;
+        justify-content: space-between;
+        gap: 10px;
+        box-shadow:
+          0 10px 30px rgba(0, 0, 0, 0.35),
+          inset 0 1px 0 rgba(255, 255, 255, 0.03);
+      }
+      .title {
+        font-weight: 700;
+        letter-spacing: 0.3px;
+      }
+      .pill {
+        font-size: 12px;
+        color: var(--muted);
+        border: 1px solid var(--line);
+        padding: 6px 10px;
+        border-radius: 999px;
+        background: rgba(255, 255, 255, 0.02);
+      }
+
+      .threadWrap {
+        background: linear-gradient(180deg, var(--panel), var(--panel-2));
+        border: 1px solid var(--line);
+        border-radius: 20px;
+        padding: 14px;
+        min-height: 52vh;
+        max-height: 66vh;
+        overflow: auto;
+        box-shadow:
+          inset 0 1px 0 rgba(255, 255, 255, 0.03),
+          0 10px 30px rgba(0, 0, 0, 0.25);
+      }
+      ul#messages {
+        list-style: none;
+        padding: 0;
+        margin: 0;
+        display: flex;
+        flex-direction: column;
+        gap: 12px;
+      }
+
+      .msg {
+        max-width: 78%;
+        padding: 10px 12px;
+        border-radius: var(--radius);
+        white-space: pre-wrap;
+        word-wrap: break-word;
+      }
+      .msg.user {
+        align-self: flex-end;
+        color: #fff;
+        background: var(--user-grad);
+        position: relative;
+      }
+      .msg.ai {
+        align-self: flex-start;
+        background: var(--ai-bg);
+        color: var(--ai-text);
+        box-shadow: var(--ai-glow);
+      }
+      .msg.sys {
+        align-self: center;
+        color: var(--muted);
+        font-size: 14px;
+        background: transparent;
+      }
+
+      /* bubble tails */
+      .msg.user::after {
+        content: "";
+        position: absolute;
+        right: -6px;
+        bottom: 6px;
+        width: 12px;
+        height: 12px;
+        background: inherit;
+        transform: rotate(45deg);
+        border-bottom-right-radius: 4px;
+      }
+      .msg.ai::before {
+        content: "";
+        position: absolute;
+        left: -6px;
+        bottom: 6px;
+        width: 12px;
+        height: 12px;
+        background: var(--ai-bg);
+        transform: rotate(45deg);
+      }
+
+      .composer {
+        display: grid;
+        grid-template-columns: 1fr auto auto;
+        gap: 10px;
+        background: linear-gradient(180deg, var(--panel), var(--panel-2));
+        border: 1px solid var(--line);
+        border-radius: 16px;
+        padding: 12px;
+        box-shadow:
+          0 10px 30px rgba(0, 0, 0, 0.25),
+          inset 0 1px 0 rgba(255, 255, 255, 0.03);
+      }
+      input#msg,
+      textarea#msg {
+        resize: none;
+        border: 1px solid var(--line);
+        border-radius: 12px;
+        padding: 12px 12px;
+        background: #0c0b14;
+        color: var(--ink);
+        outline: none;
+        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
       }
       button {
-        padding: 0.6rem 1rem;
+        border: 1px solid var(--line);
+        background: #0f0e1a;
+        color: var(--ink);
+        border-radius: 12px;
+        padding: 10px 14px;
         cursor: pointer;
       }
-      .msg {
-        padding: 0.6rem 0.8rem;
-        border-radius: 0.6rem;
-        margin-top: 0.5rem;
-        white-space: pre-wrap;
+      button.primary {
+        background: linear-gradient(135deg, var(--accent-2), var(--accent) 80%);
+        color: #fff;
+        border: none;
+        box-shadow: 0 8px 24px rgba(255, 112, 208, 0.28);
       }
-      .me {
-        background: #eef;
+      button:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
       }
-      .ai {
-        background: #0b0b0b;
-        color: #00ff00;
+
+      /* typing dots */
+      .typing {
+        display: inline-flex;
+        gap: 6px;
+        align-items: center;
       }
-      .sys {
-        background: #f8f8f8;
-        color: #555;
+      .dot {
+        width: 6px;
+        height: 6px;
+        border-radius: 50%;
+        background: var(--ai-text);
+        opacity: 0.5;
+        box-shadow: var(--ai-glow);
       }
-      .dim {
-        opacity: 0.65;
+      .dot:nth-child(1) {
+        animation: bounce 1s infinite 0s;
+      }
+      .dot:nth-child(2) {
+        animation: bounce 1s infinite 0.15s;
+      }
+      .dot:nth-child(3) {
+        animation: bounce 1s infinite 0.3s;
+      }
+      @keyframes bounce {
+        0%,
+        80%,
+        100% {
+          transform: translateY(0);
+          opacity: 0.4;
+        }
+        40% {
+          transform: translateY(-5px);
+          opacity: 1;
+        }
+      }
+
+      .muted {
+        color: var(--muted);
       }
     </style>
   </head>
   <body>
-    <h1>Keilani Chat</h1>
-    <div id="log" class="msg sys">Ready.</div>
-    <div id="thread"></div>
+    <div class="app">
+      <div class="bar">
+        <div class="title">Keilani ✨</div>
+        <div class="pill" id="statusPill">Ready</div>
+      </div>
 
-    <div class="row">
-      <input id="msg" placeholder="Say hi…" autofocus />
-      <button id="sendBtn">Send</button>
-      <button id="stopBtn" type="button">Stop</button>
+      <div class="threadWrap">
+        <ul id="messages"></ul>
+      </div>
+
+      <form id="composer" class="composer">
+        <textarea
+          id="msg"
+          rows="2"
+          placeholder="Tell Keilani something cute… (Enter to send, Shift+Enter = newline)"
+        ></textarea>
+        <button id="sendBtn" class="primary" type="submit">Send</button>
+        <button id="stopBtn" type="button">Stop</button>
+      </form>
     </div>
 
     <script type="module">
-      // If you embed this page elsewhere, set API_BASE to that origin. Empty = same origin.
-      const API_BASE = ""; // e.g. "https://api.keilani.ai"
+      // Set this if hosting the API elsewhere; empty = same origin.
+      const API_BASE = ""; // e.g., "https://api.keilani.ai"
 
-      const thread = document.querySelector("#thread");
-      const log = document.querySelector("#log");
-      const input = document.querySelector("#msg");
-      const sendBtn = document.querySelector("#sendBtn");
-      const stopBtn = document.querySelector("#stopBtn");
+      const $ = (s) => document.querySelector(s);
+      const messagesEl = $("#messages");
+      const input = $("#msg");
+      const sendBtn = $("#sendBtn");
+      const stopBtn = $("#stopBtn");
+      const statusPill = $("#statusPill");
 
       const userId =
         localStorage.getItem("kb_user") ||
@@ -76,17 +280,7 @@
           return id;
         })();
 
-      const setLog = (t) => (log.textContent = t);
-      const addBubble = (text, who) => {
-        const div = document.createElement("div");
-        div.className = "msg " + who;
-        div.textContent = text;
-        thread.appendChild(div);
-        div.scrollIntoView({ behavior: "smooth", block: "end" });
-        return div;
-      };
-
-      // Keep multi-turn context (system seed + turns)
+      // conversation history for context
       const history = [
         {
           role: "system",
@@ -96,15 +290,41 @@
 
       let cancelCurrent = null;
 
-      // --- Streaming via Edge: /api/chat-stream ---
-      async function streamChat(messages, assistantBubble, abortSignal) {
+      function pill(text, muted = false) {
+        statusPill.textContent = text;
+        statusPill.classList.toggle("muted", !!muted);
+      }
+
+      function addBubble(text, who) {
+        const li = document.createElement("li");
+        const div = document.createElement("div");
+        div.className = `msg ${who}`;
+        div.textContent = text;
+        li.appendChild(div);
+        messagesEl.appendChild(li);
+        div.scrollIntoView({ behavior: "smooth", block: "end" });
+        return div;
+      }
+
+      function addTyping() {
+        const li = document.createElement("li");
+        const div = document.createElement("div");
+        div.className = "msg ai";
+        div.innerHTML = `<span class="typing"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>`;
+        li.appendChild(div);
+        messagesEl.appendChild(li);
+        div.scrollIntoView({ behavior: "smooth", block: "end" });
+        return { li, div };
+      }
+
+      async function streamEdge(messages, bubble, signal) {
+        const body = { userId, messages, message: messages.at(-1)?.content }; // be compatible with either server shape
         const res = await fetch((API_BASE || "") + "/api/chat-stream", {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ userId, messages }),
-          signal: abortSignal,
+          body: JSON.stringify(body),
+          signal,
         });
-
         if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
 
         const reader = res.body.getReader();
@@ -114,7 +334,6 @@
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-
           const chunk = dec.decode(value, { stream: true });
           for (const line of chunk.split("\n")) {
             if (!line.startsWith("data: ")) continue;
@@ -125,19 +344,18 @@
               const delta = json?.choices?.[0]?.delta?.content;
               if (delta) {
                 full += delta;
-                assistantBubble.textContent += delta;
+                bubble.textContent += delta;
+                bubble.scrollIntoView({ behavior: "smooth", block: "end" });
               }
             } catch {
-              /* ignore keep-alives / non-JSON */
+              /* ignore keepalives */
             }
           }
-          assistantBubble.scrollIntoView({ behavior: "smooth", block: "end" });
         }
         return full;
       }
 
-      // --- Fallback to your existing non-streaming Lambda: /api/chat ---
-      async function sendChatFallback(message) {
+      async function callFallback(message) {
         const res = await fetch((API_BASE || "") + "/api/chat", {
           method: "POST",
           headers: {
@@ -158,49 +376,52 @@
         return data.reply || "(no reply)";
       }
 
-      async function onSend() {
+      async function onSend(e) {
+        e?.preventDefault?.();
         const message = (input.value || "").trim();
         if (!message) return;
 
-        // UI: show user bubble, prep assistant bubble
-        addBubble(message, "me");
-        const assistant = addBubble("", "ai");
-        sendBtn.disabled = true;
-        stopBtn.disabled = false;
+        // user bubble
+        addBubble(message, "user");
+        history.push({ role: "user", content: message });
         input.value = "";
         input.focus();
 
-        setLog("Streaming from Edge…");
-        // update history with user turn
-        history.push({ role: "user", content: message });
+        // assistant bubble with typing
+        const { li, div: typingDiv } = addTyping();
+        sendBtn.disabled = true;
+        stopBtn.disabled = false;
+        pill("Streaming…");
 
-        // allow Stop
-        const abort = new AbortController();
-        cancelCurrent = () => abort.abort();
+        // prepare streaming target bubble (replace typing)
+        const aiBubble = document.createElement("div");
+        aiBubble.className = "msg ai";
+        li.replaceChild(aiBubble, typingDiv);
+
+        const aborter = new AbortController();
+        cancelCurrent = () => aborter.abort();
 
         try {
-          // Try streaming with full multi-turn context
-          const full = await streamChat(history, assistant, abort.signal);
+          const full = await streamEdge(history, aiBubble, aborter.signal);
           history.push({ role: "assistant", content: full });
-          setLog("OK • streamed");
-        } catch (e) {
-          if (e.name === "AbortError") {
-            assistant.classList.add("dim");
-            assistant.textContent += "\n[stopped]";
-            setLog("Stopped.");
+          pill("OK • streamed", true);
+        } catch (err) {
+          if (err.name === "AbortError") {
+            aiBubble.classList.add("dim");
+            aiBubble.textContent += "\n[stopped]";
+            pill("Stopped", true);
           } else {
-            // Fallback: non-streaming endpoint
-            setLog("Edge failed, calling /api/chat fallback…");
+            pill("Edge failed, fallback…");
             try {
-              const reply = await sendChatFallback(message);
-              assistant.textContent = reply;
+              const reply = await callFallback(message);
+              aiBubble.textContent = reply;
               history.push({ role: "assistant", content: reply });
-              setLog("OK • fallback");
+              pill("OK • fallback", true);
             } catch (e2) {
-              assistant.classList.add("dim");
-              assistant.textContent += "\n[error] " + (e2.message || e2);
-              setLog("Error — see console.");
-              console.error(e, e2);
+              aiBubble.classList.add("dim");
+              aiBubble.textContent += `\n[error] ${e2.message || e2}`;
+              pill("Error", true);
+              console.error(err, e2);
             }
           }
         } finally {
@@ -210,9 +431,13 @@
         }
       }
 
-      sendBtn.addEventListener("click", onSend);
+      // Events
+      $("#composer").addEventListener("submit", onSend);
       input.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" && !e.shiftKey) onSend();
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          onSend(e);
+        }
       });
       stopBtn.addEventListener("click", () => cancelCurrent?.());
     </script>
