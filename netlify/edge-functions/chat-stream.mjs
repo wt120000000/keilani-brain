@@ -1,6 +1,5 @@
 // netlify/edge-functions/chat-stream.mjs
-import { env } from "netlify:env"; // Edge-safe env access
-
+// Edge runtime (Deno). No Node/Process. Read env via Deno.env.get when allowed.
 export default async function handler(req) {
   const sseHeaders = {
     "Content-Type": "text/event-stream",
@@ -25,14 +24,20 @@ export default async function handler(req) {
     try {
       const body = await req.json();
       if (body && typeof body.message === "string") message = body.message;
-    } catch (_) {
-      // ignore bad/missing JSON
+    } catch (_) {}
+
+    const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY"); // ← works when whitelisted in netlify.toml
+    if (!OPENAI_API_KEY) {
+      return new Response(`event: error\ndata: ${JSON.stringify({ error: "OPENAI_API_KEY missing" })}\n\n`, {
+        status: 200,
+        headers: sseHeaders,
+      });
     }
 
     const upstream = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${env.OPENAI_API_KEY}`,
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
         "Content-Type": "application/json",
         "Accept": "text/event-stream",
       },
@@ -54,7 +59,7 @@ export default async function handler(req) {
       );
     }
 
-    // Pipe OpenAI SSE through directly from Edge (supports streaming)
+    // Pipe OpenAI SSE through from the edge (native streaming)
     return new Response(upstream.body, { status: 200, headers: sseHeaders });
   } catch (err) {
     return new Response(

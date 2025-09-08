@@ -68,3 +68,4 @@
 [[edge_functions]]
   path = "/api/chat-stream"
   function = "chat-stream"
+  environment = ["OPENAI_API_KEY"]
