@@ -12,12 +12,12 @@
         --line: #24223b;
         --user-grad: linear-gradient(135deg, #6ea8ff, #a879ff 60%, #ff70d0);
         --ai-bg: #0d0d14;
-        --ai-text: #b7ff68; /* neon lime */
+        --ai-text: #b7ff68;
         --ai-glow: 0 0 12px #aefe53, 0 0 28px rgba(174, 254, 83, 0.25);
         --muted: #8c8aa3;
         --ink: #e8e7ef;
-        --accent: #ff70d0; /* pink sparkle */
-        --accent-2: #6ea8ff; /* electric blue */
+        --accent: #ff70d0;
+        --accent-2: #6ea8ff;
         --radius: 14px;
       }
       * {
@@ -85,6 +85,9 @@
         border-radius: 999px;
         background: rgba(255, 255, 255, 0.02);
       }
+      .muted {
+        color: var(--muted);
+      }
 
       .threadWrap {
         background: linear-gradient(180deg, var(--panel), var(--panel-2));
@@ -113,12 +116,12 @@
         border-radius: var(--radius);
         white-space: pre-wrap;
         word-wrap: break-word;
+        position: relative;
       }
       .msg.user {
         align-self: flex-end;
         color: #fff;
         background: var(--user-grad);
-        position: relative;
       }
       .msg.ai {
         align-self: flex-start;
@@ -131,6 +134,9 @@
         color: var(--muted);
         font-size: 14px;
         background: transparent;
+      }
+      .dim {
+        opacity: 0.65;
       }
 
       /* bubble tails */
@@ -168,7 +174,6 @@
           0 10px 30px rgba(0, 0, 0, 0.25),
           inset 0 1px 0 rgba(255, 255, 255, 0.03);
       }
-      input#msg,
       textarea#msg {
         resize: none;
         border: 1px solid var(--line);
@@ -233,10 +238,6 @@
           opacity: 1;
         }
       }
-
-      .muted {
-        color: var(--muted);
-      }
     </style>
   </head>
   <body>
@@ -254,7 +255,7 @@
         <textarea
           id="msg"
           rows="2"
-          placeholder="Tell Keilani something cute… (Enter to send, Shift+Enter = newline)"
+          placeholder="Tell Keilani something cute…  (Enter to send, Shift+Enter = newline)"
         ></textarea>
         <button id="sendBtn" class="primary" type="submit">Send</button>
         <button id="stopBtn" type="button">Stop</button>
@@ -262,8 +263,8 @@
     </div>
 
     <script type="module">
-      // Set this if hosting the API elsewhere; empty = same origin.
-      const API_BASE = ""; // e.g., "https://api.keilani.ai"
+      // If hosting API elsewhere, set API_BASE; empty means same-origin.
+      const API_BASE = ""; // e.g. "https://api.keilani.ai"
 
       const $ = (s) => document.querySelector(s);
       const messagesEl = $("#messages");
@@ -317,11 +318,31 @@
         return { li, div };
       }
 
+      // Keep system + last N turns, also cap total chars for cost control
+      function trimHistory(hist, { maxTurns = 8, maxChars = 6000 } = {}) {
+        const base = hist[0]?.role === "system" ? [hist[0]] : [];
+        const tail = hist.slice(-maxTurns * 2);
+        let out = base.concat(tail);
+        const toText = (arr) => arr.map((m) => m.content).join("\n");
+        while (toText(out).length > maxChars && out.length > base.length + 2) {
+          out.splice(base.length, 2); // drop oldest user+assistant pair
+        }
+        return out;
+      }
+
       async function streamEdge(messages, bubble, signal) {
-        const body = { userId, messages, message: messages.at(-1)?.content }; // be compatible with either server shape
+        const body = {
+          userId,
+          messages,
+          // also include "message" for servers expecting a single message prop
+          message: messages.at(-1)?.content,
+        };
         const res = await fetch((API_BASE || "") + "/api/chat-stream", {
           method: "POST",
-          headers: { "Content-Type": "application/json" },
+          headers: {
+            "Content-Type": "application/json",
+            "x-request-id": crypto.randomUUID?.() || String(Date.now()),
+          },
           body: JSON.stringify(body),
           signal,
         });
@@ -387,13 +408,13 @@
         input.value = "";
         input.focus();
 
-        // assistant bubble with typing
+        // assistant bubble with typing indicator
         const { li, div: typingDiv } = addTyping();
         sendBtn.disabled = true;
         stopBtn.disabled = false;
         pill("Streaming…");
 
-        // prepare streaming target bubble (replace typing)
+        // replace typing with the real bubble we stream into
         const aiBubble = document.createElement("div");
         aiBubble.className = "msg ai";
         li.replaceChild(aiBubble, typingDiv);
@@ -402,7 +423,8 @@
         cancelCurrent = () => aborter.abort();
 
         try {
-          const full = await streamEdge(history, aiBubble, aborter.signal);
+          const trimmed = trimHistory(history);
+          const full = await streamEdge(trimmed, aiBubble, aborter.signal);
           history.push({ role: "assistant", content: full });
           pill("OK • streamed", true);
         } catch (err) {
@@ -431,7 +453,7 @@
         }
       }
 
-      // Events
+      // events
       $("#composer").addEventListener("submit", onSend);
       input.addEventListener("keydown", (e) => {
         if (e.key === "Enter" && !e.shiftKey) {
