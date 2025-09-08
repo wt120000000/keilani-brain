@@ -1,0 +1,76 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Keilani • Stream Test</title>
+    <style>
+      body {
+        font-family:
+          system-ui,
+          -apple-system,
+          Segoe UI,
+          Roboto,
+          Arial;
+        margin: 24px;
+      }
+      textarea,
+      input,
+      button {
+        width: 100%;
+        padding: 10px;
+        border: 1px solid #ddd;
+        border-radius: 8px;
+      }
+      #out {
+        white-space: pre-wrap;
+        background: #0b0b0b;
+        color: #00ff00;
+        padding: 12px;
+        border-radius: 10px;
+        min-height: 180px;
+      }
+      .row {
+        display: grid;
+        gap: 10px;
+        margin: 10px 0;
+      }
+    </style>
+  </head>
+  <body>
+    <h1>Keilani Streaming Check</h1>
+    <div class="row">
+      <label>Message to Keilani</label>
+      <input id="msg" value="Hello from browser — stream this!" />
+      <button id="go">Stream</button>
+    </div>
+    <div id="out"></div>
+
+    <script>
+      const $ = (s) => document.querySelector(s);
+      $("#go").onclick = async () => {
+        $("#out").textContent = "";
+        const res = await fetch("/.netlify/functions/stream-chat", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ message: $("#msg").value }),
+        });
+        if (!res.body) {
+          $("#out").textContent = "No readable stream";
+          return;
+        }
+        const reader = res.body.getReader();
+        const dec = new TextDecoder();
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const chunk = dec.decode(value);
+          // Show raw SSE lines (easy to debug)
+          $("#out").textContent += chunk;
+          // If you want pretty text, parse lines beginning with 'data: '
+          // and pull delta.content from each JSON object.
+        }
+      };
+    </script>
+  </body>
+</html>

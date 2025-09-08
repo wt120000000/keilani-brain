@@ -1,0 +1,5 @@
+{
+  "messages": [{ "content": "Hello Keilani", "role": "user" }],
+  "model": "gpt-4o-mini",
+  "stream": true
+}

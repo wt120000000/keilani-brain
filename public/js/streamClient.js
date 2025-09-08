@@ -1,5 +1,6 @@
 // public/js/streamClient.js
-// Minimal SSE client for /api/chat-stream (Edge) with client-key + request-id support.
+// SSE client for /api/chat-stream with client-key, request-id callback,
+// and robust CRLF/LF frame parsing.
 
 export async function streamChat(
   payload,
@@ -22,7 +23,7 @@ export async function streamChat(
       signal,
     });
 
-    // Pass request-id to UI if present
+    // Surface request id (if exposed by server)
     const rid =
       res.headers.get("x-openai-request-id") ||
       res.headers.get("openai-request-id") ||
@@ -31,60 +32,82 @@ export async function streamChat(
 
     if (!res.ok || !res.body) {
       const msg = await res.text().catch(() => "");
-      const err = new Error(
-        `HTTP ${res.status} ${res.statusText}${
-          msg ? `: ${msg.slice(0, 400)}` : ""
-        }`
+      onError?.(
+        new Error(
+          `HTTP ${res.status} ${res.statusText}${
+            msg ? `: ${msg.slice(0, 400)}` : ""
+          }`
+        )
       );
-      onError?.(err);
       return;
     }
 
-    // Stream & parse SSE
     const reader = res.body.getReader();
     const decoder = new TextDecoder();
+
     let buffer = "";
+
+    // helper: find next SSE frame boundary supporting LF and CRLF
+    function findBoundary(b) {
+      const a = b.indexOf("\n\n");      // LF LF
+      const c = b.indexOf("\r\n\r\n");  // CRLF CRLF
+      if (a === -1 && c === -1) return { idx: -1, sepLen: 0 };
+      if (a === -1) return { idx: c, sepLen: 4 };
+      if (c === -1) return { idx: a, sepLen: 2 };
+      // choose earliest
+      return a < c ? { idx: a, sepLen: 2 } : { idx: c, sepLen: 4 };
+    }
 
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
+
       buffer += decoder.decode(value, { stream: true });
 
-      let idx;
-      while ((idx = buffer.indexOf("\n\n")) !== -1) {
-        const raw = buffer.slice(0, idx).trim();
-        buffer = buffer.slice(idx + 2);
-        if (!raw) continue;
+      while (true) {
+        const { idx, sepLen } = findBoundary(buffer);
+        if (idx === -1) break; // need more data
 
-        // We only care about "data:" lines (ignore "event:")
-        const line = raw.startsWith("data:") ? raw.slice(5).trim() : null;
-        if (!line) continue;
+        const chunk = buffer.slice(0, idx).trim();
+        buffer = buffer.slice(idx + sepLen);
 
-        if (line === "[DONE]") {
-          onDone?.();
-          return;
-        }
+        if (!chunk) continue;
 
-        // OpenAI Responses SSE: JSON objects per frame
-        try {
-          const json = JSON.parse(line);
+        // We care about "data:" lines (ignore "event:" etc.)
+        // Some servers may send multi-line frames; split by CRLF or LF.
+        const lines = chunk.split(/\r?\n/);
+        for (const line of lines) {
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
 
-          // stream text
-          if (
-            json.type === "response.output_text.delta" &&
-            typeof json.delta === "string"
-          ) {
-            onToken?.(json.delta);
+          if (payload === "[DONE]") {
+            onDone?.();
+            return;
           }
 
-          // optional: handle other event types as you like
-          // e.g. response.error, rate_limits.updated, etc.
-        } catch {
-          // Non-JSON frame — safely ignore
+          try {
+            const json = JSON.parse(payload);
+
+            if (
+              json.type === "response.output_text.delta" &&
+              typeof json.delta === "string"
+            ) {
+              onToken?.(json.delta);
+            }
+
+            // Optional: handle other event types if you need them:
+            // - response.completed
+            // - response.error
+            // - rate_limits.updated
+            // - etc.
+          } catch {
+            // Non-JSON data line — safely ignore.
+          }
         }
       }
     }
 
+    // If we exit the read loop without an explicit [DONE], still finish.
     onDone?.();
   } catch (err) {
     if (err?.name === "AbortError") {
