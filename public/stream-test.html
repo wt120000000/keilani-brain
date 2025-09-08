@@ -47,28 +47,37 @@
     <div id="out"></div>
 
     <script>
-      const $ = (s) => document.querySelector(s);
-      $("#go").onclick = async () => {
-        $("#out").textContent = "";
-        const res = await fetch("/api/chat-stream", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ message: $("#msg").value }),
-        });
-        if (!res.body) {
-          $("#out").textContent = "No readable stream";
-          return;
-        }
-        const reader = res.body.getReader();
-        const dec = new TextDecoder();
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          const chunk = dec.decode(value);
-          // Show raw SSE lines (easy to debug)
-          $("#out").textContent += chunk;
-          // If you want pretty text, parse lines beginning with 'data: '
-          // and pull delta.content from each JSON object.
+           const $ = (s) => document.querySelector(s);
+           $("#go").onclick = async () => {
+             $("#out").textContent = "";
+             const res = await fetch("/api/chat-stream", {
+               method: "POST",
+               headers: { "Content-Type": "application/json" },
+               body: JSON.stringify({ message: $("#msg").value }),
+             });
+             if (!res.body) {
+               $("#out").textContent = "No readable stream";
+               return;
+             }
+             const reader = res.body.getReader();
+             const dec = new TextDecoder();
+             while (true) {
+               const { done, value } = await reader.read();
+               if (done) break;
+      	const chunk = dec.decode(value);
+      	for (const line of chunk.split("\n")) {
+      	  if (line.startsWith("data: ")) {
+      		const payload = line.slice(6).trim();
+      		if (payload === "[DONE]") continue;
+      		try {
+      		  const json = JSON.parse(payload);
+      		  const delta = json.choices?.[0]?.delta?.content;
+      		  if (delta) {
+      			$("#out").textContent += delta; // append only the text
+      	}
+      		} catch (_) {
+            // ignore non-JSON lines
+      	}
         }
       };
     </script>
