@@ -1,15 +1,10 @@
 ﻿/**
- * Netlify Function: /api/chat  (CommonJS)
- * Features:
- *  - GET: health JSON
- *  - POST: proxy to OpenAI Chat Completions
- *      supports {stream:true} for SSE, or {stream:false} for JSON
- *  - OPTIONS: CORS preflight
- *  - Optional client auth: set CLIENT_TOKEN to require Bearer <token>
- *
- * Env:
- *  - OPENAI_API_KEY (required)
- *  - CLIENT_TOKEN   (optional; if set, Authorization: Bearer <CLIENT_TOKEN> is required)
+ * Netlify Function: /api/chat (CommonJS)
+ * - GET: health JSON
+ * - POST: proxy to OpenAI chat completions
+ * - OPTIONS: CORS preflight
+ * Security: optional CLIENT_TOKEN (Authorization: Bearer <token>)
+ * Env: OPENAI_API_KEY (required), CLIENT_TOKEN (optional)
  */
 
 const CORS = {
@@ -25,22 +20,20 @@ const json = (status, obj, extra = {}) => ({
 });
 
 function requireClientAuth(event) {
-  const needed = process.env.CLIENT_TOKEN;
-  if (!needed) return null; // no auth enforced
-  const auth = event.headers?.authorization || event.headers?.Authorization || "";
+  const expected = process.env.CLIENT_TOKEN;
+  if (!expected) return null; // no auth enforced
+  const h = event.headers || {};
+  const auth = h.authorization || h.Authorization || "";
   const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
-  if (token !== needed) return "Unauthorized";
-  return null;
+  return token === expected ? null : "Unauthorized";
 }
 
 exports.handler = async (event) => {
   try {
-    // CORS preflight
     if (event.httpMethod === "OPTIONS") {
       return { statusCode: 200, headers: CORS, body: "" };
     }
 
-    // GET health
     if (event.httpMethod === "GET") {
       return json(200, { ok: true, service: "keilani-chat", method: "GET" });
     }
@@ -53,7 +46,7 @@ exports.handler = async (event) => {
     const authErr = requireClientAuth(event);
     if (authErr) return json(401, { error: authErr });
 
-    // Parse body
+    // Body
     let body;
     try {
       body = JSON.parse(event.body || "{}");
@@ -63,7 +56,7 @@ exports.handler = async (event) => {
 
     const {
       message,
-      model = "gpt-5",
+      model = "gpt-4.1",
       temperature = 0.7,
       stream = true,
       system,
@@ -74,11 +67,8 @@ exports.handler = async (event) => {
     }
 
     const apiKey = process.env.OPENAI_API_KEY;
-    if (!apiKey) {
-      return json(500, { error: "OPENAI_API_KEY not configured" });
-    }
+    if (!apiKey) return json(500, { error: "OPENAI_API_KEY not configured" });
 
-    // Build upstream request
     const upstreamBody = {
       model,
       temperature,
@@ -100,12 +90,10 @@ exports.handler = async (event) => {
 
     if (!upstreamRes.ok) {
       const detail = await upstreamRes.text();
-      // Light logging (Netlify keeps function logs)
       console.error("Upstream error", upstreamRes.status, detail.slice(0, 500));
       return json(upstreamRes.status, { error: "Upstream error", detail: detail.slice(0, 2000) });
     }
 
-    // Non-stream: return JSON
     if (!stream) {
       const data = await upstreamRes.json();
       const out =
@@ -115,7 +103,7 @@ exports.handler = async (event) => {
       return json(200, { output: out, raw: data });
     }
 
-    // Stream (SSE): translate OpenAI SSE into minimal {delta:"..."} events
+    // SSE streaming
     const headers = {
       ...CORS,
       "content-type": "text/event-stream; charset=utf-8",
@@ -127,23 +115,19 @@ exports.handler = async (event) => {
       async start(controller) {
         const enc = new TextEncoder();
         const dec = new TextDecoder();
-
         const send = (obj) => controller.enqueue(enc.encode(`data: ${JSON.stringify(obj)}\n\n`));
 
         try {
           const reader = upstreamRes.body.getReader();
-
           while (true) {
             const { value, done } = await reader.read();
             if (done) break;
-
             const chunk = dec.decode(value);
             for (const line of chunk.split("\n")) {
               const t = line.trim();
               if (!t.startsWith("data:")) continue;
               const payload = t.slice(5).trim();
               if (!payload || payload === "[DONE]") continue;
-
               try {
                 const js = JSON.parse(payload);
                 const text =
@@ -152,7 +136,6 @@ exports.handler = async (event) => {
                   "";
                 if (text) send({ delta: text });
               } catch {
-                // If a non-JSON line sneaks through, forward raw
                 send({ content: payload });
               }
             }

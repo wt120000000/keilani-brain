@@ -2,23 +2,19 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Keilani • Chat</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Keilani • Chat (Streaming)</title>
     <style>
       :root {
-        --bg: #0b0a0f;
-        --panel: #11101a;
-        --panel-2: #151426;
-        --line: #24223b;
-        --user-grad: linear-gradient(135deg, #6ea8ff, #a879ff 60%, #ff70d0);
-        --ai-bg: #0d0d14;
-        --ai-text: #b7ff68;
-        --ai-glow: 0 0 12px #aefe53, 0 0 28px rgba(174, 254, 83, 0.25);
-        --muted: #8c8aa3;
-        --ink: #e8e7ef;
-        --accent: #ff70d0;
-        --accent-2: #6ea8ff;
-        --radius: 14px;
+        --bg: #0b0c10;
+        --panel: #121419;
+        --muted: #8a90a0;
+        --text: #e6e9ef;
+        --accent: #7c3aed; /* violet */
+        --accent-2: #22c55e; /* green */
+        --danger: #ef4444;
+        --border: #1f2430;
+        --shadow: 0 10px 30px rgba(0, 0, 0, 0.35);
       }
       * {
         box-sizing: border-box;
@@ -29,439 +25,486 @@
       }
       body {
         margin: 0;
-        font:
-          16px/1.45 system-ui,
+        background: linear-gradient(180deg, #0a0b0f 0%, #0b0c10 100%);
+        color: var(--text);
+        font-family:
+          ui-sans-serif,
+          system-ui,
           -apple-system,
           Segoe UI,
           Roboto,
           Arial,
-          sans-serif;
-        color: var(--ink);
-        background:
-          radial-gradient(
-            1200px 600px at 15% -10%,
-            rgba(110, 168, 255, 0.18),
-            transparent 60%
-          ),
-          radial-gradient(
-            900px 500px at 100% 0%,
-            rgba(255, 112, 208, 0.12),
-            transparent 60%
-          ),
-          var(--bg);
-        display: flex;
-        align-items: stretch;
-        justify-content: center;
-        padding: 24px;
+          "Apple Color Emoji",
+          "Segoe UI Emoji";
       }
       .app {
-        width: min(920px, 100%);
-        display: flex;
-        flex-direction: column;
-        gap: 14px;
+        display: grid;
+        grid-template-rows: auto 1fr auto;
+        min-height: 100dvh;
       }
-      .bar {
-        background: linear-gradient(180deg, var(--panel), var(--panel-2));
-        border: 1px solid var(--line);
-        border-radius: 20px;
-        padding: 14px 16px;
+      header {
+        position: sticky;
+        top: 0;
+        z-index: 10;
         display: flex;
         align-items: center;
         justify-content: space-between;
-        gap: 10px;
-        box-shadow:
-          0 10px 30px rgba(0, 0, 0, 0.35),
-          inset 0 1px 0 rgba(255, 255, 255, 0.03);
+        gap: 16px;
+        padding: 14px 18px;
+        background: rgba(12, 14, 18, 0.7);
+        backdrop-filter: blur(8px);
+        border-bottom: 1px solid var(--border);
       }
-      .title {
+      .brand {
+        display: flex;
+        align-items: center;
+        gap: 12px;
         font-weight: 700;
         letter-spacing: 0.3px;
       }
-      .pill {
-        font-size: 12px;
-        color: var(--muted);
-        border: 1px solid var(--line);
-        padding: 6px 10px;
-        border-radius: 999px;
-        background: rgba(255, 255, 255, 0.02);
+      .dot {
+        width: 10px;
+        height: 10px;
+        border-radius: 50%;
+        background: var(--accent-2);
+        box-shadow: 0 0 12px var(--accent-2);
       }
-      .muted {
-        color: var(--muted);
-      }
-
-      .threadWrap {
-        background: linear-gradient(180deg, var(--panel), var(--panel-2));
-        border: 1px solid var(--line);
-        border-radius: 20px;
-        padding: 14px;
-        min-height: 52vh;
-        max-height: 66vh;
-        overflow: auto;
-        box-shadow:
-          inset 0 1px 0 rgba(255, 255, 255, 0.03),
-          0 10px 30px rgba(0, 0, 0, 0.25);
-      }
-      ul#messages {
-        list-style: none;
-        padding: 0;
-        margin: 0;
+      .controls {
         display: flex;
-        flex-direction: column;
-        gap: 12px;
-      }
-
-      .msg {
-        max-width: 78%;
-        padding: 10px 12px;
-        border-radius: var(--radius);
-        white-space: pre-wrap;
-        word-wrap: break-word;
-        position: relative;
-      }
-      .msg.user {
-        align-self: flex-end;
-        color: #fff;
-        background: var(--user-grad);
-      }
-      .msg.ai {
-        align-self: flex-start;
-        background: var(--ai-bg);
-        color: var(--ai-text);
-        box-shadow: var(--ai-glow);
-      }
-      .msg.sys {
-        align-self: center;
-        color: var(--muted);
-        font-size: 14px;
-        background: transparent;
-      }
-      .dim {
-        opacity: 0.65;
-      }
-
-      /* bubble tails */
-      .msg.user::after {
-        content: "";
-        position: absolute;
-        right: -6px;
-        bottom: 6px;
-        width: 12px;
-        height: 12px;
-        background: inherit;
-        transform: rotate(45deg);
-        border-bottom-right-radius: 4px;
-      }
-      .msg.ai::before {
-        content: "";
-        position: absolute;
-        left: -6px;
-        bottom: 6px;
-        width: 12px;
-        height: 12px;
-        background: var(--ai-bg);
-        transform: rotate(45deg);
-      }
-
-      .composer {
-        display: grid;
-        grid-template-columns: 1fr auto auto;
         gap: 10px;
-        background: linear-gradient(180deg, var(--panel), var(--panel-2));
-        border: 1px solid var(--line);
-        border-radius: 16px;
-        padding: 12px;
-        box-shadow:
-          0 10px 30px rgba(0, 0, 0, 0.25),
-          inset 0 1px 0 rgba(255, 255, 255, 0.03);
+        flex-wrap: wrap;
+        align-items: center;
       }
-      textarea#msg {
-        resize: none;
-        border: 1px solid var(--line);
-        border-radius: 12px;
-        padding: 12px 12px;
-        background: #0c0b14;
-        color: var(--ink);
-        outline: none;
-        box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.04);
+      .select,
+      .input,
+      .btn,
+      .slider {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        color: var(--text);
+        border-radius: 10px;
+        padding: 10px 12px;
+        font-size: 14px;
       }
-      button {
-        border: 1px solid var(--line);
-        background: #0f0e1a;
-        color: var(--ink);
-        border-radius: 12px;
-        padding: 10px 14px;
+      .btn {
         cursor: pointer;
+        transition: 0.15s ease;
+        box-shadow: var(--shadow);
       }
-      button.primary {
-        background: linear-gradient(135deg, var(--accent-2), var(--accent) 80%);
-        color: #fff;
-        border: none;
-        box-shadow: 0 8px 24px rgba(255, 112, 208, 0.28);
+      .btn.primary {
+        background: linear-gradient(180deg, #7c3aed, #5b21b6);
+        border-color: #4c1d95;
       }
-      button:disabled {
+      .btn.ghost {
+        background: transparent;
+        border-color: var(--border);
+      }
+      .btn:disabled {
         opacity: 0.6;
         cursor: not-allowed;
       }
-
-      /* typing dots */
-      .typing {
-        display: inline-flex;
-        gap: 6px;
+      main {
+        padding: 22px;
+      }
+      .transcript {
+        max-width: 960px;
+        margin: 0 auto;
+        display: grid;
+        gap: 14px;
+      }
+      .msg {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 16px;
+        padding: 14px 16px;
+        box-shadow: var(--shadow);
+      }
+      .msg.user {
+        border-left: 3px solid #4ade80;
+      }
+      .msg.assistant {
+        border-left: 3px solid #7c3aed;
+      }
+      .meta {
+        font-size: 12px;
+        color: var(--muted);
+        display: flex;
+        align-items: center;
+        gap: 8px;
+        margin-bottom: 6px;
+      }
+      .content {
+        white-space: pre-wrap;
+        line-height: 1.55;
+        font-size: 15px;
+      }
+      .tokenbar {
+        position: sticky;
+        bottom: 84px;
+        inset-inline: 0;
+        display: flex;
+        justify-content: center;
+        pointer-events: none;
+      }
+      .tokenchip {
+        pointer-events: auto;
+        background: rgba(124, 58, 237, 0.15);
+        border: 1px solid #4c1d95;
+        color: #d6ccff;
+        padding: 6px 10px;
+        border-radius: 999px;
+        font-size: 12px;
+        display: flex;
+        gap: 10px;
         align-items: center;
       }
-      .dot {
-        width: 6px;
-        height: 6px;
-        border-radius: 50%;
-        background: var(--ai-text);
-        opacity: 0.5;
-        box-shadow: var(--ai-glow);
+      footer {
+        position: sticky;
+        bottom: 0;
+        z-index: 10;
+        background: rgba(12, 14, 18, 0.7);
+        backdrop-filter: blur(8px);
+        border-top: 1px solid var(--border);
       }
-      .dot:nth-child(1) {
-        animation: bounce 1s infinite 0s;
+      .composer {
+        max-width: 960px;
+        margin: 0 auto;
+        padding: 12px 16px;
+        display: grid;
+        gap: 10px;
       }
-      .dot:nth-child(2) {
-        animation: bounce 1s infinite 0.15s;
+      .row {
+        display: grid;
+        grid-template-columns: 1fr auto;
+        gap: 10px;
       }
-      .dot:nth-child(3) {
-        animation: bounce 1s infinite 0.3s;
+      textarea.input {
+        min-height: 54px;
+        resize: vertical;
       }
-      @keyframes bounce {
-        0%,
-        80%,
-        100% {
-          transform: translateY(0);
-          opacity: 0.4;
-        }
-        40% {
-          transform: translateY(-5px);
-          opacity: 1;
-        }
+      .hint {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .toast {
+        position: fixed;
+        right: 16px;
+        bottom: 16px;
+        background: #1a1417;
+        border: 1px solid #7f1d1d;
+        color: #fecaca;
+        padding: 10px 12px;
+        border-radius: 12px;
+        box-shadow: var(--shadow);
+        max-width: 360px;
+        display: none;
+      }
+      .kbar {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
+      .kbar .field {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+      }
+      .kbar .field label {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      input[type="range"] {
+        accent-color: #7c3aed;
+      }
+      .small {
+        font-size: 12px;
+        color: var(--muted);
+      }
+      .row2 {
+        display: flex;
+        gap: 8px;
+        flex-wrap: wrap;
+        align-items: center;
+        justify-content: space-between;
+      }
+      .tokenwrap {
+        display: flex;
+        gap: 6px;
+        align-items: center;
       }
     </style>
   </head>
   <body>
     <div class="app">
-      <div class="bar">
-        <div class="title">Keilani ✨</div>
-        <div class="pill" id="statusPill">Ready</div>
-      </div>
+      <header>
+        <div class="brand">
+          <span class="dot"></span> Keilani Chat • Streaming
+        </div>
+        <div class="controls kbar">
+          <div class="field">
+            <label for="model">Model</label>
+            <select id="model" class="select">
+              <option value="gpt-5">gpt-5</option>
+              <option value="gpt-5-mini">gpt-5-mini</option>
+              <option value="gpt-4.1">gpt-4.1</option>
+            </select>
+          </div>
+          <div class="field">
+            <label for="temp">Temp</label>
+            <input
+              type="range"
+              id="temp"
+              min="0"
+              max="2"
+              step="0.1"
+              value="0.7"
+            />
+            <span id="tempVal" class="small">0.7</span>
+          </div>
+          <div class="field">
+            <label for="api">API</label>
+            <input
+              id="api"
+              class="input"
+              style="width: 280px"
+              placeholder="https://api.keilani.ai/api/chat"
+            />
+          </div>
+          <div class="field">
+            <label for="token">Client Token</label>
+            <div class="tokenwrap">
+              <input
+                id="token"
+                class="input"
+                style="width: 200px"
+                placeholder="Optional"
+                type="password"
+              />
+              <button
+                id="toggleTokenVis"
+                class="btn ghost"
+                type="button"
+                title="Show/Hide"
+              >
+                👁️
+              </button>
+            </div>
+          </div>
+          <button id="toggleHUD" class="btn ghost" type="button">Tokens</button>
+          <button id="saveCfg" class="btn ghost">Save</button>
+          <button id="exportTxt" class="btn ghost">Export .txt</button>
+          <button id="clearAll" class="btn ghost">Clear</button>
+        </div>
+      </header>
 
-      <div class="threadWrap">
-        <ul id="messages"></ul>
-      </div>
+      <main>
+        <div id="transcript" class="transcript" aria-live="polite"></div>
+        <div class="tokenbar">
+          <div id="tokenchip" class="tokenchip" hidden>
+            <span>Tokens: <strong id="tokCount">0</strong></span>
+            <span>•</span>
+            <span id="rate">0 t/s</span>
+          </div>
+        </div>
+      </main>
 
-      <form id="composer" class="composer">
-        <textarea
-          id="msg"
-          rows="2"
-          placeholder="Tell Keilani something cute…  (Enter to send, Shift+Enter = newline)"
-        ></textarea>
-        <button id="sendBtn" class="primary" type="submit">Send</button>
-        <button id="stopBtn" type="button">Stop</button>
-      </form>
+      <footer>
+        <form id="composer" class="composer">
+          <div class="row">
+            <textarea
+              id="prompt"
+              class="input"
+              placeholder="Type your message… (Shift+Enter for newline)"
+              required
+            ></textarea>
+            <button id="send" class="btn primary" type="submit">Send ↵</button>
+          </div>
+          <div class="row2">
+            <span class="hint"
+              >Tip: ⌘/Ctrl+K to focus input • Your config persists locally</span
+            >
+            <div class="kbar">
+              <label class="small"
+                ><input type="checkbox" id="stream" checked /> Stream</label
+              >
+              <label class="small"
+                ><input type="checkbox" id="sse" checked /> Expect SSE</label
+              >
+            </div>
+          </div>
+        </form>
+      </footer>
     </div>
 
-    <script type="module">
-      // If hosting API elsewhere, set API_BASE; empty means same-origin.
-      const API_BASE = ""; // e.g. "https://api.keilani.ai"
+    <div id="toast" class="toast" role="alert"></div>
 
-      const $ = (s) => document.querySelector(s);
-      const messagesEl = $("#messages");
-      const input = $("#msg");
-      const sendBtn = $("#sendBtn");
-      const stopBtn = $("#stopBtn");
-      const statusPill = $("#statusPill");
+    <script>
+          // --- Config persistence ---
+          const apiInput = document.getElementById('api');
+          const modelSel = document.getElementById('model');
+          const temp = document.getElementById('temp');
+          const tempVal = document.getElementById('tempVal');
+          const streamChk = document.getElementById('stream');
+          const sseChk = document.getElementById('sse');
+          const tokenInput = document.getElementById('token');
 
-      const userId =
-        localStorage.getItem("kb_user") ||
-        (() => {
-          const id = crypto.randomUUID?.() || String(Date.now());
-          localStorage.setItem("kb_user", id);
-          return id;
-        })();
+          const loadCfg = () => {
+            apiInput.value = localStorage.getItem('API_URL') || 'https://api.keilani.ai/api/chat';
+            modelSel.value = localStorage.getItem('MODEL') || 'gpt-5';
+            temp.value = localStorage.getItem('TEMP') || '0.7';
+            tempVal.textContent = temp.value;
+            streamChk.checked = JSON.parse(localStorage.getItem('STREAM') || 'true');
+            sseChk.checked = JSON.parse(localStorage.getItem('EXPECT_SSE') || 'true');
+            tokenInput.value = localStorage.getItem('CLIENT_TOKEN') || '';
+          };
+          const saveCfg = () => {
+            localStorage.setItem('API_URL', apiInput.value.trim());
+            localStorage.setItem('MODEL', modelSel.value);
+            localStorage.setItem('TEMP', temp.value);
+            localStorage.setItem('STREAM', streamChk.checked);
+            localStorage.setItem('EXPECT_SSE', sseChk.checked);
+            localStorage.setItem('CLIENT_TOKEN', tokenInput.value.trim());
+            toast('Config saved.');
+          };
+          document.getElementById('saveCfg').addEventListener('click', saveCfg);
+          temp.addEventListener('input', () => tempVal.textContent = temp.value);
+          loadCfg();
 
-      // conversation history for context
-      const history = [
-        {
-          role: "system",
-          content: "You are Keilani: concise, flirty-fun, helpful.",
-        },
-      ];
+          // Show/Hide token value
+          document.getElementById('toggleTokenVis').addEventListener('click', () => {
+            tokenInput.type = tokenInput.type === 'password' ? 'text' : 'password';
+          });
 
-      let cancelCurrent = null;
+          // --- UI helpers ---
+          const transcript = document.getElementById('transcript');
+          const toastEl = document.getElementById('toast');
+          function toast(msg) { toastEl.textContent = msg; toastEl.style.display = 'block'; clearTimeout(toastEl._t); toastEl._t = setTimeout(()=> toastEl.style.display='none', 3200); }
+          function el(tag, cls) { const n = document.createElement(tag); if (cls) n.className = cls; return n; }
 
-      function pill(text, muted = false) {
-        statusPill.textContent = text;
-        statusPill.classList.toggle("muted", !!muted);
-      }
+          function addMessage(role, text, stamp = new Date()) {
+            const wrap = el('div', 'msg ' + role);
+            const meta = el('div', 'meta'); meta.textContent = (role === 'user' ? 'You' : 'Keilani') + ' • ' + stamp.toLocaleTimeString();
+            const content = el('div', 'content'); content.textContent = text || '';
+            wrap.appendChild(meta); wrap.appendChild(content); transcript.appendChild(wrap); wrap._content = content;
+            window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' });
+            return wrap;
+          }
 
-      function addBubble(text, who) {
-        const li = document.createElement("li");
-        const div = document.createElement("div");
-        div.className = `msg ${who}`;
-        div.textContent = text;
-        li.appendChild(div);
-        messagesEl.appendChild(li);
-        div.scrollIntoView({ behavior: "smooth", block: "end" });
-        return div;
-      }
+          // Export transcript to .txt
+          document.getElementById('exportTxt').addEventListener('click', () => {
+            const lines = Array.from(document.querySelectorAll('.msg')).map(m => {
+              const who = m.classList.contains('user') ? 'You' : 'Keilani';
+              const text = m.querySelector('.content').textContent; return `${who}:
+      ${text}
+      `;
+            }).join('
+      ');
+            const blob = new Blob([lines], {type:'text/plain'});
+            const a = document.createElement('a'); a.href = URL.createObjectURL(blob); a.download = 'chat_' + Date.now() + '.txt'; a.click();
+          });
 
-      function addTyping() {
-        const li = document.createElement("li");
-        const div = document.createElement("div");
-        div.className = "msg ai";
-        div.innerHTML = `<span class="typing"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span>`;
-        li.appendChild(div);
-        messagesEl.appendChild(li);
-        div.scrollIntoView({ behavior: "smooth", block: "end" });
-        return { li, div };
-      }
+          // Clear transcript
+          document.getElementById('clearAll').addEventListener('click', () => { transcript.innerHTML = ''; toast('Cleared'); });
 
-      // Keep system + last N turns, also cap total chars for cost control
-      function trimHistory(hist, { maxTurns = 8, maxChars = 6000 } = {}) {
-        const base = hist[0]?.role === "system" ? [hist[0]] : [];
-        const tail = hist.slice(-maxTurns * 2);
-        let out = base.concat(tail);
-        const toText = (arr) => arr.map((m) => m.content).join("\n");
-        while (toText(out).length > maxChars && out.length > base.length + 2) {
-          out.splice(base.length, 2); // drop oldest user+assistant pair
-        }
-        return out;
-      }
+          // --- Streaming logic ---
+          const tokenChip = document.getElementById('tokenchip');
+          const tokCountEl = document.getElementById('tokCount');
+          const rateEl = document.getElementById('rate');
 
-      async function streamEdge(messages, bubble, signal) {
-        const body = {
-          userId,
-          messages,
-          // also include "message" for servers expecting a single message prop
-          message: messages.at(-1)?.content,
-        };
-        const res = await fetch((API_BASE || "") + "/api/chat-stream", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-request-id": crypto.randomUUID?.() || String(Date.now()),
-          },
-          body: JSON.stringify(body),
-          signal,
-        });
-        if (!res.ok || !res.body) throw new Error(`HTTP ${res.status}`);
+          document.getElementById('toggleHUD').addEventListener('click', () => {
+            tokenChip.hidden = !tokenChip.hidden;
+          });
 
-        const reader = res.body.getReader();
-        const dec = new TextDecoder();
-        let full = "";
+          function startTokenHUD() { tokenChip.hidden = false; _tok = 0; tokCountEl.textContent = '0'; _t0 = performance.now(); }
+          function bumpTokenHUD(n = 1) { _tok += n; tokCountEl.textContent = String(_tok); const dt = (performance.now() - _t0) / 1000; if (dt > 0.2) rateEl.textContent = (Math.round((_tok/dt)*10)/10) + ' t/s'; }
+          function stopTokenHUD() { setTimeout(()=> tokenChip.hidden = true, 600); }
+          let _tok = 0, _t0 = 0;
 
-        while (true) {
-          const { done, value } = await reader.read();
-          if (done) break;
-          const chunk = dec.decode(value, { stream: true });
-          for (const line of chunk.split("\n")) {
-            if (!line.startsWith("data: ")) continue;
-            const payload = line.slice(6).trim();
-            if (!payload || payload === "[DONE]") continue;
-            try {
-              const json = JSON.parse(payload);
-              const delta = json?.choices?.[0]?.delta?.content;
-              if (delta) {
-                full += delta;
-                bubble.textContent += delta;
-                bubble.scrollIntoView({ behavior: "smooth", block: "end" });
+          async function streamViaSSE(reader, writer) {
+            const dec = new TextDecoder(); let buf = '';
+            for(;;) {
+              const {value, done} = await reader.read(); if (done) break;
+              buf += dec.decode(value, {stream:true});
+              let p;
+              while ((p = buf.indexOf('
+
+      ')) !== -1) {
+                const chunk = buf.slice(0, p); buf = buf.slice(p+2);
+                const dataLines = chunk.split('
+      ').filter(l => l.startsWith('data:'));
+                for (const dl of dataLines) {
+                  const payload = dl.slice(5).trim();
+                  if (!payload || payload === '[DONE]') continue;
+                  try {
+                    const js = JSON.parse(payload);
+                    if (js.delta) { writer(js.delta); bumpTokenHUD(Math.max(1, Math.ceil(js.delta.length/4))); }
+                    else if (js.content) { writer(js.content); bumpTokenHUD(Math.max(1, Math.ceil(js.content.length/4))); }
+                  } catch { writer(payload + '
+      '); bumpTokenHUD(Math.max(1, Math.ceil(payload.length/4))); }
+                }
               }
-            } catch {
-              /* ignore keepalives */
             }
           }
-        }
-        return full;
-      }
 
-      async function callFallback(message) {
-        const res = await fetch((API_BASE || "") + "/api/chat", {
-          method: "POST",
-          headers: {
-            "Content-Type": "application/json",
-            "x-request-id": crypto.randomUUID?.() || String(Date.now()),
-          },
-          body: JSON.stringify({ userId, message }),
-        });
-        const text = await res.text();
-        let data;
-        try {
-          data = JSON.parse(text);
-        } catch {}
-        if (!res.ok)
-          throw new Error(
-            `API ${data?.stage || "error"}: ${data?.error || text}`,
-          );
-        return data.reply || "(no reply)";
-      }
+          async function streamViaChunks(reader, writer) {
+            const dec = new TextDecoder();
+            for(;;) {
+              const {value, done} = await reader.read(); if (done) break;
+              const txt = dec.decode(value, {stream:true}); writer(txt); bumpTokenHUD(Math.max(1, Math.ceil(txt.length/4)));
+            }
+          }
 
-      async function onSend(e) {
-        e?.preventDefault?.();
-        const message = (input.value || "").trim();
-        if (!message) return;
+          async function sendMessage(text) {
+            const api = apiInput.value.trim(); if (!api) { toast('Set API URL'); return; }
+            const model = modelSel.value; const temperature = parseFloat(temp.value);
+            const wantStream = streamChk.checked; const expectSSE = sseChk.checked;
 
-        // user bubble
-        addBubble(message, "user");
-        history.push({ role: "user", content: message });
-        input.value = "";
-        input.focus();
+            const userMsg = addMessage('user', text);
+            const asstMsg = addMessage('assistant', '');
 
-        // assistant bubble with typing indicator
-        const { li, div: typingDiv } = addTyping();
-        sendBtn.disabled = true;
-        stopBtn.disabled = false;
-        pill("Streaming…");
-
-        // replace typing with the real bubble we stream into
-        const aiBubble = document.createElement("div");
-        aiBubble.className = "msg ai";
-        li.replaceChild(aiBubble, typingDiv);
-
-        const aborter = new AbortController();
-        cancelCurrent = () => aborter.abort();
-
-        try {
-          const trimmed = trimHistory(history);
-          const full = await streamEdge(trimmed, aiBubble, aborter.signal);
-          history.push({ role: "assistant", content: full });
-          pill("OK • streamed", true);
-        } catch (err) {
-          if (err.name === "AbortError") {
-            aiBubble.classList.add("dim");
-            aiBubble.textContent += "\n[stopped]";
-            pill("Stopped", true);
-          } else {
-            pill("Edge failed, fallback…");
             try {
-              const reply = await callFallback(message);
-              aiBubble.textContent = reply;
-              history.push({ role: "assistant", content: reply });
-              pill("OK • fallback", true);
-            } catch (e2) {
-              aiBubble.classList.add("dim");
-              aiBubble.textContent += `\n[error] ${e2.message || e2}`;
-              pill("Error", true);
-              console.error(err, e2);
-            }
-          }
-        } finally {
-          sendBtn.disabled = false;
-          stopBtn.disabled = true;
-          cancelCurrent = null;
-        }
-      }
+              startTokenHUD();
+              const headers = { 'Content-Type': 'application/json' };
+              const tok = tokenInput.value.trim() || localStorage.getItem('CLIENT_TOKEN');
+              if (tok) headers['Authorization'] = `Bearer ${tok}`;
 
-      // events
-      $("#composer").addEventListener("submit", onSend);
-      input.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" && !e.shiftKey) {
-          e.preventDefault();
-          onSend(e);
-        }
-      });
-      stopBtn.addEventListener("click", () => cancelCurrent?.());
+              const res = await fetch(api, {
+                method: 'POST',
+                headers,
+                body: JSON.stringify({ message: text, model, temperature, stream: wantStream })
+              });
+
+              if (!res.ok) { const errText = await res.text(); throw new Error(`HTTP ${res.status} – ${errText.substring(0,200)}`); }
+
+              const ctype = res.headers.get('content-type') || '';
+              const reader = res.body.getReader();
+              const writer = (chunk) => { asstMsg._content.textContent += chunk; window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }); };
+
+              if (wantStream) {
+                if (expectSSE || ctype.includes('text/event-stream')) { await streamViaSSE(reader, writer); }
+                else { await streamViaChunks(reader, writer); }
+              } else {
+                const data = await res.json();
+                const out = data.output || data.message || JSON.stringify(data);
+                writer(out); bumpTokenHUD(Math.max(1, Math.ceil(String(out).length/4)));
+              }
+            } catch (e) {
+              console.error(e); toast('Error: ' + e.message); asstMsg._content.textContent = '[Error] ' + e.message;
+            } finally { stopTokenHUD(); }
+          }
+
+          // --- Composer wiring ---
+          const form = document.getElementById('composer');
+          const prompt = document.getElementById('prompt');
+          const sendBtn = document.getElementById('send');
+
+          form.addEventListener('submit', (e) => { e.preventDefault(); const text = prompt.value.trim(); if (!text) return; sendBtn.disabled = true; sendMessage(text).finally(() => { sendBtn.disabled = false; }); prompt.value = ''; });
+          prompt.addEventListener('keydown', (e) => { if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); form.requestSubmit(); } });
+          window.addEventListener('keydown', (e) => { if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') { e.preventDefault(); prompt.focus(); } });
+
+          // Warm greeting if empty
+          if (!localStorage.getItem('welcomed')) { addMessage('assistant', 'Heya! I\'m Keilani. Add an optional Client Token (if your API requires it). Use the Tokens button to toggle the token HUD.'); localStorage.setItem('welcomed', '1'); }
     </script>
   </body>
 </html>
