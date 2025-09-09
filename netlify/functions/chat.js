@@ -1,100 +1,173 @@
 ﻿/**
- * Netlify Function: /api/chat → /.netlify/functions/chat
- * Uses OpenAI Responses API (model + input).
- * - POST body: { message?: string, model?: string, stream?: boolean, ... }
- * - CORS preflight supported
- * - Simple shared-key auth with X-Client-Key against env PUBLIC_API_KEY
+ * Netlify Function: /api/chat  (CommonJS)
+ * - GET  -> health check JSON
+ * - POST -> proxies to OpenAI Chat Completions
+ *           supports {stream:true} for SSE, or {stream:false} for JSON
+ * - OPTIONS -> CORS preflight
+ *
+ * Expects env: OPENAI_API_KEY
+ *
+ * Works with the chat.html payload:
+ * { message: string, model?: string, temperature?: number, stream?: boolean, system?: string }
  */
 
-const CORS_HEADERS = {
-  "Access-Control-Allow-Origin": "*", // tighten later
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Client-Key",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Expose-Headers": "x-openai-request-id, openai-request-id",
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+  "Access-Control-Allow-Methods": "POST, GET, OPTIONS",
 };
 
-const DEFAULT_MODEL = "gpt-4.1-mini";
-
-/** Parse JSON safely */
-function safeParse(json) {
-  try { return JSON.parse(json || "{}"); } catch { return {}; }
-}
-
-/** Build OpenAI request body from incoming payload */
-function buildOpenAIRequestBody({ message, model, stream, ...rest }) {
-  const cleanMsg =
-    typeof message === "string" && message.trim().length
-      ? message.trim()
-      : "health check";
-
-  const body = {
-    model: model && typeof model === "string" ? model : DEFAULT_MODEL,
-    input: cleanMsg,
-    ...(stream ? { stream: true } : {}),
-  };
-
-  if (typeof rest.temperature === "number") body.temperature = rest.temperature;
-  if (typeof rest.max_output_tokens === "number") body.max_output_tokens = rest.max_output_tokens;
-  if (rest.metadata && typeof rest.metadata === "object") body.metadata = rest.metadata;
-
-  return body;
-}
-
-/** Return JSON response */
-function json(statusCode, data, extraHeaders = {}) {
-  return {
-    statusCode,
-    headers: { ...CORS_HEADERS, "Content-Type": "application/json", ...extraHeaders },
-    body: JSON.stringify(data),
-  };
-}
+const json = (status, obj, extra = {}) => ({
+  statusCode: status,
+  headers: { "content-type": "application/json; charset=utf-8", ...CORS, ...extra },
+  body: JSON.stringify(obj),
+});
 
 exports.handler = async (event) => {
-  // CORS preflight
-  if (event.httpMethod === "OPTIONS") {
-    return { statusCode: 204, headers: CORS_HEADERS, body: "" };
-  }
-
-  // Method guard
-  if (event.httpMethod !== "POST") {
-    return json(405, { error: "Method Not Allowed. Use POST." });
-  }
-
-  // 🔒 shared-key auth
-  const hdrs = event.headers || {};
-  const clientKey = hdrs["x-client-key"] || hdrs["X-Client-Key"];
-  const expected = process.env.PUBLIC_API_KEY || "";
-  if (!expected || clientKey !== expected) {
-    return json(401, { error: "Unauthorized" });
-  }
-
-  // Env guard
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) {
-    return json(500, { error: "Missing OPENAI_API_KEY" });
-  }
-
-  // Parse incoming payload
-  const payload = safeParse(event.body);
-  const openAIReq = buildOpenAIRequestBody(payload);
-
   try {
-    const rsp = await fetch("https://api.openai.com/v1/responses", {
+    // CORS preflight
+    if (event.httpMethod === "OPTIONS") {
+      return { statusCode: 200, headers: CORS, body: "" };
+    }
+
+    // Simple health check
+    if (event.httpMethod === "GET") {
+      return json(200, { ok: true, service: "keilani-chat", method: "GET" });
+    }
+
+    if (event.httpMethod !== "POST") {
+      return json(405, { error: "Method Not Allowed" });
+    }
+
+    // Parse body
+    let body;
+    try {
+      body = JSON.parse(event.body || "{}");
+    } catch {
+      return json(400, { error: "Invalid JSON body" });
+    }
+
+    const {
+      message,
+      model = "gpt-5",
+      temperature = 0.7,
+      stream = true,
+      system,
+    } = body;
+
+    if (!message || typeof message !== "string") {
+      return json(400, { error: "Missing 'message' (string)" });
+    }
+
+    const apiKey = process.env.OPENAI_API_KEY;
+    if (!apiKey) {
+      return json(500, { error: "OPENAI_API_KEY not configured" });
+    }
+
+    // Build upstream request
+    const upstreamBody = {
+      model,
+      temperature,
+      stream,
+      messages: [
+        ...(system ? [{ role: "system", content: String(system) }] : []),
+        { role: "user", content: message },
+      ],
+    };
+
+    const upstreamRes = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${apiKey}`,
-        "Content-Type": "application/json",
+        "content-type": "application/json",
+        authorization: `Bearer ${apiKey}`,
       },
-      body: JSON.stringify(openAIReq),
+      body: JSON.stringify(upstreamBody),
     });
 
-    const textTypeReqId = rsp.headers.get("x-request-id") || rsp.headers.get("x-openai-request-id") || "";
-    const extra = textTypeReqId ? { "x-openai-request-id": textTypeReqId } : {};
+    if (!upstreamRes.ok) {
+      const detail = await upstreamRes.text();
+      return json(upstreamRes.status, { error: "Upstream error", detail: detail.slice(0, 2000) });
+    }
 
-    // Non-streaming JSON passthrough
-    const data = await rsp.json().catch(() => ({}));
-    return json(rsp.status, data, extra);
+    // Non-stream: return JSON once
+    if (!stream) {
+      const data = await upstreamRes.json();
+      const out =
+        data?.choices?.[0]?.message?.content ??
+        data?.choices?.map((c) => c?.delta?.content || c?.message?.content || "").join("") ??
+        "";
+      return json(200, { output: out, raw: data });
+    }
+
+    // Stream (SSE): translate OpenAI's SSE into minimal deltas {delta:"..."}
+    // Netlify Functions support returning a streamed response via Response()
+    const headers = {
+      ...CORS,
+      "content-type": "text/event-stream; charset=utf-8",
+      "cache-control": "no-cache, no-transform",
+      connection: "keep-alive",
+    };
+
+    const streamBody = new ReadableStream({
+      async start(controller) {
+        const enc = new TextEncoder();
+        const dec = new TextDecoder();
+
+        // helper: send one SSE data event
+        const send = (obj) => controller.enqueue(enc.encode(`data: ${JSON.stringify(obj)}\n\n`));
+
+        try {
+          const reader = upstreamRes.body.getReader();
+
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+
+            const chunk = dec.decode(value);
+            // OpenAI sends lines like "data: {...}" and "data: [DONE]"
+            for (const line of chunk.split("\n")) {
+              const t = line.trim();
+              if (!t.startsWith("data:")) continue;
+              const payload = t.slice(5).trim();
+              if (!payload || payload === "[DONE]") continue;
+
+              try {
+                const js = JSON.parse(payload);
+                const text =
+                  js?.choices?.[0]?.delta?.content ??
+                  js?.choices?.[0]?.message?.content ??
+                  "";
+                if (text) send({ delta: text });
+              } catch {
+                // If a non-JSON line sneaks through, forward as content
+                send({ content: payload });
+              }
+            }
+          }
+        } catch (err) {
+          send({ error: String(err?.message || err) });
+        } finally {
+          controller.enqueue(enc.encode("data: [DONE]\n\n"));
+          controller.close();
+        }
+      },
+    });
+
+    // Return a native Response so Netlify preserves the stream
+    return new Response(streamBody, { status: 200, headers });
   } catch (err) {
-    return json(500, { error: String(err) });
+    return json(500, { error: "Handler crashed", detail: String(err?.message || err) });
   }
 };
+
+/**
+ * ROUTING NOTE
+ * ------------
+ * If you already route /api/chat to this function via netlify.toml redirects, you're set.
+ * If not, you can also expose it directly at /.netlify/functions/chat.
+ *
+ * If you prefer pretty path-based routing without redirects and you're on Functions v2,
+ * you can try attaching a path config like below — but this is not required if you have redirects.
+ *
+ * exports.config = { path: "/api/chat" }; // Uncomment if your setup supports it.
+ */
