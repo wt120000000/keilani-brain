@@ -12,10 +12,19 @@
 
 # Map /api/* to serverless functions
 [[redirects]]
-  from = "/api/*"
-  to   = "/.netlify/functions/:splat"
+  from = "/api/chat"
+  to   = "/.netlify/functions/chat"
   status = 200
-  force  = true
+
+[[redirects]]
+  from = "/api/health"
+  to   = "/.netlify/functions/health"
+  status = 200
+
+[[redirects]]
+  from = "/api/version"
+  to   = "/.netlify/functions/version"
+  status = 200
 
 # --- Global security headers ---
 [[headers]]

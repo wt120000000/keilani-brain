@@ -1,14 +1,15 @@
 ﻿/**
  * Netlify Function: /api/chat  (CommonJS)
- * - GET  -> health check JSON
- * - POST -> proxies to OpenAI Chat Completions
- *           supports {stream:true} for SSE, or {stream:false} for JSON
- * - OPTIONS -> CORS preflight
+ * Features:
+ *  - GET: health JSON
+ *  - POST: proxy to OpenAI Chat Completions
+ *      supports {stream:true} for SSE, or {stream:false} for JSON
+ *  - OPTIONS: CORS preflight
+ *  - Optional client auth: set CLIENT_TOKEN to require Bearer <token>
  *
- * Expects env: OPENAI_API_KEY
- *
- * Works with the chat.html payload:
- * { message: string, model?: string, temperature?: number, stream?: boolean, system?: string }
+ * Env:
+ *  - OPENAI_API_KEY (required)
+ *  - CLIENT_TOKEN   (optional; if set, Authorization: Bearer <CLIENT_TOKEN> is required)
  */
 
 const CORS = {
@@ -23,6 +24,15 @@ const json = (status, obj, extra = {}) => ({
   body: JSON.stringify(obj),
 });
 
+function requireClientAuth(event) {
+  const needed = process.env.CLIENT_TOKEN;
+  if (!needed) return null; // no auth enforced
+  const auth = event.headers?.authorization || event.headers?.Authorization || "";
+  const token = auth.startsWith("Bearer ") ? auth.slice(7) : "";
+  if (token !== needed) return "Unauthorized";
+  return null;
+}
+
 exports.handler = async (event) => {
   try {
     // CORS preflight
@@ -30,7 +40,7 @@ exports.handler = async (event) => {
       return { statusCode: 200, headers: CORS, body: "" };
     }
 
-    // Simple health check
+    // GET health
     if (event.httpMethod === "GET") {
       return json(200, { ok: true, service: "keilani-chat", method: "GET" });
     }
@@ -38,6 +48,10 @@ exports.handler = async (event) => {
     if (event.httpMethod !== "POST") {
       return json(405, { error: "Method Not Allowed" });
     }
+
+    // Optional client auth
+    const authErr = requireClientAuth(event);
+    if (authErr) return json(401, { error: authErr });
 
     // Parse body
     let body;
@@ -86,10 +100,12 @@ exports.handler = async (event) => {
 
     if (!upstreamRes.ok) {
       const detail = await upstreamRes.text();
+      // Light logging (Netlify keeps function logs)
+      console.error("Upstream error", upstreamRes.status, detail.slice(0, 500));
       return json(upstreamRes.status, { error: "Upstream error", detail: detail.slice(0, 2000) });
     }
 
-    // Non-stream: return JSON once
+    // Non-stream: return JSON
     if (!stream) {
       const data = await upstreamRes.json();
       const out =
@@ -99,8 +115,7 @@ exports.handler = async (event) => {
       return json(200, { output: out, raw: data });
     }
 
-    // Stream (SSE): translate OpenAI's SSE into minimal deltas {delta:"..."}
-    // Netlify Functions support returning a streamed response via Response()
+    // Stream (SSE): translate OpenAI SSE into minimal {delta:"..."} events
     const headers = {
       ...CORS,
       "content-type": "text/event-stream; charset=utf-8",
@@ -113,7 +128,6 @@ exports.handler = async (event) => {
         const enc = new TextEncoder();
         const dec = new TextDecoder();
 
-        // helper: send one SSE data event
         const send = (obj) => controller.enqueue(enc.encode(`data: ${JSON.stringify(obj)}\n\n`));
 
         try {
@@ -124,7 +138,6 @@ exports.handler = async (event) => {
             if (done) break;
 
             const chunk = dec.decode(value);
-            // OpenAI sends lines like "data: {...}" and "data: [DONE]"
             for (const line of chunk.split("\n")) {
               const t = line.trim();
               if (!t.startsWith("data:")) continue;
@@ -139,12 +152,13 @@ exports.handler = async (event) => {
                   "";
                 if (text) send({ delta: text });
               } catch {
-                // If a non-JSON line sneaks through, forward as content
+                // If a non-JSON line sneaks through, forward raw
                 send({ content: payload });
               }
             }
           }
         } catch (err) {
+          console.error("Stream error:", err);
           send({ error: String(err?.message || err) });
         } finally {
           controller.enqueue(enc.encode("data: [DONE]\n\n"));
@@ -153,21 +167,9 @@ exports.handler = async (event) => {
       },
     });
 
-    // Return a native Response so Netlify preserves the stream
     return new Response(streamBody, { status: 200, headers });
   } catch (err) {
+    console.error("Handler crashed:", err);
     return json(500, { error: "Handler crashed", detail: String(err?.message || err) });
   }
 };
-
-/**
- * ROUTING NOTE
- * ------------
- * If you already route /api/chat to this function via netlify.toml redirects, you're set.
- * If not, you can also expose it directly at /.netlify/functions/chat.
- *
- * If you prefer pretty path-based routing without redirects and you're on Functions v2,
- * you can try attaching a path config like below — but this is not required if you have redirects.
- *
- * exports.config = { path: "/api/chat" }; // Uncomment if your setup supports it.
- */
