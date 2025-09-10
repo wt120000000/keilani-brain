@@ -1,226 +1,133 @@
 ﻿// netlify/functions/chat.js
-// CommonJS (your package.json has "type": "commonjs")
+// CommonJS
 
-// Node 18+ has global.fetch; keep a fallback for older envs
 let _fetch = global.fetch;
 if (!_fetch) {
-  try {
-    _fetch = require("node-fetch");
-  } catch {
-    throw new Error("Fetch is not available. Use Node 18+ or add node-fetch.");
-  }
+  try { _fetch = require("node-fetch"); }
+  catch { throw new Error("Need Node 18+ (global.fetch) or add node-fetch"); }
 }
 
-/**
- * Simple CORS headers
- */
-const corsHeaders = {
+const cors = {
   "access-control-allow-origin": "*",
   "access-control-allow-methods": "GET,POST,OPTIONS",
   "access-control-allow-headers": "authorization,content-type,x-client-token",
 };
 
-/**
- * Utility response builders
- */
-const ok = (bodyObj, extra = {}) => ({
+const ok = (data, extra = {}) => ({
   statusCode: 200,
-  headers: {
-    "content-type": "application/json; charset=utf-8",
-    ...corsHeaders,
-    ...extra,
-  },
-  body: JSON.stringify(bodyObj),
+  headers: { "content-type": "application/json; charset=utf-8", ...cors, ...extra },
+  body: JSON.stringify(data),
 });
-
-const err = (code, bodyObj, extra = {}) => ({
+const err = (code, data, extra = {}) => ({
   statusCode: code,
-  headers: {
-    "content-type": "application/json; charset=utf-8",
-    ...corsHeaders,
-    ...extra,
-  },
-  body:
-    typeof bodyObj === "string" ? JSON.stringify({ error: bodyObj }) : JSON.stringify(bodyObj),
+  headers: { "content-type": "application/json; charset=utf-8", ...cors, ...extra },
+  body: typeof data === "string" ? JSON.stringify({ error: data }) : JSON.stringify(data),
 });
 
-/**
- * Decide if a model should omit temperature entirely.
- * gpt-5 behaves like a fixed-temp model on many providers.
- * Add other patterns as needed.
- */
-function modelOmitsTemperature(model) {
-  if (!model) return false;
-  const m = String(model).toLowerCase().trim();
-  return m === "gpt-5" || m.startsWith("gpt-5:") || m.startsWith("gpt5");
+// ---- model helpers ----
+const modelOmitsTemperature = (m) => {
+  const s = String(m || "").toLowerCase();
+  return s === "gpt-5" || s.startsWith("gpt-5:");
+};
+const buildUpstreamBody = ({ message, model, temperature, stream }) => {
+  const body = { message, model, stream: !!stream };
+  if (!modelOmitsTemperature(model) && typeof temperature === "number" && Number.isFinite(temperature)) {
+    body.temperature = temperature;
+  }
+  return body;
+};
+
+// ---- routing helpers ----
+const isOpenAIStyle = (hdr) => /^Bearer\s+sk-[\w-]+/i.test(hdr || "");
+const isKeilaniToken = (hdr) => /^Bearer\s+kln_[\w-]+/i.test(hdr || "");
+
+function getUpstreamUrl() {
+  return process.env.UPSTREAM_CHAT_URL || "https://api.openai.com/v1/chat/completions";
 }
 
-/**
- * Build an upstream payload, conditionally adding `temperature`.
- * - If temperature is provided AND model supports it -> include it
- * - If model is "fixed-temp" (e.g., gpt-5) -> omit it entirely
- */
-function buildUpstreamBody({ message, model, temperature, stream }) {
-  const payload = {
-    message,
-    model,
-    stream: !!stream,
-  };
+// Returns { upstreamAuthHeader, clientTokenForForward }
+function resolveAuth(event) {
+  const h = event.headers || {};
+  const auth = h.authorization || h.Authorization || "";
+  const xClient = h["x-client-token"] || h["X-Client-Token"] || "";
 
-  const supportsTemp = !modelOmitsTemperature(model);
-  if (supportsTemp && typeof temperature === "number" && Number.isFinite(temperature)) {
-    payload.temperature = temperature;
+  // If browser provided a Keilani token in Authorization, treat it as client token, not OpenAI auth.
+  let clientToken = "";
+  let upstreamAuth = "";
+
+  if (isKeilaniToken(auth)) {
+    clientToken = auth.replace(/^Bearer\s+/i, "");
+  } else if (xClient) {
+    clientToken = xClient;
   }
 
-  return payload;
-}
+  // For OpenAI: use sk- from client if present; otherwise use env OPENAI_API_KEY
+  if (isOpenAIStyle(auth)) {
+    upstreamAuth = auth;
+  } else if (process.env.OPENAI_API_KEY) {
+    upstreamAuth = `Bearer ${process.env.OPENAI_API_KEY}`;
+  } // else leave blank; your custom upstream may not need it.
 
-/**
- * Resolve auth header:
- * - Prefer incoming Authorization
- * - Else X-Client-Token -> Authorization: Bearer <token>
- * - Else use OPENAI_API_KEY (or whatever your upstream expects)
- */
-function resolveAuthHeader(event) {
-  const h = event.headers || {};
-  const auth = h.authorization || h.Authorization;
-  if (auth) return { Authorization: auth };
-
-  const xClient = h["x-client-token"] || h["X-Client-Token"];
-  if (xClient) return { Authorization: `Bearer ${xClient}` };
-
-  if (process.env.OPENAI_API_KEY) return { Authorization: `Bearer ${process.env.OPENAI_API_KEY}` };
-
-  // No auth; upstream might not need it
-  return {};
-}
-
-/**
- * Determine upstream URL
- * - Prefer env var UPSTREAM_CHAT_URL
- * - Otherwise default to OpenAI Chat Completions-like endpoint (adjust if needed)
- */
-function getUpstreamUrl() {
-  const envUrl = process.env.UPSTREAM_CHAT_URL || process.env.CHAT_UPSTREAM;
-  if (envUrl) return envUrl;
-
-  // Fallback (adjust for your infra). This prevents accidental recursion to this same function.
-  return "https://api.openai.com/v1/chat/completions";
+  return { upstreamAuthHeader: upstreamAuth, clientTokenForForward: clientToken };
 }
 
 exports.handler = async (event) => {
-  // CORS preflight
-  if (event.httpMethod === "OPTIONS") {
-    return {
-      statusCode: 204,
-      headers: { ...corsHeaders },
-      body: "",
-    };
-  }
+  if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers: { ...cors }, body: "" };
+  if (event.httpMethod === "GET")  return ok({ ok: true, service: "keilani-chat", method: "GET", time: new Date().toISOString() });
+  if (event.httpMethod !== "POST") return err(405, "Method Not Allowed");
 
-  // Health check
-  if (event.httpMethod === "GET") {
-    return ok({
-      ok: true,
-      service: "keilani-chat",
-      method: "GET",
-      time: new Date().toISOString(),
-    });
-  }
-
-  if (event.httpMethod !== "POST") {
-    return err(405, "Method Not Allowed");
-  }
-
-  // Parse input
   let body;
-  try {
-    body = JSON.parse(event.body || "{}");
-  } catch {
-    return err(400, "Invalid JSON body");
-  }
+  try { body = JSON.parse(event.body || "{}"); }
+  catch { return err(400, "Invalid JSON body"); }
 
-  const {
-    message,
-    model = "gpt-5",
-    temperature, // optional
-    stream = true,
-  } = body;
+  const { message, model = "gpt-5", temperature, stream = true } = body || {};
+  if (!message || typeof message !== "string") return err(400, "Missing 'message' (string)");
 
-  if (!message || typeof message !== "string") {
-    return err(400, "Missing 'message' (string) in request body.");
-  }
-
-  // Build upstream payload with conditional temperature
   const upstreamBody = buildUpstreamBody({ message, model, temperature, stream });
-
-  // Prepare headers
-  const authHeader = resolveAuthHeader(event);
-  const headers = {
-    "content-type": "application/json",
-    ...authHeader,
-  };
-
   const upstreamUrl = getUpstreamUrl();
+  const { upstreamAuthHeader, clientTokenForForward } = resolveAuth(event);
 
-  // Proxy upstream
+  // Build headers for upstream
+  const headers = { "content-type": "application/json" };
+  if (upstreamAuthHeader) headers.Authorization = upstreamAuthHeader;
+
+  // If you’re calling YOUR own upstream (set UPSTREAM_CHAT_URL),
+  // forward the Keilani client token so your service can authorize.
+  const forwardClientHeader = process.env.UPSTREAM_CLIENT_HEADER || "X-Client-Token";
+  if (process.env.UPSTREAM_CHAT_URL && clientTokenForForward) {
+    headers[forwardClientHeader] = clientTokenForForward;
+  }
+
   let resp;
   try {
-    resp = await _fetch(upstreamUrl, {
-      method: "POST",
-      headers,
-      body: JSON.stringify(upstreamBody),
-    });
+    resp = await _fetch(upstreamUrl, { method: "POST", headers, body: JSON.stringify(upstreamBody) });
   } catch (e) {
     return err(502, { error: "Upstream network error", detail: e?.message || String(e) });
   }
 
-  // If upstream failed, bubble up details
   if (!resp.ok) {
-    const detailText = await safeReadText(resp);
-    return err(resp.status, { error: "Upstream error", detail: detailText });
+    const detail = await safeText(resp);
+    return err(resp.status, { error: "Upstream error", detail });
   }
 
-  // Stream or JSON passthrough
-  const contentType = resp.headers.get("content-type") || "";
+  const ctype = resp.headers.get("content-type") || "";
 
-  // SSE passthrough
-  if (contentType.includes("text/event-stream")) {
-    const text = await resp.text();
+  if (ctype.includes("text/event-stream")) {
+    const streamText = await resp.text();
     return {
       statusCode: 200,
-      headers: {
-        ...corsHeaders,
-        "content-type": "text/event-stream",
-        "cache-control": "no-cache",
-        connection: "keep-alive",
-      },
-      body: text,
+      headers: { ...cors, "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" },
+      body: streamText,
     };
   }
 
-  // JSON passthrough
-  if (contentType.includes("application/json")) {
+  if (ctype.includes("application/json")) {
     const json = await resp.json();
     return ok(json);
   }
 
-  // Fallback: return raw text
-  const raw = await resp.text();
-  return {
-    statusCode: 200,
-    headers: { ...corsHeaders, "content-type": contentType || "text/plain; charset=utf-8" },
-    body: raw,
-  };
+  const text = await resp.text();
+  return { statusCode: 200, headers: { ...cors, "content-type": ctype || "text/plain; charset=utf-8" }, body: text };
 };
 
-/**
- * Helper: safely read text from response
- */
-async function safeReadText(resp) {
-  try {
-    return await resp.text();
-  } catch {
-    return "<unable to read upstream body>";
-  }
-}
+async function safeText(r) { try { return await r.text(); } catch { return "<unreadable upstream body>"; } }
