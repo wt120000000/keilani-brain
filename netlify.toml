@@ -2,7 +2,7 @@
 
 [build]
   command   = "npm run build || echo no-build"
-  publish   = "public"
+  publish   = "."
   functions = "netlify/functions"
 
 [functions]
