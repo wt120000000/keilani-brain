@@ -2,38 +2,26 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta
-      name="viewport"
-      content="width=device-width, initial-scale=1, maximum-scale=1"
-    />
-    <title>Keilani Chat • Streaming</title>
+    <title>Keilani • Chat (Streaming)</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
     <link rel="icon" href="/favicon.ico" />
-    <!-- Fonts (system stack to keep CSP happy) -->
+    <!-- Local vendor styles -->
+    <link rel="stylesheet" href="./vendor/github-dark.min.css" />
     <style>
       :root {
-        --bg: #0c0f13;
-        --panel: #0f141b;
-        --muted: #7a8699;
-        --text: #e6edf6;
-        --bubble-user: #1d2a38;
-        --bubble-ai: #121a23;
-        --error: #2a0f14;
-        --brand: #7c5cff;
-        --brand-2: #00e1ff;
-        --ok: #33d17a;
-        --warn: #f5c542;
-        --radius: 16px;
-        --radius-lg: 22px;
-        --shadow: 0 6px 22px rgba(0, 0, 0, 0.25);
+        --bg: #0d1117;
+        --panel: #111827;
+        --panel-2: #0f172a;
+        --text: #e5e7eb;
+        --muted: #9ca3af;
+        --accent: #8b5cf6;
+        --accent-2: #7c3aed;
+        --danger: #ef4444;
+        --border: #1f2937;
+        --chip: #0b1220;
       }
-      [data-theme="light"] {
-        --bg: #f6f7fb;
-        --panel: #ffffff;
-        --muted: #667085;
-        --text: #101828;
-        --bubble-user: #eef2f7;
-        --bubble-ai: #f9fafb;
-        --error: #ffe8ea;
+      * {
+        box-sizing: border-box;
       }
       html,
       body {
@@ -41,846 +29,572 @@
       }
       body {
         margin: 0;
-        background: var(--bg);
         color: var(--text);
+        background:
+          radial-gradient(1200px 400px at 20% 0, #0b1530, transparent),
+          radial-gradient(900px 300px at 80% -10%, #1b1142, transparent),
+          var(--bg);
         font:
           14px/1.45 ui-sans-serif,
           system-ui,
           -apple-system,
           Segoe UI,
           Roboto,
-          Helvetica,
+          Inter,
+          "Helvetica Neue",
           Arial,
-          Apple Color Emoji,
-          Segoe UI Emoji;
+          "Apple Color Emoji",
+          "Segoe UI Emoji";
+        letter-spacing: 0.2px;
       }
-      .wrap {
+
+      .bar {
         display: flex;
-        flex-direction: column;
-        height: 100%;
-      }
-      header {
-        position: sticky;
-        top: 0;
-        z-index: 10;
-        backdrop-filter: saturate(120%) blur(6px);
-        background:
-          linear-gradient(
-            90deg,
-            rgba(124, 92, 255, 0.1),
-            rgba(0, 225, 255, 0.1)
-          ),
-          var(--panel);
-        border-bottom: 1px solid rgba(255, 255, 255, 0.06);
-        padding: 10px;
-      }
-      header .row {
-        display: flex;
-        gap: 8px;
+        gap: 10px;
+        padding: 12px;
         align-items: center;
-        flex-wrap: wrap;
+        border-bottom: 1px solid var(--border);
       }
       .title {
         display: flex;
+        gap: 6px;
         align-items: center;
-        gap: 10px;
-        font-weight: 700;
-        letter-spacing: 0.2px;
+        padding: 6px 10px;
+        border-radius: 12px;
+        background: var(--panel-2);
+        font-weight: 600;
       }
-      .dot {
+      .status-dot {
         width: 8px;
         height: 8px;
         border-radius: 999px;
-        background: var(--ok);
-        box-shadow: 0 0 0 3px rgba(51, 209, 122, 0.2);
+        background: #22c55e;
+        box-shadow: 0 0 0 2px #0a0a0a inset;
       }
-      select,
-      input,
-      button,
       .pill {
-        background: #0a0f14;
+        background: var(--panel-2);
+        border: 1px solid var(--border);
         color: var(--text);
-        border: 1px solid rgba(255, 255, 255, 0.1);
         padding: 8px 10px;
         border-radius: 10px;
+      }
+      .pill input {
+        background: transparent;
+        border: 0;
         outline: none;
-        height: 36px;
+        color: var(--text);
+        width: 100%;
       }
-      [data-theme="light"] select,
-      [data-theme="light"] input,
-      [data-theme="light"] button,
-      [data-theme="light"] .pill {
-        background: #fff;
-        border-color: #e6e8ee;
+      .select,
+      select,
+      button {
+        background: var(--panel-2);
+        border: 1px solid var(--border);
+        color: var(--text);
+        border-radius: 10px;
+        padding: 8px 10px;
       }
-      .grow {
-        flex: 1;
-      }
-      .pill {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
+      select {
+        cursor: pointer;
       }
       .ghost {
         background: transparent;
-      }
-      .iconbtn {
-        width: 36px;
-        display: inline-grid;
-        place-items: center;
+        border-color: var(--border);
       }
       .danger {
-        background: var(--error);
-        border-color: transparent;
+        background: #231318;
+        border-color: #3b121b;
+        color: #fecaca;
       }
-      .brand {
-        background: linear-gradient(90deg, var(--brand), var(--brand-2));
-        border-color: transparent;
+      .btn {
+        cursor: pointer;
+        transition:
+          0.15s transform,
+          0.15s background,
+          0.15s border-color,
+          0.15s opacity;
+      }
+      .btn:hover {
+        transform: translateY(-1px);
+      }
+      .btn:active {
+        transform: translateY(0);
+      }
+
+      .wrap {
+        height: calc(100% - 58px);
+        display: flex;
+        flex-direction: column;
+      }
+      .meta {
+        padding: 8px 12px;
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        color: var(--muted);
+      }
+      .chip {
+        background: var(--chip);
+        color: #c7d2fe;
+        border: 1px solid #1f2a44;
+        padding: 6px 10px;
+        border-radius: 999px;
+        font-variant-numeric: tabular-nums;
+      }
+      .messages {
+        flex: 1;
+        overflow: auto;
+        padding: 10px 12px 0;
+      }
+      .bubble {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        padding: 14px 14px;
+        border-radius: 12px;
+        margin: 10px 8px;
+        max-width: 1100px;
+      }
+      .bubble.me {
+        background: #0c1330;
+        border-color: #1a1e3a;
+      }
+      .bubble.error {
+        background: #1c0f14;
+        border-color: #31121a;
+        color: #fecaca;
+      }
+      .role {
+        font-size: 12px;
+        color: var(--muted);
+        margin-bottom: 6px;
       }
       .mono {
         font-family:
           ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
-          "Liberation Mono", monospace;
+          "Liberation Mono", "Courier New", monospace;
       }
-      /* chat */
-      .scroll {
-        flex: 1;
-        overflow: auto;
-        padding: 20px 16px;
-      }
-      .chat {
-        max-width: 980px;
-        margin: 0 auto;
-        display: flex;
-        flex-direction: column;
-        gap: 12px;
-      }
-      .msg {
-        display: flex;
-        gap: 10px;
-      }
-      .msg .bubble {
-        max-width: 85%;
-        padding: 12px 14px;
-        border-radius: var(--radius-lg);
-        box-shadow: var(--shadow);
-        position: relative;
-        word-wrap: break-word;
-        overflow-wrap: break-word;
-      }
-      .me .bubble {
-        margin-left: auto;
-        border-bottom-right-radius: 8px;
-        background: var(--bubble-user);
-      }
-      .ai .bubble {
-        margin-right: auto;
-        border-bottom-left-radius: 8px;
-        background: var(--bubble-ai);
-      }
-      .bubble pre {
-        background: #0a0f14;
-        padding: 12px;
-        border-radius: 12px;
-        overflow: auto;
-      }
-      [data-theme="light"] .bubble pre {
-        background: #eef2f7;
-      }
-      .meta {
-        font-size: 12px;
-        color: var(--muted);
-        margin-top: 6px;
-        display: flex;
-        align-items: center;
-        gap: 10px;
-      }
-      .toolbar {
-        position: absolute;
-        top: 6px;
-        right: 6px;
-        display: flex;
-        gap: 4px;
-        opacity: 0;
-        transition: 0.2s;
-      }
-      .bubble:hover .toolbar {
-        opacity: 1;
-      }
-      .err {
-        background: var(--error) !important;
-        border: 1px solid rgba(255, 0, 0, 0.15);
-      }
-      .thinking {
-        display: inline-flex;
-        gap: 3px;
-        align-items: center;
-      }
-      .thinking i {
-        width: 6px;
-        height: 6px;
-        border-radius: 99px;
-        background: var(--muted);
-        opacity: 0.5;
-        animation: blink 1s infinite ease-in-out;
-      }
-      .thinking i:nth-child(2) {
-        animation-delay: 0.15s;
-      }
-      .thinking i:nth-child(3) {
-        animation-delay: 0.3s;
-      }
-      @keyframes blink {
-        0%,
-        80%,
-        100% {
-          opacity: 0.2;
-        }
-        40% {
-          opacity: 1;
-        }
-      }
-      /* composer */
-      .composer-wrap {
-        border-top: 1px solid rgba(255, 255, 255, 0.06);
-        background: var(--panel);
-        padding: 12px 10px;
-      }
+
       .composer {
-        max-width: 980px;
-        margin: 0 auto;
+        border-top: 1px solid var(--border);
+        padding: 12px;
+      }
+      .input-row {
+        display: flex;
+        gap: 10px;
+        align-items: flex-end;
       }
       textarea {
-        width: 100%;
-        min-height: 70px;
-        max-height: 220px;
-        resize: vertical;
-        padding: 12px 14px;
-        border-radius: 14px;
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        background: #0a0f14;
-        color: var(--text);
-      }
-      [data-theme="light"] textarea {
-        background: #fff;
-        border-color: #e6e8ee;
-      }
-      .composer-row {
-        margin-top: 10px;
-        display: flex;
-        gap: 8px;
-        align-items: center;
-      }
-      .stats {
-        font-size: 12px;
-        color: var(--muted);
-      }
-      .spacer {
         flex: 1;
+        min-height: 56px;
+        max-height: 240px;
+        resize: vertical;
+        border-radius: 12px;
+        background: var(--panel-2);
+        border: 1px solid var(--border);
+        color: var(--text);
+        padding: 12px 12px;
+        outline: none;
       }
-      .hidden {
-        display: none !important;
+      .send {
+        background: var(--accent);
+        border-color: #2b1f59;
+      }
+      .send:hover {
+        background: var(--accent-2);
+      }
+      .hint {
+        padding: 10px 2px;
+        color: var(--muted);
+        font-size: 12px;
+        text-align: center;
+      }
+      .right {
+        margin-left: auto;
+      }
+      code,
+      pre code {
+        font-size: 12.5px;
+      }
+      pre {
+        background: #0b1020;
+        border: 1px solid #1c2842;
+        padding: 12px;
+        border-radius: 10px;
+        overflow: auto;
+      }
+      .kbd {
+        padding: 2px 6px;
+        border-radius: 6px;
+        background: #0c1330;
+        border: 1px solid #1a1e3a;
+        color: #c7d2fe;
+        font-size: 11px;
+      }
+      .switch {
+        display: inline-flex;
+        gap: 6px;
+        align-items: center;
+        padding: 6px 10px;
+        border-radius: 999px;
+        border: 1px solid var(--border);
+      }
+      .switch input {
+        width: 14px;
+        height: 14px;
+        accent-color: var(--accent);
       }
     </style>
-
-    <!-- Markdown + highlighting -->
-    <script
-      defer
-      src="https://cdn.jsdelivr.net/npm/marked@12/lib/marked.umd.min.js"
-    ></script>
-    <link
-      rel="stylesheet"
-      href="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.9.0/styles/github-dark.min.css"
-    />
-    <script
-      defer
-      src="https://cdn.jsdelivr.net/npm/@highlightjs/cdn-assets@11.9.0/highlight.min.js"
-    ></script>
-    <!-- dayjs for timestamps -->
-    <script
-      defer
-      src="https://cdn.jsdelivr.net/npm/dayjs@1/dayjs.min.js"
-    ></script>
   </head>
   <body>
-    <div class="wrap" id="app" data-theme="dark">
-      <header>
-        <div class="row">
-          <div class="title">
-            <span class="dot"></span> Keilani Chat •
-            <span class="mono">Streaming</span>
-          </div>
-          <select id="model">
-            <option value="gpt-5">gpt-5</option>
-            <option value="gpt-4.1-mini">gpt-4.1-mini</option>
-            <option value="gpt-4o-mini">gpt-4o-mini</option>
-          </select>
-          <input
-            id="api"
-            class="grow mono"
-            placeholder="https://api.keilani.ai/api/chat"
-          />
-          <input
-            id="token"
-            class="mono"
-            placeholder="Client Token (optional)"
-          />
-          <button id="save" class="pill">Save</button>
-          <button id="export" class="pill">Export .txt</button>
-          <button id="clear" class="pill ghost">Clear</button>
-          <button id="reset" class="pill ghost">Reset Session</button>
-          <button id="theme" class="pill iconbtn" title="Theme">🌗</button>
-          <label class="pill"
-            ><input type="checkbox" id="stream" checked /> Stream</label
-          >
-          <label class="pill"
-            ><input type="checkbox" id="sse" checked /> Expect SSE</label
-          >
-        </div>
-        <div class="row" style="margin-top: 8px">
-          <select id="persona">
-            <option value="">Persona: Default</option>
-            <option value="friendly">Persona: Friendly Mentor</option>
-            <option value="playful">Persona: Playful Gamer</option>
-            <option value="waifu">Persona: Affectionate Waifu</option>
-          </select>
-          <select id="sessions"></select>
-          <button id="newSession" class="pill">New Session</button>
-          <span class="pill stats" id="sid"></span>
-          <span class="pill stats" id="tokens">Tokens: 0 • 0 t/s</span>
-          <button id="raw" class="pill ghost">Raw Inspector</button>
-        </div>
-      </header>
-
-      <div class="scroll" id="scroll">
-        <div class="chat" id="chat"></div>
+    <div class="bar">
+      <div class="title">
+        <span class="status-dot"></span><span>Keilani Chat</span
+        ><span class="mono">•</span><span>Streaming</span>
       </div>
 
-      <div class="composer-wrap">
-        <div class="composer">
+      <select id="model" class="select">
+        <option value="gpt-5" selected>gpt-5</option>
+        <option value="gpt-4.1">gpt-4.1</option>
+        <option value="o4-mini">o4-mini</option>
+        <option value="gpt-4o-mini">gpt-4o-mini</option>
+      </select>
+
+      <div class="pill" style="min-width: 420px; max-width: 48vw">
+        <input
+          id="api"
+          value="https://api.keilani.ai/api/chat"
+          spellcheck="false"
+        />
+      </div>
+
+      <div class="pill" style="min-width: 280px">
+        <input
+          id="token"
+          placeholder="Client Token (optional)"
+          spellcheck="false"
+        />
+      </div>
+
+      <button class="btn" id="save">Save</button>
+      <button class="btn ghost" id="export">Export .txt</button>
+      <button class="btn ghost" id="clear">Clear</button>
+      <button class="btn ghost" id="reset">Reset Session</button>
+
+      <label class="switch right">
+        <input type="checkbox" id="stream" checked /> <span>Stream</span>
+      </label>
+      <label class="switch">
+        <input type="checkbox" id="sse" checked /> <span>Expect SSE</span>
+      </label>
+    </div>
+
+    <div class="wrap">
+      <div class="meta">
+        <div class="chip">
+          Tokens: <span id="tok">0</span> • <span id="tps">0</span>/s
+        </div>
+        <div class="chip">SID: <span id="sid">–</span></div>
+      </div>
+
+      <div id="messages" class="messages"></div>
+
+      <div class="composer">
+        <div class="input-row">
           <textarea
             id="prompt"
             placeholder="Type your message…  (Enter to send • Shift+Enter for newline)"
           ></textarea>
-          <div class="composer-row">
-            <div class="stats" id="hint">
-              Tip: Ctrl/Cmd+K to focus input • ↑ to edit last message
-            </div>
-            <div class="spacer"></div>
-            <button id="send" class="pill brand">Send ↵</button>
-          </div>
+          <button id="send" class="btn send">Send ↵</button>
+        </div>
+        <div class="hint">
+          Tip: <span class="kbd">Ctrl/Cmd+K</span> to focus input • Your config
+          persists locally
         </div>
       </div>
     </div>
 
-    <!-- Raw inspector panel -->
-    <pre
-      id="rawpanel"
-      class="hidden"
-      style="
-        position: fixed;
-        inset: auto 10px 10px 10px;
-        max-height: 40vh;
-        overflow: auto;
-        background: #0a0f14;
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        border-radius: 14px;
-        padding: 10px;
-        box-shadow: var(--shadow);
-      "
-    ></pre>
+    <!-- Local vendor scripts -->
+    <script src="./vendor/dayjs.min.js"></script>
+    <script src="./vendor/marked.umd.min.js"></script>
+    <script src="./vendor/highlight.min.js"></script>
 
     <script>
-      (() => {
-        const qs = (sel) => document.querySelector(sel);
-        const el = {
-          model: qs("#model"),
-          api: qs("#api"),
-          token: qs("#token"),
-          save: qs("#save"),
-          clear: qs("#clear"),
-          export: qs("#export"),
-          reset: qs("#reset"),
-          stream: qs("#stream"),
-          sse: qs("#sse"),
-          theme: qs("#theme"),
-          sessions: qs("#sessions"),
-          newSession: qs("#newSession"),
-          persona: qs("#persona"),
-          sid: qs("#sid"),
-          tokens: qs("#tokens"),
-          raw: qs("#raw"),
-          rawpanel: qs("#rawpanel"),
-          scroll: qs("#scroll"),
-          chat: qs("#chat"),
-          prompt: qs("#prompt"),
-          send: qs("#send"),
-          app: qs("#app"),
-        };
-
-        // ---------- persistence ----------
-        const store = {
-          get k() {
-            return JSON.parse(localStorage.getItem("kln.chat") || "{}");
-          },
-          set v(obj) {
-            localStorage.setItem("kln.chat", JSON.stringify(obj));
-          },
-        };
-        const state = Object.assign(
-          {
-            api: "https://api.keilani.ai/api/chat",
-            model: "gpt-5",
-            token: localStorage.getItem("CLIENT_TOKEN") || "",
-            sse: true,
-            stream: true,
-            theme: localStorage.getItem("THEME") || "dark",
-            sid: crypto.randomUUID().slice(0, 8),
-            sessions: {},
-            persona: "",
-          },
-          store.k,
-        );
-
-        function persist() {
-          store.v = {
-            api: el.api.value,
-            model: el.model.value,
-            token: el.token.value,
-            sse: el.sse.checked,
-            stream: el.stream.checked,
-            theme: el.app.dataset.theme,
-            sid: state.sid,
-            sessions: state.sessions,
-            persona: el.persona.value,
-          };
-          localStorage.setItem("CLIENT_TOKEN", el.token.value || "");
-          localStorage.setItem("THEME", el.app.dataset.theme);
-        }
-
-        function hydrate() {
-          el.api.value = state.api;
-          el.model.value = state.model;
-          el.token.value = state.token;
-          el.sse.checked = state.sse;
-          el.stream.checked = state.stream;
-          el.app.dataset.theme = state.theme;
-          el.persona.value = state.persona || "";
-          setSID(state.sid);
-          loadSessions();
-        }
-
-        function setSID(sid) {
-          state.sid = sid;
-          el.sid.textContent = `SID: ${sid}`;
-        }
-
-        function loadSessions() {
-          const list = el.sessions;
-          list.innerHTML = "";
-          const sids = Object.keys(state.sessions);
-          const opt = document.createElement("option");
-          opt.value = state.sid;
-          opt.textContent = `Active: ${state.sid}`;
-          list.appendChild(opt);
-          if (sids.length) {
-            const grp = document.createElement("optgroup");
-            grp.label = "Saved Sessions";
-            sids.forEach((k) => {
-              const o = document.createElement("option");
-              o.value = k;
-              o.textContent = k;
-              grp.appendChild(o);
-            });
-            list.appendChild(grp);
-          }
-        }
-
-        // ---------- UI helpers ----------
-        function bubble(
-          role,
-          html,
-          { err = false, meta = "", id = crypto.randomUUID() } = {},
-        ) {
-          const container = document.createElement("div");
-          container.className = `msg ${role === "user" ? "me" : "ai"}`;
-          container.dataset.id = id;
-
-          const bubble = document.createElement("div");
-          bubble.className = `bubble ${err ? "err" : ""}`;
-          bubble.innerHTML = html;
-
-          // toolbar
-          const toolbar = document.createElement("div");
-          toolbar.className = "toolbar";
-          const copy = btn("📋", "Copy");
-          copy.onclick = () => copyText(bubble.innerText);
-          toolbar.appendChild(copy);
-
-          if (err) {
-            const retry = btn("⟳", "Retry");
-            retry.onclick = () => retryLast();
-            toolbar.appendChild(retry);
-          } else if (role === "user") {
-            const edit = btn("✎", "Edit & resend");
-            edit.onclick = () => {
-              el.prompt.value = plainTextFromHTML(html);
-              el.prompt.focus();
-            };
-            toolbar.appendChild(edit);
-          }
-          bubble.appendChild(toolbar);
-
-          // meta (latency etc.)
-          const metaEl = document.createElement("div");
-          metaEl.className = "meta";
-          metaEl.textContent = meta || dayjs().format("h:mm A");
-          container.appendChild(bubble);
-          container.appendChild(metaEl);
-
-          el.chat.appendChild(container);
-          autoscroll();
-          return { container, bubble, meta: metaEl };
-        }
-        function btn(text, title) {
-          const b = document.createElement("button");
-          b.className = "pill iconbtn";
-          b.title = title;
-          b.textContent = text;
-          return b;
-        }
-        function copyText(t) {
-          navigator.clipboard.writeText(t).catch(() => {});
-        }
-        function plainTextFromHTML(h) {
-          const d = document.createElement("div");
-          d.innerHTML = h;
-          return d.innerText;
-        }
-
-        let scrollLock = false;
-        el.scroll.addEventListener("scroll", () => {
-          const nearBottom =
-            el.scroll.scrollTop + el.scroll.clientHeight >=
-            el.scroll.scrollHeight - 40;
-          scrollLock = !nearBottom; // lock if user scrolled up
-        });
-        function autoscroll() {
-          if (scrollLock) return;
-          el.scroll.scrollTo({
-            top: el.scroll.scrollHeight,
-            behavior: "smooth",
-          });
-        }
-
-        function typingBubble() {
-          const id = `think-${crypto.randomUUID()}`;
-          const t = bubble(
-            "ai",
-            `<span class="thinking"><i></i><i></i><i></i></span>`,
-            { id },
-          );
-          return { id, ...t };
-        }
-
-        // ---------- Markdown rendering ----------
-        function renderMarkdown(text) {
+      // ---------- tiny helpers ----------
+      const $ = (s, r = document) => r.querySelector(s);
+      const on = (el, ev, fn) => el.addEventListener(ev, fn);
+      const storage = {
+        get(k, d = null) {
           try {
-            const html = marked.parse(text, {
-              breaks: true,
-              gfm: true,
-            });
-            return html.replace(
-              /<pre><code class="language-(.*?)">/g,
-              '<pre><code class="language-$1 hljs">',
-            );
+            return JSON.parse(localStorage.getItem(k)) ?? d;
           } catch {
-            return text;
+            return d;
           }
+        },
+        set(k, v) {
+          localStorage.setItem(k, JSON.stringify(v));
+        },
+      };
+
+      const ui = {
+        model: $("#model"),
+        api: $("#api"),
+        token: $("#token"),
+        stream: $("#stream"),
+        sse: $("#sse"),
+        sendBtn: $("#send"),
+        txt: $("#prompt"),
+        list: $("#messages"),
+        tok: $("#tok"),
+        tps: $("#tps"),
+        sid: $("#sid"),
+        save: $("#save"),
+        clear: $("#clear"),
+        reset: $("#reset"),
+        export: $("#export"),
+      };
+
+      const state = {
+        sid: Math.random().toString(36).slice(2, 10),
+        tokens: 0,
+        lastTick: 0,
+      };
+
+      function setSID(v) {
+        state.sid = v;
+        ui.sid.textContent = v;
+      }
+      setSID(storage.get("SID") || state.sid);
+
+      // persist + restore
+      (function restore() {
+        const m = storage.get("MODEL");
+        if (m) ui.model.value = m;
+        const a = storage.get("API");
+        if (a) ui.api.value = a;
+        const t = storage.get("CLIENT_TOKEN");
+        if (t) ui.token.value = t;
+        const st = storage.get("STREAM");
+        if (typeof st === "boolean") ui.stream.checked = st;
+        const se = storage.get("SSE");
+        if (typeof se === "boolean") ui.sse.checked = se;
+      })();
+
+      function persist() {
+        storage.set("MODEL", ui.model.value);
+        storage.set("API", ui.api.value.trim());
+        storage.set("CLIENT_TOKEN", ui.token.value.trim());
+        storage.set("STREAM", ui.stream.checked);
+        storage.set("SSE", ui.sse.checked);
+        storage.set("SID", state.sid);
+      }
+      on(ui.save, "click", persist);
+
+      // keyboard affordances
+      on(document, "keydown", (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+          e.preventDefault();
+          ui.txt.focus();
         }
-        function highlightLater(root) {
-          root.querySelectorAll("pre code").forEach((block) => {
+      });
+
+      // message rendering (markdown + highlight)
+      function md(htmlStr) {
+        try {
+          const out = window.marked.parse(htmlStr, { breaks: true, gfm: true });
+          const div = document.createElement("div");
+          div.innerHTML = out;
+          div.querySelectorAll("pre code").forEach((block) => {
             try {
-              hljs.highlightElement(block);
+              window.hljs.highlightElement(block);
             } catch {}
           });
-        }
-
-        // ---------- Token stats ----------
-        let totalTokens = 0,
-          lastTick = 0,
-          lastTokens = 0;
-        function tickTokens(incr = 0) {
-          totalTokens += incr;
-          const now = performance.now();
-          if (now - lastTick > 500) {
-            const rate = (
-              (totalTokens - lastTokens) /
-              ((now - lastTick) / 1000 + 1e-9)
-            ).toFixed(1);
-            lastTick = now;
-            lastTokens = totalTokens;
-            el.tokens.textContent = `Tokens: ${totalTokens} • ${rate} t/s`;
-          }
-        }
-
-        // ---------- Composer Shortcuts ----------
-        window.addEventListener("keydown", (e) => {
-          if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
-            e.preventDefault();
-            el.prompt.focus();
-          }
-          if (
-            document.activeElement === el.prompt &&
-            e.key === "ArrowUp" &&
-            !el.prompt.value
-          ) {
-            // edit last user message
-            const lastUser = [...el.chat.querySelectorAll(".me .bubble")].pop();
-            if (lastUser) {
-              el.prompt.value = lastUser.innerText;
-              setTimeout(
-                () =>
-                  el.prompt.setSelectionRange(
-                    el.prompt.value.length,
-                    el.prompt.value.length,
-                  ),
-                0,
-              );
-            }
-          }
-        });
-
-        // ---------- Networking (SSE) ----------
-        async function sendMessage() {
-          const text = el.prompt.value.trim();
-          if (!text) return;
-          el.prompt.value = "";
-          const user = bubble("user", escapeHTML(text));
-          const think = typingBubble();
-
-          const system = personaToSystem(el.persona.value);
-          const body = {
-            model: el.model.value,
-            stream: el.stream.checked,
-            messages: [
-              ...(system ? [{ role: "system", content: system }] : []),
-              { role: "user", content: text },
-            ],
-            // sid threading via header (below)
-          };
-
-          const headers = { "Content-Type": "application/json" };
-          if (el.token.value)
-            headers["Authorization"] = `Bearer ${el.token.value}`;
-          headers["X-Session-ID"] = state.sid;
-
-          const t0 = performance.now();
-          try {
-            const res = await fetch(el.api.value || state.api, {
-              method: "POST",
-              headers,
-              body: JSON.stringify(body),
-            });
-            if (!res.ok) {
-              const errText = await res.text().catch(() => res.statusText);
-              throw new Error(`[HTTP ${res.status}] ${errText}`);
-            }
-
-            if (el.sse.checked) {
-              await readSSE(res, think, t0);
-            } else {
-              const data = await res.json();
-              el.rawpanelLog(data);
-              const content =
-                data.output_text || data.content || JSON.stringify(data);
-              finalize(think, content, t0);
-            }
-          } catch (err) {
-            finalize(think, `**[Error]** ${escapeHTML(err.message)}`, t0, true);
-          } finally {
-            persist();
-          }
-        }
-
-        async function readSSE(res, think, t0) {
-          const reader = res.body.getReader();
-          const decoder = new TextDecoder();
-          let buf = "";
-          for (;;) {
-            const { value, done } = await reader.read();
-            if (done) break;
-            const chunk = decoder.decode(value, { stream: true });
-            buf += chunk;
-
-            // raw inspector
-            el.rawpanelLog(chunk);
-
-            // Parse by lines (simple SSE)
-            const lines = chunk.split(/\r?\n/);
-            for (const line of lines) {
-              if (!line.startsWith("data:")) continue;
-              const data = line.slice(5).trim();
-              if (!data || data === "[DONE]") continue;
-
-              let json;
-              try {
-                json = JSON.parse(data);
-              } catch {
-                continue;
-              }
-              // The proxy may stream {delta:"..."} or {content:"..."}; consume both
-              const delta =
-                json.delta ?? json.content ?? json.output_text ?? "";
-              if (delta) {
-                updateThinking(think, delta);
-                tickTokens((delta.length / 4) | 0); // rough char->token approximation
-              }
-              if (json.usage && json.usage.total_tokens) {
-                totalTokens += json.usage.total_tokens;
-              }
-            }
-          }
-          finalizeThinking(think, t0);
-        }
-
-        function updateThinking(think, delta) {
-          // Convert current bubble content to markdown, append delta
-          const cur = think.bubble.dataset.raw || "";
-          const nextRaw = cur + delta;
-          think.bubble.dataset.raw = nextRaw;
-          think.bubble.innerHTML = renderMarkdown(nextRaw);
-          highlightLater(think.bubble);
-          autoscroll();
-        }
-
-        function finalizeThinking(think, t0) {
-          const raw = think.bubble.dataset.raw || "";
-          finalize(think, raw, t0);
-        }
-
-        function finalize(think, content, t0, isErr = false) {
-          const ms = Math.max(1, Math.round(performance.now() - t0));
-          think.bubble.innerHTML = renderMarkdown(content);
-          if (isErr) think.bubble.classList.add("err");
-          think.meta.textContent = `${dayjs().format("h:mm A")} • ⏱ ${ms} ms`;
-          highlightLater(think.bubble);
-          autoscroll();
-        }
-
-        function retryLast() {
-          const lastUser = [...el.chat.querySelectorAll(".me .bubble")].pop();
-          if (!lastUser) return;
-          el.prompt.value = lastUser.innerText;
-          el.prompt.focus();
-        }
-
-        function personaToSystem(key) {
-          if (key === "friendly")
-            return "You're Keilani, a friendly, helpful mentor. Be concise, encouraging, and clear.";
-          if (key === "playful")
-            return "You're Keilani, a witty gamer-teammate. Be playful, brief, and supportive.";
-          if (key === "waifu")
-            return "You're Keilani, a sweet, affectionate companion. Keep replies SFW and caring.";
-          return "";
-        }
-
-        // ---------- Raw inspector ----------
-        el.rawpanelLog = function logRaw(x) {
-          if (el.rawpanel.classList.contains("hidden")) return;
-          const s = typeof x === "string" ? x : JSON.stringify(x, null, 2);
-          el.rawpanel.textContent += s + (s.endsWith("\n") ? "" : "\n");
-          el.rawpanel.scrollTop = el.rawpanel.scrollHeight;
-        };
-        el.raw.onclick = () => {
-          el.rawpanel.classList.toggle("hidden");
-        };
-
-        // ---------- Utils ----------
-        function escapeHTML(s) {
-          return s.replace(
-            /[&<>"']/g,
-            (m) =>
-              ({
-                "&": "&amp;",
-                "<": "&lt;",
-                ">": "&gt;",
-                '"': "&quot;",
-                "'": "&#39;",
-              })[m],
+          return div.innerHTML;
+        } catch {
+          return htmlStr.replace(
+            /[&<>]/g,
+            (s) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[s],
           );
         }
+      }
 
-        // ---------- Export / Clear / Sessions ----------
-        el.export.onclick = () => {
-          const text = [...el.chat.querySelectorAll(".msg")]
-            .map((m) => {
-              const who = m.classList.contains("me") ? "You" : "Keilani";
-              return `${who}: ${m.querySelector(".bubble").innerText}`;
-            })
-            .join("\n\n");
-          const blob = new Blob([text], { type: "text/plain" });
-          const a = document.createElement("a");
-          a.href = URL.createObjectURL(blob);
-          a.download = `keilani-${state.sid}.txt`;
-          a.click();
-        };
-        el.clear.onclick = () => {
-          el.chat.innerHTML = "";
-          totalTokens = 0;
-          tickTokens(0);
-        };
-        el.reset.onclick = () => {
-          state.sessions[state.sid] = el.chat.innerHTML;
-          setSID(crypto.randomUUID().slice(0, 8));
-          el.chat.innerHTML = "";
-          loadSessions();
-          persist();
-        };
-        el.newSession.onclick = () => {
-          state.sessions[state.sid] = el.chat.innerHTML;
-          setSID(crypto.randomUUID().slice(0, 8));
-          el.chat.innerHTML = "";
-          loadSessions();
-          persist();
-        };
-        el.sessions.onchange = (e) => {
-          const selected = e.target.value;
-          if (!selected || selected === state.sid) return;
-          // swap
-          state.sessions[state.sid] = el.chat.innerHTML;
-          el.chat.innerHTML = state.sessions[selected] || "";
-          setSID(selected);
-          loadSessions();
-          persist();
+      function bubble(role, text, kind = "normal") {
+        const wrap = document.createElement("div");
+        wrap.className =
+          "bubble" +
+          (role === "You" ? " me" : "") +
+          (kind === "error" ? " error" : "");
+        wrap.innerHTML = `
+      <div class="role">${role} • <span class="mono">${dayjs().format("h:mm:ss A")}</span></div>
+      <div class="content">${md(text)}</div>
+    `;
+        ui.list.appendChild(wrap);
+        ui.list.scrollTop = ui.list.scrollHeight;
+        return wrap.querySelector(".content");
+      }
+
+      function errorBox(text) {
+        bubble("Error", text, "error");
+      }
+
+      function now() {
+        return performance.now();
+      }
+
+      // build messages array from DOM (simple transcript → user/assistant turns)
+      function collectMessages() {
+        const items = Array.from(ui.list.querySelectorAll(".bubble .role")).map(
+          (r) => {
+            const who = r.textContent.split("•")[0].trim();
+            const content =
+              r.parentElement.querySelector(".content").textContent;
+            return { role: /You/i.test(who) ? "user" : "assistant", content };
+          },
+        );
+        return items;
+      }
+
+      async function sendMessage() {
+        const api = ui.api.value.trim();
+        const model = ui.model.value;
+        const text = ui.txt.value.trim();
+        if (!text) return;
+
+        ui.sendBtn.disabled = true;
+        persist();
+
+        // render "me"
+        bubble("You", text);
+        ui.txt.value = "";
+
+        // ask
+        const outEl = bubble("Keilani", ""); // will stream in
+
+        const body = {
+          model,
+          messages: [...collectMessages(), { role: "user", content: text }],
+          stream: ui.stream.checked,
+          client_token: ui.token.value.trim() || undefined,
         };
 
-        // ---------- Theme ----------
-        el.theme.onclick = () => {
-          el.app.dataset.theme =
-            el.app.dataset.theme === "dark" ? "light" : "dark";
-          persist();
-        };
+        // start timer for token/s readout
+        const started = now();
+        function tickTokens(nInc = 0) {
+          state.tokens += nInc;
+          ui.tok.textContent = state.tokens;
+          const sec = Math.max(0.05, (now() - started) / 1000);
+          ui.tps.textContent = (state.tokens / sec).toFixed(1);
+        }
 
-        // ---------- Save + Send handlers ----------
-        el.save.onclick = persist;
-        el.send.onclick = sendMessage;
-        el.prompt.addEventListener("keydown", (e) => {
-          if (e.key === "Enter" && !e.shiftKey) {
-            e.preventDefault();
-            el.send.click();
+        try {
+          const headers = { "Content-Type": "application/json" };
+          const res = await fetch(api, {
+            method: "POST",
+            headers,
+            body: JSON.stringify(body),
+          });
+
+          // handle SSE
+          if (
+            ui.stream.checked &&
+            ui.sse.checked &&
+            res.ok &&
+            res.headers.get("content-type")?.includes("text/event-stream")
+          ) {
+            const reader = res.body.getReader();
+            const dec = new TextDecoder();
+            let buf = "",
+              done = false;
+
+            while (!done) {
+              const { value, done: doneChunk } = await reader.read();
+              done = doneChunk;
+              buf += dec.decode(value || new Uint8Array(), { stream: !done });
+              let idx;
+              while ((idx = buf.indexOf("\n\n")) !== -1) {
+                const frame = buf.slice(0, idx);
+                buf = buf.slice(idx + 2);
+                if (!frame.startsWith("data:")) continue;
+                const payload = frame.slice(5).trim();
+                if (payload === "[DONE]") {
+                  tickTokens();
+                  continue;
+                }
+
+                try {
+                  const json = JSON.parse(payload);
+                  const delta = json?.choices?.[0]?.delta?.content ?? "";
+                  if (delta) {
+                    outEl.insertAdjacentText("beforeend", delta);
+                    tickTokens(delta.split(/\s+/).length);
+                  }
+                } catch (e) {
+                  /* ignore frame parse errors */
+                }
+              }
+            }
+          } else {
+            // non-stream JSON
+            const data = await res.json().catch(() => ({}));
+            if (!res.ok) {
+              throw new Error(
+                data?.error?.message || res.statusText || "HTTP " + res.status,
+              );
+            }
+            const textOut =
+              data?.choices?.[0]?.message?.content ?? JSON.stringify(data);
+            outEl.textContent = "";
+            outEl.insertAdjacentHTML("beforeend", md(textOut));
+            tickTokens(String(textOut).split(/\s+/).length);
           }
+        } catch (err) {
+          errorBox(`[Error] ${String(err?.message || err)}`);
+        } finally {
+          ui.sendBtn.disabled = false;
+        }
+      }
+
+      // wire up
+      on(ui.sendBtn, "click", sendMessage);
+      on(ui.txt, "keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          sendMessage();
+        }
+      });
+      on(ui.clear, "click", () => {
+        ui.list.innerHTML = "";
+        state.tokens = 0;
+        ui.tok.textContent = "0";
+        ui.tps.textContent = "0";
+      });
+      on(ui.reset, "click", () => {
+        setSID(Math.random().toString(36).slice(2, 10));
+        persist();
+        ui.list.innerHTML = "";
+        state.tokens = 0;
+        ui.tok.textContent = "0";
+        ui.tps.textContent = "0";
+      });
+      on(ui.export, "click", () => {
+        let text = "";
+        ui.list.querySelectorAll(".bubble").forEach((b) => {
+          const who =
+            b.querySelector(".role")?.textContent?.split("•")[0].trim() || "";
+          const msg = b.querySelector(".content")?.textContent || "";
+          text += `${who}: ${msg}\n\n`;
         });
+        const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+        const url = URL.createObjectURL(blob);
+        const a = Object.assign(document.createElement("a"), {
+          href: url,
+          download: `keilani_${dayjs().format("YYYYMMDD_HHmmss")}.txt`,
+        });
+        a.click();
+        setTimeout(() => URL.revokeObjectURL(url), 500);
+      });
 
-        // ---------- Boot ----------
-        hydrate();
-
-        // helpful default
-        tickTokens(0);
-
-        // focus on Ctrl/Cmd+K
-        // already installed above
-      })();
+      // small convenience: auto-focus prompt
+      ui.txt.focus();
     </script>
   </body>
 </html>
