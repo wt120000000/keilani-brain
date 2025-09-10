@@ -2,23 +2,39 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Keilani • Chat (Streaming)</title>
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <link rel="icon" href="/favicon.ico" />
-    <!-- Local vendor styles -->
-    <link rel="stylesheet" href="./vendor/github-dark.min.css" />
+    <meta
+      name="viewport"
+      content="width=device-width, initial-scale=1, viewport-fit=cover"
+    />
+    <title>Keilani Chat • Streaming</title>
+
+    <!-- Local vendor assets (no CDN) -->
+    <link rel="stylesheet" href="/vendor/github-dark.min.css" />
+    <script src="/vendor/dayjs.min.js"></script>
+    <script src="/vendor/highlight.min.js"></script>
+    <script src="/vendor/marked.umd.min.js"></script>
+
     <style>
       :root {
-        --bg: #0d1117;
-        --panel: #111827;
-        --panel-2: #0f172a;
-        --text: #e5e7eb;
-        --muted: #9ca3af;
-        --accent: #8b5cf6;
-        --accent-2: #7c3aed;
-        --danger: #ef4444;
-        --border: #1f2937;
-        --chip: #0b1220;
+        --bg: #0b0f1a;
+        --bg2: #0f1524;
+        --panel: #0e1422;
+        --card: #10192c;
+        --ink: #e7ecf8;
+        --ink-dim: #a8b3cf;
+        --brand: #8055ff;
+        --brand-2: #9b6bff;
+        --ok: #41d18e;
+        --err: #ff5c7a;
+        --muted: #506079;
+        --chip: #1a2540;
+        --chip-ink: #c8d2eb;
+        --input: #0f1524;
+        --input-br: #1f2a44;
+        --ring: #2d3a5f;
+        --kbd: #0b1222;
+        --kbd-br: #1c2743;
+        --radius: 14px;
       }
       * {
         box-sizing: border-box;
@@ -29,572 +45,603 @@
       }
       body {
         margin: 0;
-        color: var(--text);
         background:
-          radial-gradient(1200px 400px at 20% 0, #0b1530, transparent),
-          radial-gradient(900px 300px at 80% -10%, #1b1142, transparent),
+          radial-gradient(1200px 600px at 10% -10%, #12224a55, transparent 60%),
+          radial-gradient(1200px 600px at 110% 10%, #3a1f7a44, transparent 60%),
           var(--bg);
+        color: var(--ink);
         font:
-          14px/1.45 ui-sans-serif,
-          system-ui,
-          -apple-system,
+          14px/1.45 system-ui,
           Segoe UI,
           Roboto,
           Inter,
-          "Helvetica Neue",
+          Helvetica,
           Arial,
-          "Apple Color Emoji",
-          "Segoe UI Emoji";
-        letter-spacing: 0.2px;
+          sans-serif;
       }
-
-      .bar {
+      .topbar {
+        position: sticky;
+        top: 0;
+        z-index: 10;
+        background: linear-gradient(180deg, #0b0f1acc, #0b0f1a00 100%);
+        backdrop-filter: saturate(140%) blur(6px);
+        padding: 10px 14px;
+        border-bottom: 1px solid #11182b;
+      }
+      .row {
         display: flex;
         gap: 10px;
-        padding: 12px;
+        flex-wrap: wrap;
         align-items: center;
-        border-bottom: 1px solid var(--border);
       }
-      .title {
-        display: flex;
-        gap: 6px;
-        align-items: center;
-        padding: 6px 10px;
+      .grow {
+        flex: 1 1 auto;
+        min-width: 240px;
+      }
+      .btn,
+      .chip,
+      .input {
         border-radius: 12px;
-        background: var(--panel-2);
-        font-weight: 600;
-      }
-      .status-dot {
-        width: 8px;
-        height: 8px;
-        border-radius: 999px;
-        background: #22c55e;
-        box-shadow: 0 0 0 2px #0a0a0a inset;
-      }
-      .pill {
-        background: var(--panel-2);
-        border: 1px solid var(--border);
-        color: var(--text);
-        padding: 8px 10px;
-        border-radius: 10px;
-      }
-      .pill input {
-        background: transparent;
-        border: 0;
-        outline: none;
-        color: var(--text);
-        width: 100%;
-      }
-      .select,
-      select,
-      button {
-        background: var(--panel-2);
-        border: 1px solid var(--border);
-        color: var(--text);
-        border-radius: 10px;
-        padding: 8px 10px;
-      }
-      select {
-        cursor: pointer;
-      }
-      .ghost {
-        background: transparent;
-        border-color: var(--border);
-      }
-      .danger {
-        background: #231318;
-        border-color: #3b121b;
-        color: #fecaca;
+        border: 1px solid var(--input-br);
+        background: var(--input);
+        color: var(--ink);
+        height: 36px;
+        padding: 8px 12px;
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
       }
       .btn {
-        cursor: pointer;
-        transition:
-          0.15s transform,
-          0.15s background,
-          0.15s border-color,
-          0.15s opacity;
+        background: linear-gradient(180deg, #1a2342, #131c33);
+        border-color: #233054;
+        box-shadow:
+          0 1px 0 #000 inset,
+          0 1px 0 #1a2342;
       }
       .btn:hover {
-        transform: translateY(-1px);
+        border-color: #345089;
       }
-      .btn:active {
-        transform: translateY(0);
+      .btn--prime {
+        background: linear-gradient(180deg, #6f52ff, #5b3cff);
+        border-color: #745bff;
+        color: white;
       }
-
-      .wrap {
-        height: calc(100% - 58px);
-        display: flex;
-        flex-direction: column;
+      .select,
+      .input {
+        appearance: none;
+        outline: 0;
       }
-      .meta {
-        padding: 8px 12px;
-        display: flex;
-        gap: 10px;
+      .select {
+        padding-right: 28px;
+        background:
+          linear-gradient(180deg, #141b2f, #0f1324),
+          url('data:image/svg+xml;utf8,<svg xmlns="http://www.w3.org/2000/svg" width="12" height="12" viewBox="0 0 24 24"><path fill="%23a8b3cf" d="M7 10l5 5 5-5z"/></svg>')
+            no-repeat right 10px center;
+      }
+      .switch {
+        display: inline-flex;
         align-items: center;
-        color: var(--muted);
+        gap: 8px;
+        padding: 6px 10px;
+        border-radius: 999px;
+        background: #0d1424;
+        border: 1px solid #1c2744;
+        color: var(--ink-dim);
+      }
+      .switch input {
+        accent-color: var(--brand);
+      }
+      .hud {
+        display: flex;
+        gap: 8px;
+        align-items: center;
+        color: var(--ink-dim);
       }
       .chip {
         background: var(--chip);
-        color: #c7d2fe;
-        border: 1px solid #1f2a44;
-        padding: 6px 10px;
-        border-radius: 999px;
-        font-variant-numeric: tabular-nums;
+        border-color: #223357;
+        color: var(--chip-ink);
+        height: 28px;
+        padding: 4px 10px;
       }
-      .messages {
-        flex: 1;
-        overflow: auto;
-        padding: 10px 12px 0;
+      .log {
+        max-width: 1100px;
+        margin: 10px auto 0;
+        padding: 0 14px;
       }
       .bubble {
-        background: var(--panel);
-        border: 1px solid var(--border);
-        padding: 14px 14px;
-        border-radius: 12px;
-        margin: 10px 8px;
+        background: var(--card);
+        border: 1px solid #1b2542;
+        border-radius: 16px;
+        padding: 14px 16px;
+        margin: 12px auto 0;
         max-width: 1100px;
+        box-shadow: 0 1px #0a0f1f;
       }
-      .bubble.me {
-        background: #0c1330;
-        border-color: #1a1e3a;
+      .bubble.you {
+        background: #0e1527;
+        border-color: #1d2747;
       }
       .bubble.error {
-        background: #1c0f14;
-        border-color: #31121a;
-        color: #fecaca;
+        border-color: #5f2134;
+        background: linear-gradient(180deg, #2a0f1a, #1a0b12);
+        color: #ffd0da;
       }
-      .role {
-        font-size: 12px;
-        color: var(--muted);
-        margin-bottom: 6px;
+      .msglist {
+        min-height: 180px;
       }
-      .mono {
-        font-family:
-          ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
-          "Liberation Mono", "Courier New", monospace;
-      }
-
       .composer {
-        border-top: 1px solid var(--border);
-        padding: 12px;
-      }
-      .input-row {
-        display: flex;
-        gap: 10px;
-        align-items: flex-end;
+        max-width: 1100px;
+        margin: 16px auto;
+        padding: 0 14px;
       }
       textarea {
-        flex: 1;
+        width: 100%;
         min-height: 56px;
-        max-height: 240px;
+        max-height: 45vh;
         resize: vertical;
-        border-radius: 12px;
-        background: var(--panel-2);
-        border: 1px solid var(--border);
-        color: var(--text);
-        padding: 12px 12px;
+        border-radius: 16px;
+        border: 1px solid #1b2745;
+        background: #0f1525;
+        color: var(--ink);
+        padding: 14px 16px;
+        font: 14px/1.45 inherit;
         outline: none;
+        box-shadow: 0 1px #0a0f1f;
       }
-      .send {
-        background: var(--accent);
-        border-color: #2b1f59;
-      }
-      .send:hover {
-        background: var(--accent-2);
-      }
-      .hint {
-        padding: 10px 2px;
-        color: var(--muted);
-        font-size: 12px;
-        text-align: center;
+      .composer-bar {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        margin-top: 10px;
       }
       .right {
         margin-left: auto;
       }
-      code,
-      pre code {
-        font-size: 12.5px;
+      .muted {
+        color: var(--ink-dim);
+      }
+      kbd {
+        background: var(--kbd);
+        border: 1px solid var(--kbd-br);
+        padding: 1px 6px;
+        border-radius: 6px;
+        color: #b9c6e3;
       }
       pre {
-        background: #0b1020;
-        border: 1px solid #1c2842;
-        padding: 12px;
-        border-radius: 10px;
         overflow: auto;
+        border-radius: 12px;
+        border: 1px solid #233155;
+        background: #0c1427;
+        padding: 12px;
       }
-      .kbd {
-        padding: 2px 6px;
-        border-radius: 6px;
-        background: #0c1330;
-        border: 1px solid #1a1e3a;
-        color: #c7d2fe;
-        font-size: 11px;
+      code {
+        font-family:
+          ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+          "Liberation Mono", "Courier New", monospace;
       }
-      .switch {
-        display: inline-flex;
-        gap: 6px;
-        align-items: center;
-        padding: 6px 10px;
-        border-radius: 999px;
-        border: 1px solid var(--border);
+      .inspector {
+        white-space: pre-wrap;
+        font-family: ui-monospace, Consolas, monospace;
+        background: #0c111d;
+        border: 1px solid #1a2236;
+        border-radius: 12px;
+        padding: 10px;
+        color: #a8b3cf;
       }
-      .switch input {
-        width: 14px;
-        height: 14px;
-        accent-color: var(--accent);
+      .fade {
+        opacity: 0.7;
       }
     </style>
   </head>
   <body>
-    <div class="bar">
-      <div class="title">
-        <span class="status-dot"></span><span>Keilani Chat</span
-        ><span class="mono">•</span><span>Streaming</span>
-      </div>
+    <div class="topbar">
+      <div class="row">
+        <div class="hud">
+          <strong>Keilani Chat</strong><span class="fade">•</span
+          ><span class="muted">Streaming</span>
+        </div>
 
-      <select id="model" class="select">
-        <option value="gpt-5" selected>gpt-5</option>
-        <option value="gpt-4.1">gpt-4.1</option>
-        <option value="o4-mini">o4-mini</option>
-        <option value="gpt-4o-mini">gpt-4o-mini</option>
-      </select>
+        <select id="model" class="select">
+          <option value="gpt-5">gpt-5</option>
+          <option value="gpt-4.1">gpt-4.1</option>
+          <option value="gpt-4o-mini">gpt-4o-mini</option>
+        </select>
 
-      <div class="pill" style="min-width: 420px; max-width: 48vw">
         <input
           id="api"
-          value="https://api.keilani.ai/api/chat"
-          spellcheck="false"
+          class="input grow"
+          placeholder="https://api.keilani.ai/api/chat"
         />
-      </div>
 
-      <div class="pill" style="min-width: 280px">
         <input
           id="token"
+          class="input grow"
           placeholder="Client Token (optional)"
-          spellcheck="false"
         />
+
+        <button id="save" class="btn">Save</button>
+        <button id="export" class="btn">Export .txt</button>
+        <button id="clear" class="btn">Clear</button>
+        <button id="reset" class="btn">Reset Session</button>
+
+        <label class="switch"
+          ><input id="stream" type="checkbox" checked /> Stream</label
+        >
+        <label class="switch"
+          ><input id="sse" type="checkbox" checked /> Expect SSE</label
+        >
       </div>
 
-      <button class="btn" id="save">Save</button>
-      <button class="btn ghost" id="export">Export .txt</button>
-      <button class="btn ghost" id="clear">Clear</button>
-      <button class="btn ghost" id="reset">Reset Session</button>
-
-      <label class="switch right">
-        <input type="checkbox" id="stream" checked /> <span>Stream</span>
-      </label>
-      <label class="switch">
-        <input type="checkbox" id="sse" checked /> <span>Expect SSE</span>
-      </label>
-    </div>
-
-    <div class="wrap">
-      <div class="meta">
-        <div class="chip">
-          Tokens: <span id="tok">0</span> • <span id="tps">0</span>/s
-        </div>
-        <div class="chip">SID: <span id="sid">–</span></div>
-      </div>
-
-      <div id="messages" class="messages"></div>
-
-      <div class="composer">
-        <div class="input-row">
-          <textarea
-            id="prompt"
-            placeholder="Type your message…  (Enter to send • Shift+Enter for newline)"
-          ></textarea>
-          <button id="send" class="btn send">Send ↵</button>
-        </div>
-        <div class="hint">
-          Tip: <span class="kbd">Ctrl/Cmd+K</span> to focus input • Your config
-          persists locally
-        </div>
+      <div class="row" style="margin-top: 8px">
+        <span class="chip" id="tokhud">Tokens: 0 • 0/s</span>
+        <span class="chip" id="sidhud">SID: —</span>
+        <button id="inspectorBtn" class="btn">Raw Inspector</button>
       </div>
     </div>
 
-    <!-- Local vendor scripts -->
-    <script src="./vendor/dayjs.min.js"></script>
-    <script src="./vendor/marked.umd.min.js"></script>
-    <script src="./vendor/highlight.min.js"></script>
+    <main class="log" id="log">
+      <!-- Messages render here -->
+    </main>
+
+    <section class="composer">
+      <textarea
+        id="prompt"
+        placeholder="Type your message…  (Enter to send  •  Shift+Enter for newline)"
+      ></textarea>
+      <div class="composer-bar">
+        <span class="muted"
+          >Tip: <kbd>Ctrl/Cmd+K</kbd> to focus input • <kbd>↑</kbd> to edit last
+          message</span
+        >
+        <button id="send" class="btn btn--prime right">Send ↵</button>
+      </div>
+      <div
+        id="inspector"
+        class="inspector"
+        style="display: none; margin-top: 10px"
+      ></div>
+    </section>
 
     <script>
-      // ---------- tiny helpers ----------
-      const $ = (s, r = document) => r.querySelector(s);
-      const on = (el, ev, fn) => el.addEventListener(ev, fn);
-      const storage = {
-        get(k, d = null) {
-          try {
-            return JSON.parse(localStorage.getItem(k)) ?? d;
-          } catch {
-            return d;
-          }
-        },
-        set(k, v) {
-          localStorage.setItem(k, JSON.stringify(v));
-        },
-      };
+      (() => {
+        // ---------- Utilities ----------
+        const $ = (s, r = document) => r.querySelector(s);
+        const $m = (s, r = document) => [...r.querySelectorAll(s)];
+        const ls = (k, v = undefined) =>
+          v === undefined
+            ? localStorage.getItem(k)
+            : localStorage.setItem(k, v);
 
-      const ui = {
-        model: $("#model"),
-        api: $("#api"),
-        token: $("#token"),
-        stream: $("#stream"),
-        sse: $("#sse"),
-        sendBtn: $("#send"),
-        txt: $("#prompt"),
-        list: $("#messages"),
-        tok: $("#tok"),
-        tps: $("#tps"),
-        sid: $("#sid"),
-        save: $("#save"),
-        clear: $("#clear"),
-        reset: $("#reset"),
-        export: $("#export"),
-      };
-
-      const state = {
-        sid: Math.random().toString(36).slice(2, 10),
-        tokens: 0,
-        lastTick: 0,
-      };
-
-      function setSID(v) {
-        state.sid = v;
-        ui.sid.textContent = v;
-      }
-      setSID(storage.get("SID") || state.sid);
-
-      // persist + restore
-      (function restore() {
-        const m = storage.get("MODEL");
-        if (m) ui.model.value = m;
-        const a = storage.get("API");
-        if (a) ui.api.value = a;
-        const t = storage.get("CLIENT_TOKEN");
-        if (t) ui.token.value = t;
-        const st = storage.get("STREAM");
-        if (typeof st === "boolean") ui.stream.checked = st;
-        const se = storage.get("SSE");
-        if (typeof se === "boolean") ui.sse.checked = se;
-      })();
-
-      function persist() {
-        storage.set("MODEL", ui.model.value);
-        storage.set("API", ui.api.value.trim());
-        storage.set("CLIENT_TOKEN", ui.token.value.trim());
-        storage.set("STREAM", ui.stream.checked);
-        storage.set("SSE", ui.sse.checked);
-        storage.set("SID", state.sid);
-      }
-      on(ui.save, "click", persist);
-
-      // keyboard affordances
-      on(document, "keydown", (e) => {
-        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
-          e.preventDefault();
-          ui.txt.focus();
-        }
-      });
-
-      // message rendering (markdown + highlight)
-      function md(htmlStr) {
-        try {
-          const out = window.marked.parse(htmlStr, { breaks: true, gfm: true });
-          const div = document.createElement("div");
-          div.innerHTML = out;
-          div.querySelectorAll("pre code").forEach((block) => {
-            try {
-              window.hljs.highlightElement(block);
-            } catch {}
-          });
-          return div.innerHTML;
-        } catch {
-          return htmlStr.replace(
-            /[&<>]/g,
-            (s) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" })[s],
-          );
-        }
-      }
-
-      function bubble(role, text, kind = "normal") {
-        const wrap = document.createElement("div");
-        wrap.className =
-          "bubble" +
-          (role === "You" ? " me" : "") +
-          (kind === "error" ? " error" : "");
-        wrap.innerHTML = `
-      <div class="role">${role} • <span class="mono">${dayjs().format("h:mm:ss A")}</span></div>
-      <div class="content">${md(text)}</div>
-    `;
-        ui.list.appendChild(wrap);
-        ui.list.scrollTop = ui.list.scrollHeight;
-        return wrap.querySelector(".content");
-      }
-
-      function errorBox(text) {
-        bubble("Error", text, "error");
-      }
-
-      function now() {
-        return performance.now();
-      }
-
-      // build messages array from DOM (simple transcript → user/assistant turns)
-      function collectMessages() {
-        const items = Array.from(ui.list.querySelectorAll(".bubble .role")).map(
-          (r) => {
-            const who = r.textContent.split("•")[0].trim();
-            const content =
-              r.parentElement.querySelector(".content").textContent;
-            return { role: /You/i.test(who) ? "user" : "assistant", content };
-          },
-        );
-        return items;
-      }
-
-      async function sendMessage() {
-        const api = ui.api.value.trim();
-        const model = ui.model.value;
-        const text = ui.txt.value.trim();
-        if (!text) return;
-
-        ui.sendBtn.disabled = true;
-        persist();
-
-        // render "me"
-        bubble("You", text);
-        ui.txt.value = "";
-
-        // ask
-        const outEl = bubble("Keilani", ""); // will stream in
-
-        const body = {
-          model,
-          messages: [...collectMessages(), { role: "user", content: text }],
-          stream: ui.stream.checked,
-          client_token: ui.token.value.trim() || undefined,
+        const ui = {
+          model: $("#model"),
+          api: $("#api"),
+          token: $("#token"),
+          save: $("#save"),
+          exportBtn: $("#export"),
+          clear: $("#clear"),
+          reset: $("#reset"),
+          stream: $("#stream"),
+          sse: $("#sse"),
+          tokhud: $("#tokhud"),
+          sidhud: $("#sidhud"),
+          log: $("#log"),
+          prompt: $("#prompt"),
+          send: $("#send"),
+          inspector: $("#inspector"),
+          inspectorBtn: $("#inspectorBtn"),
         };
 
-        // start timer for token/s readout
-        const started = now();
-        function tickTokens(nInc = 0) {
-          state.tokens += nInc;
-          ui.tok.textContent = state.tokens;
-          const sec = Math.max(0.05, (now() - started) / 1000);
-          ui.tps.textContent = (state.tokens / sec).toFixed(1);
+        const state = {
+          sid: crypto.randomUUID().slice(0, 8),
+          messages: [],
+          t0: 0,
+          tokenCount: 0,
+          lastChunkAt: 0,
+        };
+
+        const cfg = {
+          get api() {
+            return ui.api.value.trim() || "https://api.keilani.ai/api/chat";
+          },
+          get model() {
+            return ui.model.value.trim() || "gpt-5";
+          },
+          get token() {
+            return ui.token.value.trim();
+          },
+          get stream() {
+            return ui.stream.checked;
+          },
+          get sse() {
+            return ui.sse.checked;
+          },
+        };
+
+        function persist() {
+          ls("KLN_MODEL", cfg.model);
+          ls("KLN_API", cfg.api);
+          ls("KLN_TOKEN", cfg.token);
+          ls("KLN_STREAM", cfg.stream ? "1" : "0");
+          ls("KLN_SSE", cfg.sse ? "1" : "0");
+        }
+        function restore() {
+          ui.model.value = ls("KLN_MODEL") || "gpt-5";
+          ui.api.value = ls("KLN_API") || "https://api.keilani.ai/api/chat";
+          ui.token.value = ls("KLN_TOKEN") || "";
+          ui.stream.checked = (ls("KLN_STREAM") ?? "1") === "1";
+          ui.sse.checked = (ls("KLN_SSE") ?? "1") === "1";
+          ui.sidhud.textContent = `SID: ${state.sid}`;
         }
 
-        try {
-          const headers = { "Content-Type": "application/json" };
-          const res = await fetch(api, {
-            method: "POST",
-            headers,
-            body: JSON.stringify(body),
-          });
+        function md(input) {
+          try {
+            // marked is UMD -> window.marked
+            const out = window.marked?.parse(input) ?? input;
+            const div = document.createElement("div");
+            div.innerHTML = out;
+            // syntax highlight
+            $m("pre code", div).forEach((block) => {
+              try {
+                hljs.highlightElement(block);
+              } catch {}
+            });
+            return div;
+          } catch {
+            const d = document.createElement("div");
+            d.textContent = input;
+            return d;
+          }
+        }
 
-          // handle SSE
-          if (
-            ui.stream.checked &&
-            ui.sse.checked &&
-            res.ok &&
-            res.headers.get("content-type")?.includes("text/event-stream")
-          ) {
-            const reader = res.body.getReader();
-            const dec = new TextDecoder();
-            let buf = "",
-              done = false;
+        function bubble(role, htmlNode, extraClass = "") {
+          const wrap = document.createElement("div");
+          wrap.className = `bubble ${role} ${extraClass}`.trim();
+          wrap.appendChild(htmlNode);
+          ui.log.appendChild(wrap);
+          wrap.scrollIntoView({ behavior: "smooth", block: "end" });
+          return wrap;
+        }
 
-            while (!done) {
-              const { value, done: doneChunk } = await reader.read();
-              done = doneChunk;
-              buf += dec.decode(value || new Uint8Array(), { stream: !done });
-              let idx;
-              while ((idx = buf.indexOf("\n\n")) !== -1) {
-                const frame = buf.slice(0, idx);
-                buf = buf.slice(idx + 2);
-                if (!frame.startsWith("data:")) continue;
-                const payload = frame.slice(5).trim();
-                if (payload === "[DONE]") {
-                  tickTokens();
-                  continue;
-                }
+        function textNode(s) {
+          const p = document.createElement("div");
+          p.textContent = s;
+          return p;
+        }
+        function errNode(s) {
+          const p = document.createElement("div");
+          p.textContent = s;
+          return p;
+        }
 
-                try {
-                  const json = JSON.parse(payload);
-                  const delta = json?.choices?.[0]?.delta?.content ?? "";
-                  if (delta) {
-                    outEl.insertAdjacentText("beforeend", delta);
-                    tickTokens(delta.split(/\s+/).length);
-                  }
-                } catch (e) {
-                  /* ignore frame parse errors */
-                }
+        function updateHud() {
+          const elapsed = Math.max(0, (Date.now() - state.t0) / 1000);
+          const rate = elapsed ? (state.tokenCount / elapsed).toFixed(1) : "0";
+          ui.tokhud.textContent = `Tokens: ${state.tokenCount} • ${rate}/s`;
+        }
+
+        function resetSession() {
+          state.sid = crypto.randomUUID().slice(0, 8);
+          state.messages = [];
+          state.tokenCount = 0;
+          ui.log.innerHTML = "";
+          ui.sidhud.textContent = `SID: ${state.sid}`;
+          updateHud();
+        }
+
+        // ---------- Render last-user-edit ----------
+        ui.prompt.addEventListener("keydown", (e) => {
+          if (e.key === "Enter" && !e.shiftKey) {
+            e.preventDefault();
+            ui.send.click();
+          } else if (e.key === "ArrowUp" && ui.prompt.value.trim() === "") {
+            // edit last user message
+            for (let i = state.messages.length - 1; i >= 0; i--) {
+              if (state.messages[i].role === "user") {
+                ui.prompt.value = state.messages[i].content;
+                // remove its bubble & message so we resend edited
+                const last = ui.log.lastElementChild;
+                if (last) last.remove();
+                state.messages.splice(i, 1);
+                break;
               }
             }
-          } else {
-            // non-stream JSON
-            const data = await res.json().catch(() => ({}));
-            if (!res.ok) {
-              throw new Error(
-                data?.error?.message || res.statusText || "HTTP " + res.status,
-              );
-            }
-            const textOut =
-              data?.choices?.[0]?.message?.content ?? JSON.stringify(data);
-            outEl.textContent = "";
-            outEl.insertAdjacentHTML("beforeend", md(textOut));
-            tickTokens(String(textOut).split(/\s+/).length);
+          } else if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+            e.preventDefault();
+            ui.prompt.focus();
           }
-        } catch (err) {
-          errorBox(`[Error] ${String(err?.message || err)}`);
-        } finally {
-          ui.sendBtn.disabled = false;
-        }
-      }
+        });
 
-      // wire up
-      on(ui.sendBtn, "click", sendMessage);
-      on(ui.txt, "keydown", (e) => {
-        if (e.key === "Enter" && !e.shiftKey) {
+        // ---------- Controls ----------
+        ui.save.onclick = () => {
+          persist();
+          ui.save.textContent = "Saved";
+          setTimeout(() => (ui.save.textContent = "Save"), 900);
+        };
+        ui.clear.onclick = () => {
+          ui.log.innerHTML = "";
+          state.messages = [];
+        };
+        ui.reset.onclick = () => resetSession();
+        ui.inspectorBtn.onclick = () => {
+          ui.inspector.style.display =
+            ui.inspector.style.display === "none" ? "block" : "none";
+        };
+
+        ui.exportBtn.onclick = () => {
+          const lines = [];
+          for (const m of state.messages) {
+            lines.push(`[${m.role.toUpperCase()}] ${m.content}`);
+            lines.push("");
+          }
+          const blob = new Blob([lines.join("\n")], { type: "text/plain" });
+          const a = document.createElement("a");
+          a.href = URL.createObjectURL(blob);
+          a.download = `keilani-chat-${state.sid}.txt`;
+          a.click();
+          URL.revokeObjectURL(a.href);
+        };
+
+        // ---------- Chat send ----------
+        async function sendMessage() {
+          const text = ui.prompt.value.trim();
+          if (!text) return;
+          ui.prompt.value = "";
+
+          // render user bubble
+          bubble("you", textNode(text));
+
+          // keep history
+          state.messages.push({ role: "user", content: text });
+
+          // build payload (messages[] required by proxy)
+          const body = {
+            model: cfg.model,
+            messages: state.messages.map((m) => ({
+              role: m.role,
+              content: m.content,
+            })),
+            stream: cfg.stream,
+            // do NOT send temperature for gpt-5 (server enforces default)
+          };
+
+          // auth header (client token optional)
+          const headers = { "Content-Type": "application/json" };
+          if (cfg.token) headers["Authorization"] = `Bearer ${cfg.token}`;
+
+          // fire
+          state.t0 = Date.now();
+          state.tokenCount = 0;
+          updateHud();
+          const useSSE = cfg.stream && cfg.sse;
+
+          ui.inspector.textContent = `→ POST ${cfg.api}\n${JSON.stringify(body, null, 2)}`;
+
+          try {
+            const res = await fetch(cfg.api, {
+              method: "POST",
+              headers,
+              body: JSON.stringify(body),
+            });
+
+            // Decide mode by content-type & flag
+            const ct = res.headers.get("content-type") || "";
+            if (useSSE && ct.includes("text/event-stream")) {
+              await handleSSE(res);
+            } else {
+              await handleJSON(res);
+            }
+          } catch (err) {
+            const n = errNode(`[Network] ${err.message || err}`);
+            bubble("bot", n, "error");
+          }
+        }
+
+        async function handleJSON(res) {
+          if (!res.ok) {
+            const txt = await safeText(res);
+            bubble(
+              "bot",
+              errNode(`[Error] HTTP ${res.status}\n${txt}`),
+              "error",
+            );
+            return;
+          }
+          const data = await res.json().catch(() => ({}));
+          ui.inspector.textContent += `\n\n← JSON ${res.status}\n${JSON.stringify(data, null, 2)}`;
+
+          const reply =
+            data?.message ||
+            data?.content ||
+            data?.choices?.[0]?.message?.content ||
+            "(empty)";
+          const node = md(reply);
+          bubble("bot", node);
+          state.messages.push({
+            role: "assistant",
+            content: node.textContent || reply,
+          });
+        }
+
+        async function handleSSE(res) {
+          const reader = res.body.getReader();
+          let buf = "";
+          let acc = "";
+          let botBubble = null;
+
+          while (true) {
+            const { value, done } = await reader.read();
+            if (done) break;
+            buf += new TextDecoder().decode(value);
+
+            // parse SSE lines
+            const parts = buf.split(/\r?\n\r?\n/g);
+            buf = parts.pop(); // keep incomplete
+            for (const chunk of parts) {
+              const line = chunk
+                .split(/\r?\n/g)
+                .find((l) => l.startsWith("data:"));
+              if (!line) continue;
+              const payload = line.slice(5).trim();
+              if (payload === "[DONE]") continue;
+
+              try {
+                const j = JSON.parse(payload);
+                ui.inspector.textContent = `SSE chunk:\n${payload}`;
+
+                const delta =
+                  j.delta || j.choices?.[0]?.delta?.content || j.content || "";
+                if (delta) {
+                  acc += delta;
+                  if (!botBubble) {
+                    botBubble = bubble("bot", md(acc));
+                  } else {
+                    // update bubble
+                    botBubble.firstChild.replaceWith(md(acc));
+                  }
+                }
+
+                if (j.tokens) {
+                  state.tokenCount = j.tokens;
+                  updateHud();
+                }
+              } catch {
+                /* ignore non-JSON lines */
+              }
+            }
+          }
+
+          // finalize
+          if (acc) {
+            state.messages.push({ role: "assistant", content: acc });
+          }
+        }
+
+        async function safeText(res) {
+          try {
+            return await res.text();
+          } catch {
+            return "(no body)";
+          }
+        }
+
+        // ---------- Hook up ----------
+        ui.send.addEventListener("click", (e) => {
           e.preventDefault();
           sendMessage();
-        }
-      });
-      on(ui.clear, "click", () => {
-        ui.list.innerHTML = "";
-        state.tokens = 0;
-        ui.tok.textContent = "0";
-        ui.tps.textContent = "0";
-      });
-      on(ui.reset, "click", () => {
-        setSID(Math.random().toString(36).slice(2, 10));
+        });
+        ui.prompt.focus();
+        restore();
         persist();
-        ui.list.innerHTML = "";
-        state.tokens = 0;
-        ui.tok.textContent = "0";
-        ui.tps.textContent = "0";
-      });
-      on(ui.export, "click", () => {
-        let text = "";
-        ui.list.querySelectorAll(".bubble").forEach((b) => {
-          const who =
-            b.querySelector(".role")?.textContent?.split("•")[0].trim() || "";
-          const msg = b.querySelector(".content")?.textContent || "";
-          text += `${who}: ${msg}\n\n`;
-        });
-        const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
-        const url = URL.createObjectURL(blob);
-        const a = Object.assign(document.createElement("a"), {
-          href: url,
-          download: `keilani_${dayjs().format("YYYYMMDD_HHmmss")}.txt`,
-        });
-        a.click();
-        setTimeout(() => URL.revokeObjectURL(url), 500);
-      });
 
-      // small convenience: auto-focus prompt
-      ui.txt.focus();
+        // Initial hello? (optional)
+        // bubble('bot', textNode('Ready when you are.'));
+
+        // global hljs line numbers or theme is already loaded by CSS file
+        try {
+          hljs.configure({ ignoreUnescapedHTML: true });
+        } catch {}
+      })();
     </script>
   </body>
 </html>
