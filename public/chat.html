@@ -1,391 +1,312 @@
 <!doctype html>
 <html lang="en">
-  <head>
-    <meta charset="utf-8" />
-    <title>Keilani • Chat Streaming</title>
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
-    <style>
-      :root {
-        --bg: #0a0a0a;
-        --panel: #111;
-        --ink: #eee;
-        --muted: #aaa;
-        --field: #222;
-        --hair: #333;
-        --violet: #6c2bd9;
-      }
-      * {
-        box-sizing: border-box;
-      }
-      body {
-        margin: 0;
-        font-family:
-          system-ui,
-          -apple-system,
-          Segoe UI,
-          Roboto,
-          Inter,
-          Arial,
-          sans-serif;
-        background: var(--bg);
-        color: var(--ink);
-        display: flex;
-        flex-direction: column;
-        height: 100vh;
-      }
-      header {
-        background: var(--panel);
-        padding: 10px;
-        display: flex;
-        align-items: center;
-        gap: 10px;
-        flex-wrap: wrap;
-        border-bottom: 1px solid var(--hair);
-      }
-      header input,
-      header select {
-        background: var(--field);
-        border: 1px solid var(--hair);
-        color: var(--ink);
-        padding: 6px 8px;
-        border-radius: 6px;
-        outline: none;
-        min-width: 120px;
-      }
-      header button {
-        background: #2a2a2a;
-        border: 1px solid #3a3a3a;
-        color: var(--ink);
-        padding: 6px 10px;
-        border-radius: 6px;
-        cursor: pointer;
-      }
-      #sessionTag {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        padding: 6px 8px;
-        border-radius: 6px;
-        background: #151515;
-        border: 1px solid var(--hair);
-        color: var(--muted);
-        user-select: text;
-      }
-      #copySid {
-        padding: 4px 8px;
-        font-size: 12px;
-      }
-      #chat {
-        flex: 1;
-        overflow-y: auto;
-        padding: 16px;
-        display: flex;
-        flex-direction: column;
-        gap: 8px;
-      }
-      .msg {
-        padding: 10px 12px;
-        border-radius: 10px;
-        max-width: 82%;
-        white-space: pre-wrap;
-        word-break: break-word;
-      }
-      .you {
-        background: #222;
-        align-self: flex-end;
-      }
-      .keilani {
-        background: #151528;
-        border-left: 3px solid #8a2be2;
-        align-self: flex-start;
-      }
-      .error {
-        background: #331111;
-        border-left: 3px solid #e22;
-        color: #f99;
-      }
-      #status {
-        font-size: 12px;
-        color: var(--muted);
-        padding: 6px 10px;
-        background: var(--panel);
-        border-top: 1px solid var(--hair);
-      }
-      #composer {
-        display: flex;
-        gap: 8px;
-        padding: 10px;
-        background: var(--panel);
-        border-top: 1px solid var(--hair);
-      }
-      #prompt {
-        flex: 1;
-        padding: 10px;
-        border-radius: 6px;
-        border: 1px solid var(--hair);
-        background: var(--field);
-        color: var(--ink);
-        min-height: 46px;
-      }
-      #send {
-        background: var(--violet);
-        color: #fff;
-        border: 0;
-        padding: 0 16px;
-        border-radius: 8px;
-        min-width: 78px;
-      }
-    </style>
-  </head>
-  <body>
-    <header>
-      <span style="color: #0f0">●</span>
-      <strong>Keilani Chat • Streaming</strong>
-      <select id="model">
-        <option value="gpt-5">gpt-5</option>
-        <option value="gpt-4.1">gpt-4.1</option>
-      </select>
-      <input
-        id="api"
-        value="https://api.keilani.ai/api/chat"
-        title="API endpoint"
-        style="flex: 1; min-width: 260px"
-      />
-      <input
-        id="token"
-        placeholder="Client Token (optional)"
-        title="Client Token (optional)"
-      />
-      <button id="save" title="Save API, token, model to localStorage">
-        Save
-      </button>
-      <button id="export" title="Export chat to .txt">Export .txt</button>
-      <button id="clear" title="Clear chat only">Clear</button>
-      <button
-        id="reset"
-        title="Reset everything (API, token, model, history, session)"
-      >
-        Reset Session
-      </button>
+<head>
+<meta charset="utf-8" />
+<meta
+  name="viewport"
+  content="width=device-width, initial-scale=1, maximum-scale=1, viewport-fit=cover"
+/>
+<title>Keilani • Chat Streaming</title>
+<style>
+  :root {
+    --bg:#0b0d12; --fg:#e7e9ee; --muted:#98a2b3; --panel:#10131a; --panel2:#0f1218;
+    --acc:#6d5efc; --acc-2:#8f87ff; --err:#ff4d4d; --ok:#2ecc71; --chip:#1b2030;
+    --br:12px;
+  }
+  html,body{height:100%;}
+  body{margin:0; background:var(--bg); color:var(--fg); font:14px/1.45 system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Helvetica, Arial, "Apple Color Emoji", "Segoe UI Emoji";}
+  .bar{display:flex; gap:.5rem; align-items:center; padding:.75rem; background:var(--panel); position:sticky; top:0; z-index:5; border-bottom:1px solid #161a23}
+  .brand{display:flex; align-items:center; gap:.5rem; font-weight:600}
+  .dot{width:8px;height:8px;border-radius:999px;background:var(--ok);box-shadow:0 0 0 2px rgba(46,204,113,.15)}
+  select, input[type=text]{height:36px; background:var(--panel2); border:1px solid #202634; border-radius:10px; color:var(--fg); padding:0 .6rem; outline:none}
+  select:focus, input[type=text]:focus{border-color:#2a3350}
+  .btn{height:36px; border:1px solid #242b3a; background:#131827; color:var(--fg); border-radius:10px; padding:0 .8rem; cursor:pointer}
+  .btn:hover{background:#171d2e}
+  .btn.primary{background:var(--acc); border-color:var(--acc); color:#fff}
+  .btn.primary:hover{background:var(--acc-2)}
+  .btn.ghost{background:transparent; border-color:#2a3150}
+  .grow{flex:1 1 auto}
+  .small{font-size:12px;color:var(--muted)}
+  .chip{background:var(--chip); color:#c8d1e6; padding:.2rem .5rem; border-radius:999px; font-size:12px}
+  .wrap{max-width:1080px; margin:0 auto; padding:1rem; display:flex; flex-direction:column; gap:1rem}
+  .log{display:flex; flex-direction:column; gap:.75rem; min-height:48dvh}
+  .bubble{background:var(--panel); border:1px solid #161b26; border-radius:14px; padding:1rem; white-space:pre-wrap}
+  .bubble.you{background:#0f1422; border-color:#1b2131}
+  .row{display:flex; gap:.75rem}
+  textarea{background:var(--panel2); border:1px solid #202634; border-radius:12px; color:var(--fg); padding:.8rem; resize:vertical; min-height:64px; max-height:40dvh; outline:none}
+  textarea:focus{border-color:#2a3350}
+  .composer{display:flex; gap:.75rem; align-items:flex-end; position:sticky; bottom:0; padding-bottom:.5rem; background:linear-gradient(180deg, rgba(11,13,18,0) 0%, rgba(11,13,18,1) 40%)}
+  .err{background:#2a0f14; border:1px solid #4a141a; color:#ffb0b0; border-radius:12px; padding:.8rem}
+  .hidden{display:none}
+  .right{margin-left:auto}
+  .kbd{font:12px/1.1 ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace; background:#121724; border:1px solid #222a3e; padding:.1rem .35rem; border-radius:6px; color:#b9c1de}
+  .meta{display:flex; align-items:center; gap:.5rem; color:var(--muted)}
+</style>
+</head>
+<body>
+  <div class="bar">
+    <div class="brand"><span class="dot"></span> Keilani Chat • <span class="small">Streaming</span></div>
 
-      <!-- Session tag -->
-      <span id="sessionTag" title="Current Session ID">
-        SID: <code id="sidText">–</code>
-        <button id="copySid">Copy</button>
-      </span>
-    </header>
+    <select id="model" title="Model">
+      <option value="gpt-5" selected>gpt-5</option>
+      <option value="gpt-4.1">gpt-4.1</option>
+      <option value="gpt-4o-mini">gpt-4o-mini</option>
+    </select>
 
-    <div id="chat"></div>
-    <div id="status">Tokens: 0 • 0 t/s • SID: –</div>
+    <input id="api" class="grow" type="text" placeholder="https://api.keilani.ai/api/chat" />
 
-    <form id="composer">
-      <textarea
-        id="prompt"
-        placeholder="Type your message… (Shift+Enter for newline)"
-      ></textarea>
-      <button id="send">Send ↵</button>
-    </form>
+    <input id="token" type="text" placeholder="Client Token (optional)" style="width:280px" />
 
-    <script>
-      /* ------------------------ session utils ------------------------ */
-      function generateSessionId() {
-        // Prefer crypto.randomUUID when available
-        if (window.crypto?.randomUUID) return crypto.randomUUID();
-        // Fallback: RFC4122-ish v4
-        const rnd = (n) =>
-          Array.from({ length: n }, () =>
-            ((Math.random() * 16) | 0).toString(16),
-          ).join("");
-        return `${rnd(8)}-${rnd(4)}-4${rnd(3)}-a${rnd(3)}-${rnd(12)}`;
-      }
-      function loadSession() {
-        let sid = localStorage.getItem("SESSION_ID");
-        if (!sid) {
-          sid = generateSessionId();
-          localStorage.setItem("SESSION_ID", sid);
-          localStorage.setItem("SESSION_STARTED_AT", new Date().toISOString());
-        }
-        return sid;
-      }
-      function setSidUI(sid) {
-        document.getElementById("sidText").textContent = sid.slice(0, 8) + "…";
-        document.getElementById("status").textContent =
-          `Tokens: 0 • 0 t/s • SID: ${sid.slice(0, 8)}…`;
-      }
+    <button id="save" class="btn">Save</button>
+    <button id="export" class="btn">Export .txt</button>
+    <button id="clear" class="btn">Clear</button>
+  </div>
 
-      /* ------------------------ state restore ------------------------ */
-      const chatEl = document.getElementById("chat");
-      const statusEl = document.getElementById("status");
-      const promptEl = document.getElementById("prompt");
-      const form = document.getElementById("composer");
+  <div class="wrap">
+    <div id="err" class="err hidden"></div>
 
-      document.getElementById("api").value =
-        localStorage.getItem("API") || "https://api.keilani.ai/api/chat";
-      document.getElementById("token").value =
-        localStorage.getItem("CLIENT_TOKEN") || "";
-      document.getElementById("model").value =
-        localStorage.getItem("MODEL") || "gpt-5";
-      chatEl.innerHTML = localStorage.getItem("CHAT_HISTORY") || "";
+    <div class="log" id="log"></div>
 
-      const SESSION_ID = loadSession();
-      setSidUI(SESSION_ID);
+    <div class="meta">
+      <span id="tokChip" class="chip">Tokens: 0 • 0 t/s</span>
+      <span id="sidChip" class="chip right">SID: —</span>
+    </div>
 
-      /* ------------------------ header controls ---------------------- */
-      document.getElementById("save").onclick = () => {
-        localStorage.setItem(
-          "API",
-          document.getElementById("api").value.trim(),
-        );
-        localStorage.setItem(
-          "CLIENT_TOKEN",
-          document.getElementById("token").value.trim(),
-        );
-        localStorage.setItem("MODEL", document.getElementById("model").value);
-        alert("Saved!");
-      };
-      document.getElementById("export").onclick = () => {
-        const blob = new Blob([chatEl.innerText], { type: "text/plain" });
-        const a = Object.assign(document.createElement("a"), {
-          href: URL.createObjectURL(blob),
-          download: `chat_${(localStorage.getItem("SESSION_ID") || "sid").slice(0, 8)}.txt`,
-        });
-        a.click();
-        URL.revokeObjectURL(a.href);
-      };
-      document.getElementById("clear").onclick = () => {
-        chatEl.innerHTML = "";
-        localStorage.removeItem("CHAT_HISTORY");
-      };
-      document.getElementById("reset").onclick = () => {
-        if (
-          !confirm(
-            "Reset session?\nThis clears API, token, model, history, and creates a new session ID.",
-          )
-        )
-          return;
-        localStorage.clear();
-        location.reload();
-      };
-      document.getElementById("copySid").onclick = async () => {
-        const sid = localStorage.getItem("SESSION_ID") || SESSION_ID;
-        try {
-          await navigator.clipboard.writeText(sid);
-          document.getElementById("copySid").textContent = "Copied!";
-          setTimeout(
-            () => (document.getElementById("copySid").textContent = "Copy"),
-            900,
-          );
-        } catch {
-          alert("Could not copy SID");
-        }
-      };
+    <div class="composer">
+      <textarea id="prompt" class="grow" placeholder="Type your message…  (Shift+Enter for newline)"></textarea>
+      <div style="display:flex; flex-direction:column; gap:.5rem;">
+        <label class="small"><input id="stream" type="checkbox" checked /> Stream</label>
+        <label class="small"><input id="sse" type="checkbox" checked /> Expect SSE</label>
+      </div>
+      <button id="send" class="btn primary" style="height:48px">Send ↵</button>
+    </div>
 
-      /* --------------------------- send ------------------------------ */
-      async function sendMessage(text) {
-        const api = document.getElementById("api").value.trim();
-        const token = document.getElementById("token").value.trim();
-        const model = document.getElementById("model").value;
-        const sid = localStorage.getItem("SESSION_ID") || SESSION_ID;
+    <div class="small">Tip: <span class="kbd">Enter</span> to send • <span class="kbd">Shift</span>+<span class="kbd">Enter</span> for newline • Your config persists locally</div>
+  </div>
 
-        // user bubble
-        const you = document.createElement("div");
-        you.className = "msg you";
-        you.textContent = text;
-        chatEl.appendChild(you);
+<script>
+(() => {
+  const $ = (s) => document.querySelector(s);
+  const model = $('#model');
+  const api = $('#api');
+  const token = $('#token');
+  const saveBtn = $('#save');
+  const exportBtn = $('#export');
+  const clearBtn = $('#clear');
+  const promptEl = $('#prompt');
+  const sendBtn = $('#send');
+  const streamEl = $('#stream');
+  const sseEl = $('#sse');
+  const log = $('#log');
+  const errBox = $('#err');
+  const sidChip = $('#sidChip');
+  const tokChip = $('#tokChip');
 
-        // bot bubble
-        const bot = document.createElement("div");
-        bot.className = "msg keilani";
-        chatEl.appendChild(bot);
-        chatEl.scrollTop = chatEl.scrollHeight;
+  // ---- session + persistence ------------------------------------------------
+  const SID = crypto.randomUUID().slice(0, 8);
+  sidChip.textContent = `SID: ${SID}`;
 
-        // persist history
-        localStorage.setItem("CHAT_HISTORY", chatEl.innerHTML);
+  const LS = {
+    get k() { return 'kln.chat.v1'; },
+    load() {
+      try { return JSON.parse(localStorage.getItem(this.k) || '{}'); }
+      catch { return {}; }
+    },
+    save(v) { localStorage.setItem(this.k, JSON.stringify(v)); }
+  };
 
-        try {
-          const headers = {
-            "Content-Type": "application/json",
-            "X-Session-Id": sid,
-          };
-          if (token) headers["Authorization"] = `Bearer ${token}`;
+  const conf = Object.assign({
+    model: 'gpt-5',
+    api: 'https://api.keilani.ai/api/chat',
+    token: '',
+    stream: true,
+    sse: true
+  }, LS.load());
 
-          const body = {
-            model,
-            stream: true,
-            // OpenAI Chat format
-            messages: [{ role: "user", content: text }],
-          };
+  model.value = conf.model;
+  api.value = conf.api;
+  token.value = conf.token || '';
+  streamEl.checked = !!conf.stream;
+  sseEl.checked = !!conf.sse;
 
-          // gpt-5: many providers ignore/lock temperature; we omit it here intentionally
+  saveBtn.onclick = () => {
+    LS.save({
+      model: model.value,
+      api: api.value.trim(),
+      token: token.value.trim(),
+      stream: streamEl.checked,
+      sse: sseEl.checked
+    });
+    flash(`Saved.`, 'ok');
+  };
 
-          const res = await fetch(api, {
-            method: "POST",
-            headers,
-            body: JSON.stringify(body),
-          });
+  exportBtn.onclick = () => {
+    const text = [...log.querySelectorAll('.bubble')].map(n => n.textContent).join('\n\n---\n\n');
+    const blob = new Blob([text], { type: 'text/plain' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url; a.download = `keilani-chat-${new Date().toISOString().slice(0,19)}.txt`;
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  };
 
-          if (!res.ok || !res.body) {
-            throw new Error(`HTTP ${res.status}`);
-          }
+  clearBtn.onclick = () => { log.innerHTML = ''; };
 
-          const reader = res.body.getReader();
-          const decoder = new TextDecoder();
-          let buffer = "";
-          let tokens = 0;
-          const start = Date.now();
+  function flash(msg, kind='error') {
+    errBox.textContent = msg;
+    errBox.classList.remove('hidden');
+    errBox.style.background = kind === 'ok' ? '#0f1d15' : '#2a0f14';
+    errBox.style.borderColor = kind === 'ok' ? '#184d33' : '#4a141a';
+    setTimeout(() => errBox.classList.add('hidden'), 3500);
+  }
 
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-            buffer += decoder.decode(value, { stream: true });
+  // ---- UI helpers -----------------------------------------------------------
+  function addBubble(text, who='you') {
+    const b = document.createElement('div');
+    b.className = 'bubble ' + (who === 'you' ? 'you' : '');
+    b.textContent = text;
+    log.appendChild(b);
+    b.scrollIntoView({ behavior: 'smooth', block: 'end' });
+  }
 
-            // Server-Sent Events parsing
-            let parts = buffer.split("\n\n");
-            buffer = parts.pop();
+  function setErrorBanner(text = '') {
+    if (!text) { errBox.classList.add('hidden'); return; }
+    errBox.textContent = text;
+    errBox.classList.remove('hidden');
+  }
 
-            for (const chunk of parts) {
-              if (!chunk.startsWith("data: ")) continue;
-              const payload = chunk.slice(6).trim();
-              if (payload === "[DONE]") continue;
-              try {
-                const json = JSON.parse(payload);
-                // Support both OpenAI chat delta and bare text chunk
-                const delta =
-                  json?.choices?.[0]?.delta?.content ?? json?.content ?? "";
-                if (delta) {
-                  bot.textContent += delta;
-                  chatEl.scrollTop = chatEl.scrollHeight;
-                  tokens += delta.split(/\s+/).length;
-                  const elapsed = Math.max(0.001, (Date.now() - start) / 1000);
-                  statusEl.textContent = `Tokens: ${tokens} • ${(tokens / elapsed).toFixed(1)} t/s • SID: ${sid.slice(0, 8)}…`;
-                  localStorage.setItem("CHAT_HISTORY", chatEl.innerHTML);
-                }
-              } catch {
-                /* ignore parse errors for non-JSON keepalives */
-              }
+  // ---- Build messages[] properly -------------------------------------------
+  function buildMessages(userText) {
+    // Minimal, safe system prompt (keeps payload shape correct)
+    const messages = [
+      { role: 'system', content: 'You are Keilani, a helpful AI companion. Keep answers succinct unless asked.' },
+      { role: 'user', content: userText }
+    ];
+    return messages;
+  }
+
+  // ---- Streaming with fetch + SSE ------------------------------------------
+  async function streamChat() {
+    setErrorBanner('');
+
+    const text = promptEl.value.trim();
+    if (!text) return;
+
+    // UI updates
+    addBubble(text, 'you');
+    promptEl.value = '';
+    sendBtn.disabled = true;
+
+    const payload = {
+      model: model.value,
+      stream: !!streamEl.checked,
+      messages: buildMessages(text)
+    };
+
+    const headers = { 'Content-Type': 'application/json' };
+    const t = token.value.trim();
+    if (t) headers['Authorization'] = `Bearer ${t}`;
+
+    let resp;
+    try {
+      resp = await fetch(api.value.trim(), {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload)
+      });
+    } catch (e) {
+      sendBtn.disabled = false;
+      flash(`Network error: ${e.message}`);
+      return;
+    }
+
+    // Non-OK => show server’s text
+    if (!resp.ok) {
+      const errText = await resp.text().catch(()=>String(resp.status));
+      addBubble(`[Error] HTTP ${resp.status}\n\n${errText}`, 'bot');
+      sendBtn.disabled = false;
+      return;
+    }
+
+    // If streaming, read as SSE; otherwise parse JSON once
+    if (streamEl.checked && (sseEl.checked || resp.headers.get('content-type')?.includes('text/event-stream'))) {
+      const reader = resp.body.getReader();
+      const dec = new TextDecoder('utf-8');
+      let acc = '';
+      const bot = document.createElement('div');
+      bot.className = 'bubble';
+      log.appendChild(bot);
+
+      const t0 = performance.now();
+      let tokens = 0;
+
+      while (true) {
+        const { value, done } = await reader.read();
+        if (done) break;
+        const chunk = dec.decode(value, { stream: true });
+        // Basic SSE framing: lines starting with "data:"
+        const lines = (acc + chunk).split('\n');
+        acc = lines.pop() || '';
+        for (const line of lines) {
+          const trimmed = line.trim();
+          if (!trimmed.startsWith('data:')) continue;
+          const data = trimmed.slice(5).trim();
+          if (data === '[DONE]') break;
+          try {
+            const obj = JSON.parse(data);
+            // Two possible shapes:
+            // 1) Our proxy forwards OpenAI SSE frames as { delta: "..." }
+            // 2) Or direct chunk has { choices: [{ delta: { content } }] }
+            let delta =
+              obj?.delta ??
+              obj?.choices?.[0]?.delta?.content ??
+              obj?.choices?.[0]?.text ??
+              obj?.content ??
+              '';
+            if (typeof delta !== 'string') delta = '';
+            if (delta) {
+              bot.textContent += delta;
+              tokens += 1;
             }
-          }
-        } catch (err) {
-          bot.className = "msg error";
-          bot.textContent = "[Error] " + (err?.message || String(err));
+          } catch { /* ignore parse errors */ }
         }
+        bot.scrollIntoView({ behavior: 'smooth', block: 'end' });
+        const dt = (performance.now() - t0) / 1000;
+        tokChip.textContent = `Tokens: ${tokens} • ${(tokens/dt||0).toFixed(1)} t/s`;
       }
+      sendBtn.disabled = false;
+      return;
+    }
 
-      /* --------------------------- form ------------------------------ */
-      form.addEventListener("submit", (e) => {
-        e.preventDefault();
-        const text = promptEl.value.trim();
-        if (!text) return;
-        promptEl.value = "";
-        sendMessage(text);
-      });
-      // Shift+Enter → newline, Enter → submit
-      promptEl.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" && !e.shiftKey) {
-          e.preventDefault();
-          form.requestSubmit?.();
-        }
-      });
-    </script>
-  </body>
+    // Non-stream JSON
+    try {
+      const data = await resp.json();
+      const content =
+        data?.choices?.[0]?.message?.content ??
+        data?.message ??
+        JSON.stringify(data, null, 2);
+      addBubble(content, 'bot');
+    } catch {
+      addBubble(await resp.text(), 'bot');
+    }
+    sendBtn.disabled = false;
+  }
+
+  // ---- Keyboard: Enter to send, Shift+Enter newline ------------------------
+  promptEl.addEventListener('keydown', (e) => {
+    if (e.key === 'Enter' && !e.shiftKey) {
+      e.preventDefault();
+      streamChat();
+    }
+  });
+  sendBtn.onclick = streamChat;
+
+  // ---- Initial “Saved” hint once -------------------------------------------
+  if (!LS.load().__seenHint) {
+    flash('Fields persist to localStorage. Click “Save” after you change API or token.', 'ok');
+    const v = LS.load(); v.__seenHint = true; LS.save(v);
+  }
+})();
+</script>
+</body>
 </html>
