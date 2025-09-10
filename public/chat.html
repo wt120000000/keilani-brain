@@ -1,0 +1,472 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Keilani • Chat (Streaming)</title>
+    <style>
+      :root{--bg:#0b0c10;--panel:#121419;--muted:#9aa0ae;--text:#eef1f7;--accent:#7c3aed;--accent2:#22c55e;--danger:#ef4444;--border:#1f2430;--shadow:0 8px 24px rgba(0,0,0,.35)}
+      *{box-sizing:border-box}html,body{height:100%}
+      body{margin:0;background:linear-gradient(180deg,#0a0b0f 0%,#0b0c10 100%);color:var(--text);font-family:ui-sans-serif,system-ui,-apple-system,Segoe UI,Roboto,Arial,"Apple Color Emoji","Segoe UI Emoji")}
+      .app{display:grid;grid-template-rows:auto 1fr auto;min-height:100dvh}
+      header{position:sticky;top:0;z-index:10;display:flex;align-items:center;gap:12px;justify-content:space-between;padding:12px 16px;background:rgba(12,14,18,.7);backdrop-filter:blur(8px);border-bottom:1px solid var(--border)}
+      .brand{display:flex;align-items:center;gap:10px;font-weight:700}
+      .dot{width:10px;height:10px;border-radius:50%;background:var(--accent2);box-shadow:0 0 12px var(--accent2)}
+      .controls{display:flex;gap:10px;flex-wrap:wrap;align-items:center}
+      .select,.input,.btn{background:var(--panel);border:1px solid var(--border);color:var(--text);border-radius:10px;padding:10px 12px;font-size:14px}
+      .btn{cursor:pointer;transition:.15s ease;box-shadow:var(--shadow)}
+      .btn.primary{background:linear-gradient(180deg,#7c3aed,#5521b5);border-color:#4c1d95}
+      .btn.ghost{background:transparent;border-color:var(--border)}
+      .btn:disabled{opacity:.6;cursor:not-allowed}
+      input[type="range"]{accent-color:#7c3aed}
+      .spinner{width:14px;height:14px;border-radius:50%;border:2px solid #a78bfa;border-top-color:transparent;display:inline-block;animation:spin .9s linear infinite}
+      @keyframes spin{to{transform:rotate(360deg)}}
+
+      main{padding:22px}
+      .transcript{max-width:960px;margin:0 auto;display:grid;gap:14px}
+      .msg{background:var(--panel);border:1px solid var(--border);border-radius:16px;padding:14px 16px;box-shadow:var(--shadow)}
+      .msg.user{border-left:3px solid #4ade80}.msg.assistant{border-left:3px solid #7c3aed}
+      .meta{font-size:12px;color:var(--muted);margin-bottom:6px}
+      .content{white-space:pre-wrap;line-height:1.55;font-size:15px}
+
+      .tokenbar{position:sticky;bottom:84px;inset-inline:0;display:flex;justify-content:center;pointer-events:none}
+      .tokenchip{pointer-events:auto;background:rgba(124,58,237,.15);border:1px solid #4c1d95;color:#d6ccff;padding:6px 10px;border-radius:999px;font-size:12px;display:flex;gap:10px;align-items:center}
+
+      footer{position:sticky;bottom:0;z-index:10;background:rgba(12,14,18,.7);backdrop-filter:blur(8px);border-top:1px solid var(--border)}
+      .composer{max-width:960px;margin:0 auto;padding:12px 16px;display:grid;gap:10px}
+      .row{display:grid;grid-template-columns:1fr auto;gap:10px}
+      textarea.input{min-height:54px;resize:vertical}
+      .hint{font-size:12px;color:var(--muted)}
+      .foot{font-size:11px;color:#7f8494;text-align:center;padding:6px 0}
+      #toast{position:fixed;right:16px;bottom:16px;background:#1a1417;border:1px solid #7f1d1d;color:#fecaca;padding:10px 12px;border-radius:12px;box-shadow:var(--shadow);max-width:360px;display:none}
+    </style>
+  </head>
+  <body>
+    <div class="app">
+      <header>
+        <div class="brand">
+          <span class="dot"></span> Keilani Chat • Streaming
+        </div>
+        <div class="controls">
+          <label
+            >Model
+            <select id="model" class="select">
+              <option value="gpt-5">gpt-5</option>
+              <option value="gpt-5-mini">gpt-5-mini</option>
+              <option value="gpt-4.1">gpt-4.1</option>
+            </select>
+          </label>
+          <label
+            >Temp
+            <input
+              id="temp"
+              type="range"
+              min="0"
+              max="2"
+              step="0.1"
+              value="1.0"
+            />
+            <span id="tempVal" style="font-size: 12px; color: #9aa0ae"
+              >1.0</span
+            >
+          </label>
+          <label
+            >API
+            <input
+              id="api"
+              class="input"
+              style="width: 300px"
+              placeholder="https://api.keilani.ai/api/chat"
+            />
+          </label>
+          <label
+            >Client Token
+            <span style="display: inline-flex; gap: 6px; align-items: center">
+              <input
+                id="token"
+                class="input"
+                style="width: 220px"
+                placeholder="Optional"
+                type="password"
+              />
+              <button
+                id="toggleTokenVis"
+                class="btn ghost"
+                type="button"
+                title="Show/Hide"
+              >
+                👁️
+              </button>
+            </span>
+          </label>
+          <button id="toggleHUD" class="btn ghost" type="button">Tokens</button>
+          <button id="saveCfg" class="btn ghost" type="button">Save</button>
+          <button id="exportTxt" class="btn ghost" type="button">
+            Export .txt
+          </button>
+          <button id="clearAll" class="btn ghost" type="button">Clear</button>
+        </div>
+      </header>
+
+      <main>
+        <div id="transcript" class="transcript" aria-live="polite"></div>
+        <div class="tokenbar">
+          <div id="tokenchip" class="tokenchip" hidden>
+            <span>Tokens: <strong id="tokCount">0</strong></span>
+            <span>•</span>
+            <span id="rate">0 t/s</span>
+          </div>
+        </div>
+      </main>
+
+      <footer>
+        <form id="composer" class="composer" onsubmit="return false;">
+          <div class="row">
+            <textarea
+              id="prompt"
+              class="input"
+              placeholder="Type your message… (Shift+Enter for newline)"
+            ></textarea>
+            <button id="send" class="btn primary" type="button">
+              <span id="sendLabel">Send ↵</span>
+              <span id="sendSpin" class="spinner" style="display: none"></span>
+            </button>
+          </div>
+          <div
+            style="
+              display: flex;
+              align-items: center;
+              justify-content: space-between;
+            "
+          >
+            <span class="hint"
+              >Tip: ⌘/Ctrl+K to focus input • Your config persists locally</span
+            >
+            <span style="display: flex; gap: 8px; align-items: center">
+              <label style="font-size: 12px; color: #9aa0ae"
+                ><input type="checkbox" id="stream" checked /> Stream</label
+              >
+              <label style="font-size: 12px; color: #9aa0ae"
+                ><input type="checkbox" id="sse" checked /> Expect SSE</label
+              >
+            </span>
+          </div>
+          <div class="foot">UI v2025.09.10.2</div>
+        </form>
+      </footer>
+    </div>
+
+    <div id="toast"></div>
+
+    <script>
+      // ===== helpers =====
+      const $ = (s) => document.querySelector(s);
+      const el = (t, c) => {
+        const n = document.createElement(t);
+        if (c) n.className = c;
+        return n;
+      };
+      const toastEl = $("#toast");
+      const toast = (msg) => {
+        toastEl.textContent = msg;
+        toastEl.style.display = "block";
+        clearTimeout(toastEl._t);
+        toastEl._t = setTimeout(() => (toastEl.style.display = "none"), 3200);
+      };
+
+      // ===== elements =====
+      const apiInput = $("#api"),
+        modelSel = $("#model"),
+        temp = $("#temp"),
+        tempVal = $("#tempVal");
+      const streamChk = $("#stream"),
+        sseChk = $("#sse"),
+        tokenInput = $("#token");
+      const transcript = $("#transcript"),
+        promptBox = $("#prompt");
+      const sendBtn = $("#send"),
+        sendLabel = $("#sendLabel"),
+        sendSpin = $("#sendSpin");
+      const tokenChip = $("#tokenchip"),
+        tokCountEl = $("#tokCount"),
+        rateEl = $("#rate");
+
+      // ===== init & persistence =====
+      function loadCfg() {
+        apiInput.value =
+          localStorage.getItem("API_URL") || "https://api.keilani.ai/api/chat";
+        modelSel.value = localStorage.getItem("MODEL") || "gpt-5";
+        temp.value = localStorage.getItem("TEMP") || "1.0";
+        tempVal.textContent = temp.value;
+        streamChk.checked = JSON.parse(
+          localStorage.getItem("STREAM") || "true",
+        );
+        sseChk.checked = JSON.parse(
+          localStorage.getItem("EXPECT_SSE") || "true",
+        );
+        tokenInput.value = localStorage.getItem("CLIENT_TOKEN") || "";
+        syncTempControl();
+      }
+      function saveCfg() {
+        localStorage.setItem("API_URL", apiInput.value.trim());
+        localStorage.setItem("MODEL", modelSel.value);
+        localStorage.setItem("TEMP", temp.value);
+        localStorage.setItem("STREAM", streamChk.checked);
+        localStorage.setItem("EXPECT_SSE", sseChk.checked);
+        localStorage.setItem("CLIENT_TOKEN", tokenInput.value.trim());
+        toast("Config saved.");
+      }
+      $("#saveCfg").addEventListener("click", saveCfg);
+      $("#toggleTokenVis").addEventListener(
+        "click",
+        () =>
+          (tokenInput.type =
+            tokenInput.type === "password" ? "text" : "password"),
+      );
+      temp.addEventListener("input", () => (tempVal.textContent = temp.value));
+      modelSel.addEventListener("change", () => {
+        syncTempControl();
+        localStorage.setItem("MODEL", modelSel.value);
+      });
+      loadCfg();
+
+      // ===== token HUD =====
+      let _tok = 0,
+        _t0 = 0;
+      const startHUD = () => {
+        tokenChip.hidden = false;
+        _tok = 0;
+        tokCountEl.textContent = "0";
+        _t0 = performance.now();
+      };
+      const bumpHUD = (n = 1) => {
+        _tok += n;
+        tokCountEl.textContent = String(_tok);
+        const dt = (performance.now() - _t0) / 1000;
+        if (dt > 0.2)
+          rateEl.textContent = Math.round((_tok / dt) * 10) / 10 + " t/s";
+      };
+      const stopHUD = () => setTimeout(() => (tokenChip.hidden = true), 700);
+      $("#toggleHUD").addEventListener(
+        "click",
+        () => (tokenChip.hidden = !tokenChip.hidden),
+      );
+
+      // ===== transcript =====
+      const addMessage = (role, text) => {
+        const wrap = el("div", "msg " + role);
+        const meta = el("div", "meta");
+        meta.textContent =
+          (role === "user" ? "You" : "Keilani") +
+          " • " +
+          new Date().toLocaleTimeString();
+        const content = el("div", "content");
+        content.textContent = text || "";
+        wrap.append(meta, content);
+        transcript.appendChild(wrap);
+        wrap._content = content;
+        window.scrollTo({
+          top: document.body.scrollHeight,
+          behavior: "smooth",
+        });
+        return wrap;
+      };
+      $("#exportTxt").addEventListener("click", () => {
+        const lines = [...document.querySelectorAll(".msg")]
+          .map((m) => {
+            const who = m.classList.contains("user") ? "You" : "Keilani";
+            const text = m.querySelector(".content").textContent;
+            return `${who}:\n${text}\n`;
+          })
+          .join("\n");
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(new Blob([lines], { type: "text/plain" }));
+        a.download = "chat_" + Date.now() + ".txt";
+        a.click();
+      });
+      $("#clearAll").addEventListener("click", () => {
+        transcript.innerHTML = "";
+        toast("Cleared");
+      });
+
+      // ===== temp control behavior (gpt-5 = fixed 1.0) =====
+      function syncTempControl() {
+        if (modelSel.value === "gpt-5") {
+          temp.disabled = true;
+          tempVal.textContent = "1.0 (fixed)";
+        } else {
+          temp.disabled = false;
+          tempVal.textContent = temp.value;
+        }
+      }
+
+      // ===== token access =====
+      const getClientToken = () =>
+        (tokenInput.value && tokenInput.value.trim()) ||
+        localStorage.getItem("CLIENT_TOKEN") ||
+        "";
+
+      // ===== streaming helpers =====
+      async function streamSSE(reader, write) {
+        const dec = new TextDecoder();
+        let buf = "";
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buf += dec.decode(value, { stream: true });
+          let i;
+          while ((i = buf.indexOf("\n\n")) !== -1) {
+            const frame = buf.slice(0, i);
+            buf = buf.slice(i + 2);
+            for (const line of frame.split("\n")) {
+              if (!line.startsWith("data:")) continue;
+              const payload = line.slice(5).trim();
+              if (!payload || payload === "[DONE]") continue;
+              try {
+                const j = JSON.parse(payload);
+                const delta = j?.delta ?? j?.content ?? "";
+                if (delta) {
+                  write(delta);
+                  bumpHUD(Math.max(1, Math.ceil(delta.length / 4)));
+                }
+              } catch {
+                write(payload + "\n");
+                bumpHUD(Math.max(1, Math.ceil(payload.length / 4)));
+              }
+            }
+          }
+        }
+      }
+      async function streamChunks(reader, write) {
+        const dec = new TextDecoder();
+        for (;;) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          const t = dec.decode(value, { stream: true });
+          write(t);
+          bumpHUD(Math.max(1, Math.ceil(t.length / 4)));
+        }
+      }
+
+      // ===== core sender =====
+      async function sendMessage(text) {
+        let api =
+          (apiInput.value || "").trim() || "https://api.keilani.ai/api/chat";
+        const model = modelSel.value,
+          temperature = parseFloat(temp.value);
+        const wantStream = streamChk.checked,
+          expectSSE = sseChk.checked;
+        const tok = getClientToken();
+
+        const asUser = addMessage("user", text);
+        const asAsst = addMessage("assistant", "");
+
+        try {
+          startHUD();
+          sendBtn.disabled = true;
+          sendLabel.style.display = "none";
+          sendSpin.style.display = "inline-block";
+
+          const headers = { "Content-Type": "application/json" };
+          if (tok) headers.Authorization = `Bearer ${tok}`;
+
+          // Build payload: omit temperature entirely for gpt-5 to avoid 400
+          const payload = { message: text, model, stream: wantStream };
+          if (model !== "gpt-5") payload.temperature = temperature;
+
+          console.log("POST", api, payload);
+          const res = await fetch(api, {
+            method: "POST",
+            headers,
+            body: JSON.stringify(payload),
+          });
+
+          console.log("status", res.status, res.headers.get("content-type"));
+          if (!res.ok) {
+            const errText = await res.text();
+            if (res.status === 401)
+              toast(
+                "Unauthorized (401). Add/verify Client Token, Save, then retry.",
+              );
+            throw new Error(
+              `HTTP ${res.status} – ${errText.substring(0, 400)}`,
+            );
+          }
+
+          const ctype = res.headers.get("content-type") || "";
+          const reader = res.body.getReader();
+          const write = (chunk) => {
+            asAsst._content.textContent += chunk;
+            window.scrollTo({
+              top: document.body.scrollHeight,
+              behavior: "smooth",
+            });
+          };
+
+          if (wantStream) {
+            if (expectSSE || ctype.includes("text/event-stream"))
+              await streamSSE(reader, write);
+            else await streamChunks(reader, write);
+          } else {
+            const data = await res.json();
+            const out = data.output || data.message || JSON.stringify(data);
+            write(out);
+            bumpHUD(Math.max(1, Math.ceil(String(out).length / 4)));
+          }
+        } catch (err) {
+          console.error(err);
+          toast("Error: " + (err?.message || err));
+          asAsst._content.textContent = "[Error] " + (err?.message || err);
+        } finally {
+          stopHUD();
+          sendBtn.disabled = false;
+          sendLabel.style.display = "";
+          sendSpin.style.display = "none";
+        }
+      }
+
+      // ===== submit wiring (no reload) =====
+      async function handleSubmit(e) {
+        if (e) e.preventDefault();
+        const text = (promptBox.value || "").trim();
+        if (!text) return;
+        await sendMessage(text);
+        promptBox.value = "";
+        promptBox.focus();
+      }
+      sendBtn.addEventListener("click", handleSubmit);
+      $("#composer").addEventListener("submit", (e) => {
+        e.preventDefault();
+        handleSubmit(e);
+      });
+      promptBox.addEventListener("keydown", (e) => {
+        if (e.key === "Enter" && !e.shiftKey) {
+          e.preventDefault();
+          handleSubmit(e);
+        }
+      });
+
+      // QoL
+      window.addEventListener("keydown", (e) => {
+        if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === "k") {
+          e.preventDefault();
+          promptBox.focus();
+        }
+      });
+      if (!localStorage.getItem("welcomed")) {
+        addMessage(
+          "assistant",
+          "Heya! Set API to https://api.keilani.ai/api/chat and paste a Client Token if required. Tokens button toggles the HUD.",
+        );
+        localStorage.setItem("welcomed", "1");
+      }
+      promptBox.focus();
+
+      // error trap
+      window.addEventListener("error", (ev) => {
+        console.error(ev.error || ev.message);
+        toast("Script error: " + (ev.message || "see console"));
+      });
+    </script>
+  </body>
+</html>
