@@ -1,249 +1,93 @@
-// public/js/chat.js
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Keilani Chat • Streaming</title>
 
-// ----- Marked / highlight shims (UMD-safe) -----
-const getMarked = () => {
-  const m = window.marked;
-  if (!m) return null;
-  if (typeof m.parse === "function") return m;           // v12 UMD
-  if (typeof m === "function") return { parse: m, setOptions: () => {} }; // legacy
-  return null;
-};
-const _marked = getMarked();
-if (_marked && window.hljs) {
-  _marked.setOptions?.({
-    highlight: (code, lang) => {
-      const l = lang && hljs.getLanguage(lang) ? lang : "plaintext";
-      return hljs.highlight(code, { language: l }).value;
-    },
-  });
-}
-const escapeHtml = (s = "") =>
-  String(s).replaceAll("&","&amp;").replaceAll("<","&lt;").replaceAll(">","&gt;");
-const renderMarkdown = (text) => {
-  const m = getMarked();
-  if (!m) return escapeHtml(text);
-  try { return m.parse(String(text ?? "")); } catch { return escapeHtml(text); }
-};
-
-// ----- DOM -----
-const model    = document.querySelector('#model');
-const api      = document.querySelector('#api');
-const token    = document.querySelector('#token');
-const stream   = document.querySelector('#stream');
-const sse      = document.querySelector('#sse');
-const sendBtn  = document.querySelector('#send');
-const composer = document.querySelector('#composer');
-const list     = document.querySelector('#list');
-const saveBtn  = document.querySelector('#save');
-const exportBtn= document.querySelector('#export');
-const clearBtn = document.querySelector('#clear');
-const resetBtn = document.querySelector('#reset');
-const rawBtn   = document.querySelector('#raw');
-const errorBox = document.querySelector('#error');
-const sidEl    = document.querySelector('#sid');
-
-// ----- State -----
-let messages = [];
-let sid = Math.random().toString(16).slice(2, 10);
-sidEl.textContent = sid;
-
-// hydrate
-(() => {
-  const st = JSON.parse(localStorage.getItem('kln.chat.cfg') || '{}');
-  if (st.model) model.value = st.model;
-  api.value   = st.api || 'https://api.keilani.ai/api/chat';
-  if (st.token) token.value = st.token;
-  stream.checked = st.stream ?? true;
-  sse.checked    = st.sse ?? true;
-})();
-function persist() {
-  const st = {
-    model: model.value,
-    api: api.value.trim(),
-    token: token.value.trim(),
-    stream: !!stream.checked,
-    sse: !!sse.checked,
-  };
-  localStorage.setItem('kln.chat.cfg', JSON.stringify(st));
-}
-saveBtn.onclick = persist;
-
-clearBtn.onclick = () => {
-  messages = [];
-  list.innerHTML = '';
-  composer.value = '';
-  errorBox.hidden = true;
-  persist();
-};
-resetBtn.onclick = () => {
-  sid = Math.random().toString(16).slice(2, 10);
-  sidEl.textContent = sid;
-  messages = [];
-  list.innerHTML = '';
-  composer.value = '';
-  errorBox.hidden = true;
-};
-exportBtn.onclick = () => {
-  const lines = messages.map(m => `[${m.role}] ${m.content}`).join('\n\n');
-  const blob = new Blob([lines], { type: 'text/plain;charset=utf-8' });
-  const url  = URL.createObjectURL(blob);
-  const a    = document.createElement('a');
-  a.href = url; a.download = `chat-${sid}.txt`; a.click();
-  URL.revokeObjectURL(url);
-};
-rawBtn.onclick = () => {
-  const raw = {
-    cfg: JSON.parse(localStorage.getItem('kln.chat.cfg') || '{}'),
-    sid,
-    messages
-  };
-  alert(JSON.stringify(raw, null, 2));
-};
-
-// helpers
-function addMsg(role, content, render=true) {
-  const m = { role, content: String(content ?? '') };
-  messages.push(m);
-  if (render) renderMsg(m);
-}
-function renderMsg(m) {
-  const div = document.createElement('div');
-  div.className = `msg ${m.role}`;
-  if (m.role === 'assistant') {
-    div.innerHTML = renderMarkdown(m.content);
-  } else {
-    div.textContent = m.content;
-  }
-  list.appendChild(div);
-  list.scrollTop = list.scrollHeight;
-  if (window.hljs) div.querySelectorAll('pre code').forEach(b => hljs.highlightElement(b));
-  return div;
-}
-
-// keyboard
-composer.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter' && !e.shiftKey) {
-    e.preventDefault();
-    sendBtn.click();
-  }
-});
-document.addEventListener('keydown', (e) => {
-  if ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'k') {
-    e.preventDefault(); composer.focus();
-  }
-  if (e.key === 'ArrowUp' && document.activeElement === composer && !composer.value) {
-    for (let i = messages.length - 1; i >= 0; i--) {
-      if (messages[i].role === 'user') {
-        composer.value = messages[i].content;
-        messages.splice(i, 1);
-        list.removeChild(list.lastElementChild);
-        break;
-      }
+  <!-- Theme + basic styles (inline OK per CSP; we avoid inline JS) -->
+  <style>
+    :root{
+      --bg:#0b0f1a;--bg2:#0f1422;--panel:#10182b;--text:#d7def2;--muted:#8aa0c9;
+      --accent:#8b5cf6;--accent-2:#6ee7ff;--ok:#22c55e;--err:#ef4444;--chip:#1b2742;
+      --btn:#2b3758;--btnh:#34446b;--border:#223055;--bubble:#121d34;--bubble2:#0e1629
     }
-  }
-});
+    *{box-sizing:border-box} html,body{height:100%}
+    body{margin:0;background:radial-gradient(1200px 600px at 80% -20%, #0d1b30 0%, #0b0f1a 55%) fixed, var(--bg); color:var(--text); font:14px/1.4 system-ui, -apple-system, Segoe UI, Roboto, Inter, sans-serif}
+    .toolbar{position:sticky;top:0;z-index:5;display:flex;gap:.75rem;align-items:center;padding:.75rem 1rem;background:linear-gradient(180deg, rgba(11,15,26,.95), rgba(11,15,26,.74) 60%, rgba(11,15,26,0))}
+    .title{display:flex;align-items:center;gap:.5rem;font-weight:700}
+    .dot{width:8px;height:8px;border-radius:999px;background:#22c55e;box-shadow:0 0 0 3px #14251a}
+    .chip{background:var(--chip); color:var(--muted); padding:.35rem .6rem; border-radius:.6rem; border:1px solid var(--border)}
+    select,input[type="text"],input[type="password"]{background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:.6rem;padding:.5rem .6rem;outline:none}
+    input[type="text"], input[type="password"]{width:360px}
+    button{background:var(--btn);color:var(--text);border:1px solid var(--border);padding:.5rem .8rem;border-radius:.6rem;cursor:pointer}
+    button:hover{background:var(--btnh)}
+    .grow{flex:1}
+    .main{max-width:1100px;margin:0 auto;padding:0 1rem 4rem}
+    .msg{background:var(--bubble);border:1px solid var(--border);border-radius:.8rem; padding:.9rem 1rem; margin:.7rem 0}
+    .msg.user{background:var(--bubble2)}
+    .meta{display:flex;gap:.6rem;align-items:center;color:var(--muted);font-size:.85em;margin:.25rem 0 .2rem}
+    .row{display:flex;gap:.6rem;align-items:center}
+    .composer{margin-top:1rem;background:var(--panel);border:1px solid var(--border);border-radius:1rem;padding:.6rem}
+    #prompt{width:100%;min-height:64px;max-height:160px;resize:vertical;background:transparent;color:var(--text);border:0;outline:none;padding:.5rem}
+    .actions{display:flex;gap:.5rem;align-items:center;justify-content:flex-end;padding:.2rem .3rem}
+    .pill{padding:.25rem .55rem;border-radius:999px;background:var(--chip);color:var(--muted);font-size:.8em;border:1px solid var(--border)}
+    .btn-accent{background:linear-gradient(90deg,var(--accent),var(--accent-2));border:0;color:#051024}
+    .btn-danger{background:#2a1620;border-color:#4c1d29}
+    pre{background:#0b1325;border:1px solid #213055;border-radius:.6rem;padding:.75rem;overflow:auto}
+    code{font-family:ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace}
+    .row-right{margin-left:auto}
+    .hide{display:none}
+  </style>
 
-// send
-sendBtn.onclick = async () => {
-  const text = composer.value.trim();
-  if (!text) return;
-  errorBox.hidden = true;
+  <!-- highlight.js theme -->
+  <link rel="stylesheet" href="/vendor/github-dark.min.css" />
 
-  addMsg('user', text);
-  composer.value = '';
+</head>
+<body>
+  <div class="toolbar">
+    <div class="title"><span class="dot"></span><span>Keilani Chat</span><span class="chip">Streaming</span></div>
 
-  const cfg = {
-    model: model.value,
-    stream: !!stream.checked,
-    messages: messages.map(m => ({ role: m.role, content: m.content })),
-  };
+    <select id="model">
+      <option value="gpt-5" selected>gpt-5</option>
+      <option value="gpt-4.1-mini">gpt-4.1-mini</option>
+    </select>
 
-  sendBtn.disabled = true;
-  try {
-    if (cfg.stream && sse.checked) await sendSSE(cfg);
-    else await sendJSON(cfg);
-    persist();
-  } catch (err) {
-    console.error(err);
-    errorBox.hidden = false;
-    errorBox.textContent = `[Error] ${String(err.message || err)}`;
-  } finally {
-    sendBtn.disabled = false;
-  }
-};
+    <input id="api" type="text" placeholder="https://api.keilani.ai/api/chat" />
+    <input id="token" type="password" placeholder="Client Token (optional)" />
 
-async function sendJSON(cfg) {
-  const res = await fetch(api.value.trim(), {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      ...(token.value.trim() ? { 'Authorization': `Bearer ${token.value.trim()}` } : {}),
-    },
-    body: JSON.stringify(cfg),
-  });
-  if (!res.ok) {
-    const t = await res.text();
-    throw new Error(`HTTP ${res.status} – ${t || res.statusText}`);
-  }
-  const data = await res.json();
-  const reply = data?.reply ?? data?.choices?.[0]?.message?.content ?? '';
-  addMsg('assistant', reply);
-}
+    <button id="save">Save</button>
+    <button id="export">Export .txt</button>
+    <button id="clear">Clear</button>
+    <button id="reset">Reset Session</button>
 
-async function sendSSE(cfg) {
-  const res = await fetch(api.value.trim(), {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-      Accept: 'text/event-stream',
-      ...(token.value.trim() ? { 'Authorization': `Bearer ${token.value.trim()}` } : {}),
-    },
-    body: JSON.stringify(cfg),
-  });
-  if (!res.ok) {
-    const t = await res.text();
-    throw new Error(`HTTP ${res.status} – ${t || res.statusText}`);
-  }
-  const m = { role: 'assistant', content: '' };
-  const bubble = renderMsg(m);
+    <label class="row"><input id="stream" type="checkbox" checked /> <span class="chip">Stream</span></label>
+    <label class="row"><input id="sse" type="checkbox" checked /> <span class="chip">Expect SSE</span></label>
 
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buf = '';
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buf += decoder.decode(value, { stream: true });
+    <span id="tokens" class="pill">Tokens: 0 • 0/s</span>
+    <span id="sid" class="pill">SID: —</span>
+  </div>
 
-    const lines = buf.split(/\r?\n/);
-    buf = lines.pop() ?? '';
-    for (const line of lines) {
-      const t = line.trim();
-      if (!t || !t.startsWith('data:')) continue;
-      const payload = t.slice(5).trim();
-      if (payload === '[DONE]') break;
-      try {
-        const obj = JSON.parse(payload);
-        const token = obj?.choices?.[0]?.delta?.content ?? obj?.delta ?? obj?.token ?? '';
-        if (token) {
-          m.content += token;
-          bubble.innerHTML = renderMarkdown(m.content);
-          if (window.hljs) bubble.querySelectorAll('pre code').forEach(b => hljs.highlightElement(b));
-          list.scrollTop = list.scrollHeight;
-        }
-      } catch {}
-    }
-  }
-}
+  <main class="main">
+    <div id="messages"></div>
 
-// welcome
-if (!sessionStorage.getItem('kln.chat.welcomed')) {
-  addMsg('assistant',
-`Hi! I’m here and working. How can I help today? If you’re testing, you can try:
+    <div class="composer">
+      <div class="row meta"><span>Tip:</span><span><kbd>Enter</kbd> to send • <kbd>Shift</kbd>+<kbd>Enter</kbd> for newline</span><span class="row-right"><button id="raw" class="chip">Raw Inspector</button></span></div>
+      <textarea id="prompt" placeholder="Type your message…"></textarea>
+      <div class="actions">
+        <button id="stop" class="btn-danger hide">Stop</button>
+        <button id="send" class="btn-accent">Send ↵</button>
+      </div>
+    </div>
+  </main>
 
-• Ask a quick question
-• Summarize a paragraph
-• Generate a short code snippet
-• Translate a sentence`);
-  sessionStorage.setItem('kln.chat.welcomed','1');
-}
+  <!-- Vendor (local, CSP-safe) -->
+  <script src="/vendor/dayjs.min.js"></script>
+  <script src="/vendor/marked.umd.min.js"></script>
+  <script src="/vendor/highlight.min.js"></script>
+  <script src="/vendor/dompurify.min.js"></script>
+
+  <!-- App -->
+  <script src="/js/chat.js"></script>
+</body>
+</html>

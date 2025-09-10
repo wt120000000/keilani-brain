@@ -2,137 +2,271 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta
-      http-equiv="Content-Security-Policy"
-      content="default-src 'self';
-             img-src 'self' data:;
-             media-src 'self' blob:;
-             style-src 'self' 'unsafe-inline';
-             script-src 'self';
-             connect-src 'self' https:;
-             frame-ancestors 'self';"
-    />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>Keilani Chat • Streaming</title>
 
+    <!-- Theme + basic styles (inline OK per CSP; we avoid inline JS) -->
     <style>
       :root {
-        --bg: #0c0f14; --panel:#121622; --panel-2:#0f1320; --border:#1f2a44;
-        --text:#e6e8f0; --muted:#9aa4b2; --primary:#7c5cff; --primary-2:#6e50e8;
-        --pill:#1b2134; --good:#11c38d; --bad:#ff5370; --shadow:0 10px 30px rgba(0,0,0,.35); --radius:14px;
+        --bg: #0b0f1a;
+        --bg2: #0f1422;
+        --panel: #10182b;
+        --text: #d7def2;
+        --muted: #8aa0c9;
+        --accent: #8b5cf6;
+        --accent-2: #6ee7ff;
+        --ok: #22c55e;
+        --err: #ef4444;
+        --chip: #1b2742;
+        --btn: #2b3758;
+        --btnh: #34446b;
+        --border: #223055;
+        --bubble: #121d34;
+        --bubble2: #0e1629;
       }
-      *{box-sizing:border-box}
-      html,body{height:100%;background:radial-gradient(1200px 700px at 70% -20%,#0b1225 0%,#0b0e18 35%,#0b0e18 100%);color:var(--text);font:14px/1.5 system-ui,-apple-system,Segoe UI,Roboto,Inter,"Helvetica Neue",Arial,"Apple Color Emoji","Segoe UI Emoji")}
-      a{color:var(--primary);text-decoration:none}a:hover{text-decoration:underline}
-      .wrap{display:grid;grid-template-rows:auto 1fr auto;height:100%;max-width:1100px;margin:0 auto;padding:20px 22px 28px;gap:18px}
-      .toolbar{display:grid;grid-template-columns:130px 1fr 260px auto auto auto;gap:10px;align-items:center}
-      @media (max-width:980px){.toolbar{grid-template-columns:1fr}}
-      .group{display:flex;gap:8px;align-items:center}
-      .pill{background:var(--pill);color:var(--muted);border:1px solid var(--border);border-radius:999px;padding:8px 12px;display:inline-flex;gap:8px;align-items:center;white-space:nowrap}
-      select,input[type="text"]{background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:10px;padding:8px 10px;outline:none;width:100%}
-      .btn{background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:12px;padding:8px 12px;cursor:pointer;transition:.15s ease transform,.15s ease background}
-      .btn:hover{transform:translateY(-1px);background:var(--panel-2)}
-      .btn-primary{background:var(--primary);border-color:#5b46ca}.btn-primary:hover{background:var(--primary-2)}
-      .switch{display:inline-flex;gap:10px;align-items:center}.switch input{transform:translateY(1px)}
-      .chat{background:linear-gradient(180deg,rgba(255,255,255,0.02),rgba(255,255,255,0.0));border:1px solid var(--border);border-radius:var(--radius);box-shadow:var(--shadow);padding:14px;display:grid;grid-template-rows:1fr auto;min-height:58vh;gap:10px}
-      .scroll{overflow:auto;padding:6px 2px}
-      .msg{background:var(--panel);border:1px solid var(--border);border-radius:14px;padding:12px 14px;margin:10px 0;white-space:pre-wrap;word-break:break-word}
-      .msg.user{background:#101529;border-color:#1a2442}.msg.assistant{background:#0f172b;border-color:#1b2542}
-      .system{color:var(--muted);font-size:13px}
-      .compose{display:grid;grid-template-columns:1fr auto;gap:10px;align-items:end}
-      textarea{background:var(--panel);color:var(--text);border:1px solid var(--border);border-radius:12px;padding:12px 14px;min-height:56px;resize:vertical;outline:none}
-      code,pre code{font-family:ui-monospace,SFMono-Regular,Menlo,Monaco,Consolas,"Liberation Mono","Courier New",monospace;font-size:12.5px}
-      pre{background:#0b1222;border:1px solid #1b2a48;border-radius:12px;padding:12px;overflow:auto;margin:8px 0 0}
-      .tip{color:var(--muted);font-size:12px;padding:2px 4px 0}.bad{color:var(--bad)}.good{color:var(--good)}
+      * {
+        box-sizing: border-box;
+      }
+      html,
+      body {
+        height: 100%;
+      }
+      body {
+        margin: 0;
+        background:
+          radial-gradient(1200px 600px at 80% -20%, #0d1b30 0%, #0b0f1a 55%)
+            fixed,
+          var(--bg);
+        color: var(--text);
+        font:
+          14px/1.4 system-ui,
+          -apple-system,
+          Segoe UI,
+          Roboto,
+          Inter,
+          sans-serif;
+      }
+      .toolbar {
+        position: sticky;
+        top: 0;
+        z-index: 5;
+        display: flex;
+        gap: 0.75rem;
+        align-items: center;
+        padding: 0.75rem 1rem;
+        background: linear-gradient(
+          180deg,
+          rgba(11, 15, 26, 0.95),
+          rgba(11, 15, 26, 0.74) 60%,
+          rgba(11, 15, 26, 0)
+        );
+      }
+      .title {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-weight: 700;
+      }
+      .dot {
+        width: 8px;
+        height: 8px;
+        border-radius: 999px;
+        background: #22c55e;
+        box-shadow: 0 0 0 3px #14251a;
+      }
+      .chip {
+        background: var(--chip);
+        color: var(--muted);
+        padding: 0.35rem 0.6rem;
+        border-radius: 0.6rem;
+        border: 1px solid var(--border);
+      }
+      select,
+      input[type="text"],
+      input[type="password"] {
+        background: var(--panel);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 0.6rem;
+        padding: 0.5rem 0.6rem;
+        outline: none;
+      }
+      input[type="text"],
+      input[type="password"] {
+        width: 360px;
+      }
+      button {
+        background: var(--btn);
+        color: var(--text);
+        border: 1px solid var(--border);
+        padding: 0.5rem 0.8rem;
+        border-radius: 0.6rem;
+        cursor: pointer;
+      }
+      button:hover {
+        background: var(--btnh);
+      }
+      .grow {
+        flex: 1;
+      }
+      .main {
+        max-width: 1100px;
+        margin: 0 auto;
+        padding: 0 1rem 4rem;
+      }
+      .msg {
+        background: var(--bubble);
+        border: 1px solid var(--border);
+        border-radius: 0.8rem;
+        padding: 0.9rem 1rem;
+        margin: 0.7rem 0;
+      }
+      .msg.user {
+        background: var(--bubble2);
+      }
+      .meta {
+        display: flex;
+        gap: 0.6rem;
+        align-items: center;
+        color: var(--muted);
+        font-size: 0.85em;
+        margin: 0.25rem 0 0.2rem;
+      }
+      .row {
+        display: flex;
+        gap: 0.6rem;
+        align-items: center;
+      }
+      .composer {
+        margin-top: 1rem;
+        background: var(--panel);
+        border: 1px solid var(--border);
+        border-radius: 1rem;
+        padding: 0.6rem;
+      }
+      #prompt {
+        width: 100%;
+        min-height: 64px;
+        max-height: 160px;
+        resize: vertical;
+        background: transparent;
+        color: var(--text);
+        border: 0;
+        outline: none;
+        padding: 0.5rem;
+      }
+      .actions {
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+        justify-content: flex-end;
+        padding: 0.2rem 0.3rem;
+      }
+      .pill {
+        padding: 0.25rem 0.55rem;
+        border-radius: 999px;
+        background: var(--chip);
+        color: var(--muted);
+        font-size: 0.8em;
+        border: 1px solid var(--border);
+      }
+      .btn-accent {
+        background: linear-gradient(90deg, var(--accent), var(--accent-2));
+        border: 0;
+        color: #051024;
+      }
+      .btn-danger {
+        background: #2a1620;
+        border-color: #4c1d29;
+      }
+      pre {
+        background: #0b1325;
+        border: 1px solid #213055;
+        border-radius: 0.6rem;
+        padding: 0.75rem;
+        overflow: auto;
+      }
+      code {
+        font-family:
+          ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono",
+          monospace;
+      }
+      .row-right {
+        margin-left: auto;
+      }
+      .hide {
+        display: none;
+      }
     </style>
 
-    <!-- local vendor assets -->
+    <!-- highlight.js theme -->
     <link rel="stylesheet" href="/vendor/github-dark.min.css" />
-    <script src="/vendor/dayjs.min.js" defer></script>
-    <script src="/vendor/highlight.min.js" defer></script>
-    <script src="/vendor/marked.umd.min.js" defer></script>
-
-    <!-- our app code (moved from inline to external to satisfy CSP) -->
-    <script src="/js/chat.js" defer></script>
   </head>
   <body>
-    <div class="wrap">
-      <div class="toolbar">
-        <div class="group">
-          <div class="pill" title="Connection">
-            <div
-              style="
-                width: 8px;
-                height: 8px;
-                border-radius: 50%;
-                background: #28d27d;
-                box-shadow: 0 0 12px #28d27d;
-              "
-            ></div>
-            <strong>Keilani Chat</strong>
-            <span class="system">• Streaming</span>
-          </div>
-        </div>
-
-        <div class="group">
-          <select id="model">
-            <option value="gpt-5" selected>gpt-5</option>
-            <option value="gpt-4.1-mini">gpt-4.1-mini</option>
-            <option value="gpt-4o-mini">gpt-4o-mini</option>
-          </select>
-          <input
-            id="api"
-            type="text"
-            placeholder="https://api.keilani.ai/api/chat"
-          />
-        </div>
-
-        <input id="token" type="text" placeholder="Client Token (optional)" />
-
-        <div class="group">
-          <button id="save" class="btn">Save</button>
-          <button id="export" class="btn">Export .txt</button>
-          <button id="clear" class="btn">Clear</button>
-        </div>
-
-        <div class="group">
-          <button id="reset" class="btn">Reset Session</button>
-        </div>
-
-        <div class="group">
-          <label class="switch"
-            ><input id="stream" type="checkbox" checked />
-            <span>Stream</span></label
-          >
-          <label class="switch"
-            ><input id="sse" type="checkbox" checked />
-            <span>Expect SSE</span></label
-          >
-        </div>
+    <div class="toolbar">
+      <div class="title">
+        <span class="dot"></span><span>Keilani Chat</span
+        ><span class="chip">Streaming</span>
       </div>
 
-      <div class="group" style="gap: 10px; flex-wrap: wrap">
-        <div class="pill">
-          Tokens: <span id="tokens">0</span> • <span id="tps">0</span>/s
-        </div>
-        <div class="pill">SID: <span id="sid">—</span></div>
-        <button id="raw" class="btn">Raw Inspector</button>
-        <div id="error" class="system bad" hidden></div>
-      </div>
+      <select id="model">
+        <option value="gpt-5" selected>gpt-5</option>
+        <option value="gpt-4.1-mini">gpt-4.1-mini</option>
+      </select>
 
-      <div class="chat" id="chat">
-        <div class="scroll" id="list"></div>
-        <div class="compose">
-          <textarea
-            id="composer"
-            placeholder="Type your message…  (Enter to send  •  Shift+Enter for newline)"
-          ></textarea>
-          <button id="send" class="btn btn-primary">Send ↵</button>
-        </div>
-        <div class="tip">
-          Tip: <b>Ctrl/Cmd+K</b> to focus input • <b>↑</b> to edit last message
-        </div>
-      </div>
+      <input
+        id="api"
+        type="text"
+        placeholder="https://api.keilani.ai/api/chat"
+      />
+      <input id="token" type="password" placeholder="Client Token (optional)" />
+
+      <button id="save">Save</button>
+      <button id="export">Export .txt</button>
+      <button id="clear">Clear</button>
+      <button id="reset">Reset Session</button>
+
+      <label class="row"
+        ><input id="stream" type="checkbox" checked />
+        <span class="chip">Stream</span></label
+      >
+      <label class="row"
+        ><input id="sse" type="checkbox" checked />
+        <span class="chip">Expect SSE</span></label
+      >
+
+      <span id="tokens" class="pill">Tokens: 0 • 0/s</span>
+      <span id="sid" class="pill">SID: —</span>
     </div>
+
+    <main class="main">
+      <div id="messages"></div>
+
+      <div class="composer">
+        <div class="row meta">
+          <span>Tip:</span
+          ><span
+            ><kbd>Enter</kbd> to send • <kbd>Shift</kbd>+<kbd>Enter</kbd> for
+            newline</span
+          ><span class="row-right"
+            ><button id="raw" class="chip">Raw Inspector</button></span
+          >
+        </div>
+        <textarea id="prompt" placeholder="Type your message…"></textarea>
+        <div class="actions">
+          <button id="stop" class="btn-danger hide">Stop</button>
+          <button id="send" class="btn-accent">Send ↵</button>
+        </div>
+      </div>
+    </main>
+
+    <!-- Vendor (local, CSP-safe) -->
+    <script src="/vendor/dayjs.min.js"></script>
+    <script src="/vendor/marked.umd.min.js"></script>
+    <script src="/vendor/highlight.min.js"></script>
+    <script src="/vendor/dompurify.min.js"></script>
+
+    <!-- App -->
+    <script src="/js/chat.js"></script>
   </body>
 </html>
