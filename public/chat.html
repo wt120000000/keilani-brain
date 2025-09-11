@@ -5,23 +5,30 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>Keilani Chat • Streaming</title>
 
-    <!-- minimal theme (inline ok under your CSP) -->
+    <!-- Local highlight.js theme (OK with CSP) -->
+    <link rel="stylesheet" href="/vendor/github-dark.min.css" />
+
+    <!-- Tiny, safe inline styles (CSP allows 'unsafe-inline' for style in your toml) -->
     <style>
       :root {
         --bg: #0b0f1a;
-        --panel: #0f1422;
+        --bg2: #0f1422;
+        --panel: #101825;
+        --text: #d7def2;
         --muted: #8aa0c9;
-        --text: #dde7f2;
-        --chip: #182742;
-        --accent: #88c5ff;
-        --accent-2: #66e0ff;
-        --border: #223c5e;
+        --accent: #8856fc;
+        --accent-2: #6ee7ff;
+        --ok: #22c55e;
+        --chip: #1b2742;
+        --btn: #28375b;
+        --btnh: #34446e;
+        --border: #22355e;
         --bubble: #0e1629;
         --bubble2: #0e1629;
-        --btn: #3578e5;
-        --btnh: #2c64bf;
       }
-      * {
+      *,
+      *:before,
+      *:after {
         box-sizing: border-box;
       }
       html,
@@ -30,13 +37,13 @@
       }
       body {
         margin: 0;
+        color: var(--text);
         background:
-          radial-gradient(1000px 600px at 80% -10%, #0d1b30 0%, #0b0f1a 55%)
+          radial-gradient(1200px 600px at 80% -20%, #0d1b30 0%, #0b0f1a 55%)
             fixed,
           var(--bg);
-        color: var(--text);
         font:
-          14px/1.5 system-ui,
+          14px/1.45 system-ui,
           -apple-system,
           Segoe UI,
           Roboto,
@@ -46,269 +53,248 @@
       .toolbar {
         position: sticky;
         top: 0;
-        z-index: 5;
+        z-index: 10;
         display: flex;
         gap: 0.6rem;
         align-items: center;
-        padding: 0.6rem 0.8rem;
+        padding: 0.6rem 0.9rem;
         background: linear-gradient(
           180deg,
-          rgba(11, 15, 26, 0.96),
-          rgba(11, 15, 26, 0.84) 70%,
-          rgba(11, 15, 26, 0)
+          rgba(11, 15, 26, 0.95),
+          rgba(11, 15, 26, 0.74) 55%,
+          rgba(11, 15, 26, 0) 100%
         );
-        border-bottom: 1px solid rgba(34, 60, 94, 0.35);
-        backdrop-filter: blur(6px);
+        backdrop-filter: saturate(140%) blur(8px);
+        border-bottom: 1px solid #0f1c33;
+      }
+      .title {
+        display: flex;
+        align-items: center;
+        gap: 0.5rem;
+        font-weight: 600;
+        letter-spacing: 0.3px;
+        color: #a7b8d8;
       }
       .dot {
-        width: 9px;
-        height: 9px;
+        width: 8px;
+        height: 8px;
         border-radius: 50%;
-        background: #15cf82;
+        background: var(--ok);
         box-shadow: 0 0 0 3px #14251a;
       }
       .chip {
         background: var(--chip);
-        color: #a7c1ff;
-        padding: 0.35rem 0.6rem;
+        color: #b6c7e8;
+        border: 1px solid #2a3e64;
         border-radius: 999px;
-        border: 1px solid rgba(136, 197, 255, 0.25);
+        padding: 0.25rem 0.55rem;
+        font-size: 0.75rem;
       }
       select,
       input[type="text"],
       input[type="password"] {
+        width: 340px;
+        max-width: 38vw;
         background: var(--panel);
         color: var(--text);
         border: 1px solid var(--border);
-        border-radius: 0.6rem;
-        padding: 0.5rem 0.7rem;
+        border-radius: 0.55rem;
+        padding: 0.55rem 0.65rem;
         outline: none;
-        min-width: 120px;
       }
-      input[type="text"]#api {
-        min-width: 360px;
+      select {
+        width: auto;
+      }
+      input#token {
+        width: 320px;
       }
       button {
         background: var(--btn);
-        color: #fff;
+        color: var(--text);
         border: 1px solid var(--border);
-        border-radius: 0.6rem;
-        padding: 0.55rem 0.8rem;
+        padding: 0.55rem 0.7rem;
+        border-radius: 0.55rem;
         cursor: pointer;
       }
       button:hover {
         background: var(--btnh);
       }
-      .btn-ghost {
-        background: transparent;
-        color: var(--muted);
+      .switches {
+        display: flex;
+        gap: 0.9rem;
+        align-items: center;
+        margin-left: auto;
       }
-      .btn-ghost:hover {
-        background: #0f1a2e;
-      }
-      .spacer {
-        flex: 1;
-      }
-      main.container {
-        max-width: 1024px;
+      main {
+        max-width: 1120px;
         margin: 0 auto;
         padding: 1rem;
-      }
-      .tip {
-        color: var(--muted);
-        margin: 0.25rem 0 1rem;
-        font-size: 0.92rem;
       }
       .feed {
         display: flex;
         flex-direction: column;
-        gap: 0.7rem;
+        gap: 0.85rem;
       }
       .msg {
         display: flex;
-        gap: 0.6rem;
+        gap: 0.65rem;
         align-items: flex-start;
       }
-      .msg .bubble {
+      .bubble {
         background: var(--bubble);
         border: 1px solid var(--border);
-        border-radius: 0.8rem;
-        padding: 0.9rem 0.95rem;
-        max-width: 100%;
+        border-radius: 0.75rem;
+        padding: 0.85rem 0.95rem;
+        color: var(--text);
+        max-width: 960px;
+        white-space: pre-wrap;
+        word-break: break-word;
       }
-      .msg.you .bubble {
-        background: #0f192a;
+      .bubble.assistant {
+        background: var(--bubble2);
       }
       .meta {
         color: var(--muted);
         font-size: 0.8rem;
-        margin: 0.25rem 0 0.2rem 0.25rem;
-      }
-      pre,
-      code {
-        font-family:
-          ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono",
-          monospace;
+        margin: 0.15rem 0 0.2rem;
       }
       .composer {
         position: sticky;
         bottom: 0;
-        z-index: 4;
-        margin-top: 1rem;
-        padding: 0.6rem 0.8rem 0.9rem;
-        background: linear-gradient(
-          180deg,
-          rgba(11, 15, 26, 0),
-          rgba(11, 15, 26, 0.85) 25%,
-          rgba(11, 15, 26, 0.95) 55%
-        );
-        backdrop-filter: blur(6px);
-        border-top: 1px solid rgba(34, 60, 94, 0.35);
+        background:
+          linear-gradient(
+            180deg,
+            rgba(11, 15, 26, 0) 0,
+            rgba(11, 15, 26, 0.82) 40%,
+            rgba(11, 15, 26, 0.94) 100%
+          ),
+          transparent;
+        border-top: 1px solid #0f1c33;
+        padding: 0.75rem;
+        margin-top: 0.6rem;
       }
-      .composer .row {
+      .input-row {
         display: flex;
         gap: 0.6rem;
         align-items: flex-end;
-        background: var(--bubble);
+        background: var(--panel);
         border: 1px solid var(--border);
         border-radius: 0.8rem;
-        padding: 0.35rem;
+        padding: 0.5rem;
+        box-shadow: inset 0 0 0 1px rgba(32, 50, 84, 0.14);
       }
       textarea {
         flex: 1;
-        resize: vertical;
-        min-height: 46px;
-        max-height: 220px;
         background: transparent;
+        color: var(--text);
         border: 0;
         outline: 0;
-        color: var(--text);
-        padding: 0.6rem 0.7rem;
-        font: inherit;
-        line-height: 1.4;
+        resize: vertical;
+        min-height: 58px;
+        max-height: 46vh;
+        padding: 0.35rem 0.5rem;
+        font:
+          14px/1.5 ui-sans-serif,
+          system-ui,
+          -apple-system,
+          "Segoe UI",
+          Roboto,
+          Inter,
+          "Helvetica Neue",
+          Arial;
+      }
+      .tip {
+        color: var(--muted);
+        font-size: 0.8rem;
+        margin: 0.45rem 0.25rem 0.2rem;
       }
       .right {
-        display: flex;
-        gap: 0.5rem;
-        align-items: center;
-        padding: 0.25rem;
-      }
-      .row2 {
-        display: flex;
-        gap: 0.6rem;
-        align-items: center;
-        justify-content: space-between;
-        margin-top: 0.4rem;
-      }
-      .pill {
-        background: rgba(21, 207, 130, 0.08);
-        border: 1px solid rgba(21, 207, 130, 0.25);
-        color: #7fe7c4;
-        padding: 0.25rem 0.45rem;
-        border-radius: 0.7rem;
-        font-size: 0.8rem;
-      }
-      .kbd {
-        border: 1px solid #334867;
-        color: #a8c4ff;
-        background: #0f1626;
-        padding: 0.1rem 0.35rem;
-        border-radius: 0.35rem;
-        font-size: 0.8rem;
-      }
-      .hide {
-        display: none;
+        margin-left: auto;
       }
     </style>
-
-    <!-- syntax highlight theme -->
-    <link rel="stylesheet" href="/vendor/github-dark.min.css" />
   </head>
   <body>
-    <!-- ===== Toolbar / Controls ===== -->
-    <div class="toolbar">
-      <span class="dot" title="online"></span>
-      <span class="chip">Keilani Chat</span>
-      <span class="chip">Streaming</span>
+    <!-- Top controls -->
+    <div class="toolbar" role="navigation" aria-label="Chat controls">
+      <div class="title">
+        <span class="dot"></span><span>Keilani Chat</span
+        ><span class="chip">Streaming</span>
+      </div>
 
-      <select id="model" title="Model">
+      <!-- Model -->
+      <label for="model" class="sr-only">Model</label>
+      <select id="model" aria-label="Model">
         <option value="gpt-5" selected>gpt-5</option>
         <option value="gpt-4.1-mini">gpt-4.1-mini</option>
-        <option value="o4-mini">o4-mini</option>
       </select>
 
+      <!-- API endpoint -->
       <input
         id="api"
         type="text"
+        aria-label="API"
         placeholder="https://api.keilani.ai/api/chat"
+        value="https://api.keilani.ai/api/chat"
       />
-      <input id="token" type="password" placeholder="Client Token (optional)" />
 
-      <button id="save" title="Save prefs">Save</button>
-      <button id="export" class="btn-ghost" title="Export .txt">
+      <!-- Optional client token -->
+      <input
+        id="token"
+        type="password"
+        aria-label="Client Token (optional)"
+        placeholder="Client Token (optional)"
+      />
+
+      <!-- Actions -->
+      <button id="saveBtn" type="button" title="Save current settings">
+        Save
+      </button>
+      <button id="exportBtn" type="button" title="Export transcript as .txt">
         Export .txt
       </button>
-      <button id="clear" class="btn-ghost" title="Clear conversation">
-        Clear
-      </button>
-      <button id="reset" class="btn-ghost" title="New session">
+      <button id="clearBtn" type="button" title="Clear chat">Clear</button>
+      <button id="resetBtn" type="button" title="Reset session">
         Reset Session
       </button>
 
-      <span class="spacer"></span>
-
-      <label class="chip" title="Stream chunks">
-        <input id="stream" type="checkbox" checked /> Stream
-      </label>
-      <label class="chip" title="Expect SSE (EventSource)">
-        <input id="expectSSE" type="checkbox" checked /> Expect SSE
-      </label>
-
-      <span id="tokens" class="chip" title="Token meter">Tokens: 0 • 0/s</span>
-      <span id="sid" class="chip" title="Session id">SID: —</span>
-      <button id="raw" class="btn-ghost" title="Raw inspector">
-        Raw Inspector
-      </button>
+      <!-- Switches -->
+      <div class="switches">
+        <label><input id="stream" type="checkbox" checked /> Stream</label>
+        <label><input id="sse" type="checkbox" checked /> Expect SSE</label>
+        <span class="chip" id="tokenStats">Tokens: 0 • 0/s</span>
+        <span class="chip" id="sid">SID: —</span>
+        <button id="rawBtn" type="button" class="right">Raw Inspector</button>
+      </div>
     </div>
 
-    <main class="container">
-      <div class="tip">
-        Tip: <b>Enter</b> to send • <b>Shift+Enter</b> for newline
+    <main>
+      <!-- Message list (JS writes here) -->
+      <div id="feed" class="feed" aria-live="polite"></div>
+
+      <!-- Composer -->
+      <div class="composer">
+        <div class="tip">
+          Tip: <b>Enter</b> to send • <b>Shift+Enter</b> for newline
+        </div>
+        <form id="form" class="input-row" autocomplete="off">
+          <textarea
+            id="input"
+            placeholder="Type your message…"
+            aria-label="Type your message"
+          ></textarea>
+          <button id="sendBtn" type="button" title="Send message">
+            Send ↵
+          </button>
+        </form>
       </div>
-
-      <!-- ===== FEED (chat bubbles get appended here) ===== -->
-      <main
-        id="feed"
-        class="feed"
-        aria-live="polite"
-        aria-label="Conversation"
-      ></main>
-
-      <!-- ===== Composer ===== -->
-      <section class="composer" aria-label="Composer">
-        <div class="row">
-          <textarea id="composer" placeholder="Type your message…"></textarea>
-          <div class="right">
-            <button id="send" title="Send (Enter)">Send ↵</button>
-          </div>
-        </div>
-
-        <div class="row2">
-          <div class="tip">
-            Press <span class="kbd">Enter</span> to send •
-            <span class="kbd">Shift+Enter</span> for newline
-          </div>
-          <div class="pill" id="statusPill" aria-live="polite"></div>
-        </div>
-      </section>
     </main>
 
-    <!-- ===== Vendor libs (local) ===== -->
+    <!-- Local vendor scripts (OK with CSP & your headers) -->
     <script src="/vendor/dayjs.min.js"></script>
     <script src="/vendor/highlight.min.js"></script>
     <script src="/vendor/marked.umd.min.js"></script>
 
-    <!-- ===== App JS ===== -->
+    <!-- App logic (external only; no inline JS) -->
     <script src="/js/chat.js?v=4"></script>
   </body>
 </html>
