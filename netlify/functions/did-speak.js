@@ -1,120 +1,105 @@
-// netlify/functions/did-speak.js
-// CJS for Netlify, no external deps, uses native fetch (Node 18+)
-
-// Env you need in Netlify:
-//  - DID_API_KEY             (required)
-//  - DID_VOICE_ID            (recommended for voice mode)
-//  - DID_AVATAR_SOURCE_URL   (recommended for avatar mode)
+// Keilani — D-ID voice proxy
+// Uses native fetch (Node 18+ on Netlify). No "node-fetch" needed.
 
 const DID_API = "https://api.d-id.com";
-const headersJson = (apiKey) => ({
-  "Authorization": `Basic ${apiKey}`, // D-ID expects Basic <apiKey>
-  "Content-Type": "application/json"
-});
-
-const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-
-// Poll a D-ID "talk" until it's done (avatar mode)
-async function pollTalk(apiKey, id, timeoutMs = 60_000) {
-  const started = Date.now();
-  while (Date.now() - started < timeoutMs) {
-    const res = await fetch(`${DID_API}/talks/${id}`, { headers: headersJson(apiKey) });
-    if (!res.ok) throw new Error(`poll talks failed: ${res.status}`);
-    const data = await res.json();
-    if (data.status === "done" && data.result_url) return data.result_url;
-    if (data.status === "error") throw new Error(data.error || "D-ID talk error");
-    await sleep(1200);
-  }
-  throw new Error("D-ID talk timeout");
-}
+const API_KEY = process.env.DID_API_KEY || "";             // <— set in Netlify env
+const SOURCE_URL = process.env.DID_AVATAR_SOURCE_URL || ""; // <— set in Netlify env
 
 exports.handler = async (event) => {
   try {
-    if (event.httpMethod !== "POST") {
-      return { statusCode: 405, body: "Method Not Allowed" };
+    if (event.httpMethod === "OPTIONS") {
+      return ok({}, 204); // CORS preflight if needed
     }
 
-    const API_KEY = process.env.DID_API_KEY;
-    if (!API_KEY) {
-      return { statusCode: 500, body: JSON.stringify({ error: "Missing DID_API_KEY" }) };
+    if (event.httpMethod === "GET") {
+      // Poll talk status: /api/did-speak?id=xxx
+      const id = (event.queryStringParameters?.id || "").trim();
+      if (!id) return bad("Missing id");
+      if (!API_KEY) return ok({ fallback: true }); // no D-ID configured
+
+      const r = await fetch(`${DID_API}/talks/${encodeURIComponent(id)}`, {
+        headers: { "Authorization": `Basic ${API_KEY}` }
+      });
+      const j = await r.json();
+
+      // Shape normalization
+      const status = j?.status || j?.state || "";
+      const resultUrl =
+        j?.result_url ||
+        j?.result_url_mp4 ||
+        j?.result?.url ||
+        j?.audio?.url ||
+        "";
+
+      return ok({ status, result_url: resultUrl });
     }
 
-    const body = JSON.parse(event.body || "{}");
-    const text = (body.text || "").toString().trim();
-    const mode = (body.mode || "voice"); // 'voice' | 'avatar'
-    const voiceId = (body.voiceId || process.env.DID_VOICE_ID || "").trim();
-    const avatarSource = (body.avatarSource || process.env.DID_AVATAR_SOURCE_URL || "").trim();
+    // POST: create a talk from text
+    if (event.httpMethod === "POST") {
+      const body = JSON.parse(event.body || "{}");
+      const text = (body.text || "").trim();
+      const mode = (body.mode || "D-ID Avatar").trim();
 
-    if (!text) {
-      return { statusCode: 400, body: JSON.stringify({ error: "Missing text" }) };
-    }
+      if (!text) return bad("Missing text");
 
-    if (mode === "voice") {
-      // --- VOICE (AUDIO ONLY) using D-ID TTS ---
-      if (!voiceId) {
-        return { statusCode: 400, body: JSON.stringify({ error: "Missing DID_VOICE_ID" }) };
+      // If D-ID config is missing, tell client to fallback to local TTS
+      if (!API_KEY || !SOURCE_URL || mode !== "D-ID Avatar") {
+        return ok({ fallback: true, text });
       }
 
-      const res = await fetch(`${DID_API}/tts`, {
+      const payload = {
+        script: { type: "text", input: text },
+        source_url: SOURCE_URL
+      };
+
+      const res = await fetch(`${DID_API}/talks`, {
         method: "POST",
-        headers: headersJson(API_KEY),
-        body: JSON.stringify({
-          text,
-          voice_id: voiceId,
-          // Optional knobs you can tweak later:
-          // voice_config: { style: 'General', speed: 1.0 }
-        })
+        headers: {
+          "Content-Type": "application/json",
+          "Authorization": `Basic ${API_KEY}`
+        },
+        body: JSON.stringify(payload)
       });
 
-      const data = await res.json().catch(() => ({}));
+      const data = await res.json();
+
+      // If API returns result_url right away, pass it through; otherwise return id to poll
+      const resultUrl =
+        data?.result_url ||
+        data?.result_url_mp4 ||
+        data?.result?.url ||
+        data?.audio?.url ||
+        "";
+
+      if (resultUrl) return ok({ status: "done", result_url: resultUrl });
+      if (data?.id) return ok({ id: data.id, status: data.status || "created" });
+
+      // If error shape
       if (!res.ok) {
-        return { statusCode: res.status, body: JSON.stringify({ error: data?.error || "D-ID TTS failed", debug: data }) };
+        return ok({ fallback: true, error: data }, res.status);
       }
-      if (!data.audio_url) {
-        return { statusCode: 502, body: JSON.stringify({ error: "No audio_url from D-ID", debug: data }) };
-      }
-      return {
-        statusCode: 200,
-        body: JSON.stringify({ kind: "audio", url: data.audio_url })
-      };
+
+      // Unknown but not fatal — fallback
+      return ok({ fallback: true });
     }
 
-    // --- AVATAR (VIDEO) using D-ID talks ---
-    // You must supply a source image/video url that exists in D-ID (or a public URL they can pull).
-    const source_url = avatarSource || "https://d-id-public-bucket.s3.amazonaws.com/or-roman.jpg"; // placeholder/demo image
-    const create = await fetch(`${DID_API}/talks`, {
-      method: "POST",
-      headers: headersJson(API_KEY),
-      body: JSON.stringify({
-        source_url,
-        script: {
-          type: "text",
-          input: text,
-          provider: {
-            type: "elevenlabs",
-            // If your D-ID voice is linked to ElevenLabs, voice_id normally works here.
-            voice_id: voiceId || undefined
-          }
-        }
-      })
-    });
-
-    const created = await create.json().catch(() => ({}));
-    if (!create.ok) {
-      return { statusCode: create.status, body: JSON.stringify({ error: created?.error || "D-ID talk create failed", debug: created }) };
-    }
-    if (!created.id) {
-      return { statusCode: 502, body: JSON.stringify({ error: "Missing talk id from D-ID", debug: created }) };
-    }
-
-    // Poll until ready
-    const videoUrl = await pollTalk(API_KEY, created.id);
-    return {
-      statusCode: 200,
-      body: JSON.stringify({ kind: "video", url: videoUrl })
-    };
-
+    return bad("Method not allowed", 405);
   } catch (err) {
-    return { statusCode: 500, body: JSON.stringify({ error: err.message || String(err) }) };
+    return ok({ fallback: true, error: String(err) }, 200);
   }
 };
+
+// ---------- helpers ----------
+function ok(json, status = 200) {
+  return {
+    statusCode: status,
+    headers: {
+      "Content-Type": "application/json",
+      "Cache-Control": "no-store"
+    },
+    body: JSON.stringify(json)
+  };
+}
+function bad(msg, status = 400) {
+  return ok({ error: msg }, status);
+}
