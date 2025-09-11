@@ -1,7 +1,5 @@
 // netlify/functions/did-speak.js
-// CommonJS for consistency with your other functions.
-
-const fetch = require("node-fetch");
+// CJS + uses global fetch (Node 18+). No node-fetch needed.
 
 const API = "https://api.d-id.com";
 
@@ -17,29 +15,28 @@ exports.handler = async (event) => {
 
   try {
     const DID_API_KEY = process.env.DID_API_KEY;
-    const DID_AVATAR_SOURCE_URL = process.env.DID_AVATAR_SOURCE_URL; // public image/video URL of your avatar
-    const DID_VOICE_ID = process.env.DID_VOICE_ID;                   // ElevenLabs voice_id configured in D-ID
+    const DID_AVATAR_SOURCE_URL = process.env.DID_AVATAR_SOURCE_URL; // public avatar image/video URL
+    const DID_VOICE_ID = process.env.DID_VOICE_ID;                   // ElevenLabs voice_id configured inside D-ID
 
     if (!DID_API_KEY || !DID_AVATAR_SOURCE_URL || !DID_VOICE_ID) {
       return json(400, { error: "Missing env: DID_API_KEY, DID_AVATAR_SOURCE_URL, DID_VOICE_ID" });
     }
 
     if (event.httpMethod === "GET") {
-      // Poll a talk status: /.netlify/functions/did-speak?id=xxx
+      // Poll talk status: /.netlify/functions/did-speak?id=xxxx
       const id = (event.queryStringParameters && event.queryStringParameters.id) || "";
       if (!id) return json(400, { error: "Missing id" });
 
-      const r = await fetch(`${API}/talks/${id}`, {
+      const r = await fetch(`${API}/talks/${encodeURIComponent(id)}`, {
         headers: {
           Authorization: `Bearer ${DID_API_KEY}`,
           "Content-Type": "application/json",
         },
       });
-      if (!r.ok) {
-        return json(r.status, { error: await safeText(r) });
-      }
+
+      if (!r.ok) return json(r.status, { error: await safeText(r) });
+
       const data = await r.json();
-      // When done, data.result_url will be present
       return json(200, {
         status: data.status,
         url: data.result_url || null,
@@ -47,13 +44,12 @@ exports.handler = async (event) => {
       });
     }
 
-    // POST => create a talk
     if (event.httpMethod === "POST") {
-      const body = JSON.parse(event.body || "{}");
+      // Create a talk
+      const body = safeJSON(event.body);
       const text = (body && body.text) || "";
       if (!text.trim()) return json(400, { error: "Missing text" });
 
-      // D-ID create talk payload
       const payload = {
         script: {
           type: "text",
@@ -65,9 +61,7 @@ exports.handler = async (event) => {
           fluent: true,
           pad_audio: 0,
           stitch: true,
-          // You can add lipsync, alignment options later
         },
-        // result_url is returned after processing via GET /talks/:id
       };
 
       const r = await fetch(`${API}/talks`, {
@@ -79,9 +73,8 @@ exports.handler = async (event) => {
         body: JSON.stringify(payload),
       });
 
-      if (!r.ok) {
-        return json(r.status, { error: await safeText(r) });
-      }
+      if (!r.ok) return json(r.status, { error: await safeText(r) });
+
       const data = await r.json();
       return json(200, { id: data.id || null });
     }
@@ -106,6 +99,10 @@ function json(status, obj) {
     headers: { "Content-Type": "application/json", ...cors() },
     body: JSON.stringify(obj),
   };
+}
+
+function safeJSON(s) {
+  try { return JSON.parse(s || "{}"); } catch { return {}; }
 }
 async function safeText(r) {
   try { return await r.text(); } catch { return "unknown error"; }
