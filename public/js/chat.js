@@ -1,252 +1,294 @@
-// public/js/chat.js
+/* chat.js — robust SSE/JSON client for Keilani Chat
+   - Requires elements with ids: feed, form, input, sendBtn, model, api, token, stream, sse
+   - No inline JS. Safe with your CSP. */
+
 (() => {
-  const LS_KEY = "keilani.chat.v3";
-  const $ = (sel) => document.querySelector(sel);
+  // ---------- DOM ----------
+  const $ = (id) => document.getElementById(id);
+  const feed = $("feed");
+  const form = $("form");
+  const input = $("input");
+  const sendBtn = $("sendBtn");
+  const modelSel = $("model");
+  const apiCtrl = $("api");
+  const tokenCtrl = $("token");
+  const streamChk = $("stream");
+  const sseChk = $("sse");
+  const rawBtn = $("rawBtn"); // optional in HTML; guarded below
 
-  // ---- UI wiring -----------------------------------------------------------
-  const ui = {
-    feed:    $("#feed"),
-    input:   $("#input"),
-    form:    $("#form"),
-    sendBtn: $("#sendBtn"),
-    model:   $("#model"),
-    api:     $("#api"),
-    token:   $("#token"),
-    stream:  $("#stream"),
-    sse:     $("#sse"),
-  };
-
-  // Validate required nodes
-  const missing = Object.entries(ui)
-    .filter(([, node]) => !node)
-    .map(([k]) => k);
+  // Guard & log missing nodes (helps when HTML changes)
+  const missing = [
+    ["feed", feed], ["form", form], ["input", input], ["sendBtn", sendBtn],
+    ["model", modelSel], ["api", apiCtrl], ["token", tokenCtrl],
+    ["stream", streamChk], ["sse", sseChk],
+  ].filter(([_, el]) => !el).map(([k]) => k);
   if (missing.length) {
-    console.error("[chat.js] Missing UI nodes:", missing.join(", "));
+    console.error("[chat.js] Missing UI nodes:", ...missing);
     return;
   }
+  console.log("[chat.js] UI found:", {
+    feed: !!feed, input: !!input, form: !!form, sendBtn: !!sendBtn,
+    model: !!modelSel, api: !!apiCtrl, token: !!tokenCtrl,
+    stream: !!streamChk, sse: !!sseChk
+  });
 
-  // ---- tiny helpers --------------------------------------------------------
-  const log = (...a) => console.log("[chat.js]", ...a);
-  const esc = (s) => s.replace(/[&<>]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;" }[c]));
-  const now = () => new Date().toISOString().slice(0, 19).replace("T", " ");
+  // ---------- helpers ----------
+  const escapeHtml = (s) =>
+    s.replace(/[&<>"']/g, (c) => ({ "&":"&amp;", "<":"&lt;", ">":"&gt;", '"':"&quot;", "'":"&#39;" }[c]));
 
-  function bubble(role, text, opts = {}) {
-    const outer = document.createElement("div");
-    outer.className = `msg ${role}`;
-    outer.setAttribute("data-ts", now());
+  const addMsg = (role, content, opts = {}) => {
+    const wrap = document.createElement("div");
+    wrap.className = "msg";
+    const bubble = document.createElement("div");
+    bubble.className = "bubble" + (role === "assistant" ? " assistant" : "");
+    bubble.innerHTML = escapeHtml(content ?? "");
+    if (opts.mono) bubble.style.fontFamily =
+      'SFMono-Regular, Menlo, Consolas, "Liberation Mono", monospace';
+    wrap.appendChild(bubble);
+    feed.appendChild(wrap);
+    // ensure last message visible
+    bubble.scrollIntoView({ behavior: "smooth", block: "end" });
+    return bubble;
+  };
 
-    const inner = document.createElement("div");
-    inner.className = "msg-bubble";
+  const addSystemTip = (text) =>
+    addMsg("assistant", text ?? "", { mono: false });
 
-    if (opts.rawHtml) {
-      inner.innerHTML = text;
-    } else {
-      // keep it safe + simple
-      inner.innerHTML = esc(text).replace(/\n/g, "<br/>");
-    }
-
-    outer.appendChild(inner);
-    ui.feed.appendChild(outer);
-    ui.feed.scrollTop = ui.feed.scrollHeight;
-    return inner; // allow incremental streaming append
-  }
-
-  function saveState() {
-    const data = {
-      api: ui.api.value.trim(),
-      token: ui.token.value.trim(),
-      model: ui.model.value,
-      stream: !!ui.stream.checked,
-      sse: !!ui.sse.checked,
+  const buildMessagesFromFeed = () => {
+    // Minimal: use just the composer input; optionally you could parse the DOM to reconstruct history
+    const sys = {
+      role: "system",
+      content:
+        "You are Keilani, a helpful AI assistant. Be concise, clear, and kind.",
     };
+    const user = { role: "user", content: input.value.trim() || "" };
+    return [sys, user];
+  };
+
+  const headers = (clientToken, expectSSE) => {
+    const h = {
+      "Content-Type": "application/json",
+      "Accept": expectSSE ? "text/event-stream" : "application/json",
+    };
+    // Pass-through client token if present (your proxy reads this)
+    if (clientToken) h["X-Client-Token"] = clientToken;
+    return h;
+  };
+
+  const payload = () => {
+    const m = modelSel.value || "gpt-5";
+    const body = {
+      model: m,
+      stream: !!streamChk.checked,
+      messages: buildMessagesFromFeed(),
+    };
+    // Intentionally omit temperature for gpt-5; allow defaults
+    // (If you add a slider later, gate it by model here)
+    return body;
+  };
+
+  // ---------- send routines ----------
+  let lastRequestMeta = null;
+
+  const sendJSON = async () => {
+    const url = apiCtrl.value.trim();
+    const clientToken = tokenCtrl.value.trim();
+    const wantSSE = !!sseChk.checked;
+    const body = payload();
+
+    lastRequestMeta = {
+      when: new Date().toISOString(),
+      url,
+      wantSSE,
+      body,
+      headers: headers(clientToken, wantSSE),
+    };
+
+    // User bubble
+    const userText = body.messages.at(-1)?.content || "";
+    addMsg("user", userText);
+
+    // Assistant bubble (target for streaming or final paste)
+    const out = addMsg("assistant", "…", { mono: false });
+
     try {
-      localStorage.setItem(LS_KEY, JSON.stringify(data));
-    } catch {}
-  }
+      const res = await fetch(url, {
+        method: "POST",
+        headers: headers(clientToken, wantSSE),
+        body: JSON.stringify(body),
+      });
 
-  function loadState() {
-    try {
-      const raw = localStorage.getItem(LS_KEY);
-      if (!raw) return;
-      const s = JSON.parse(raw);
-      if (s.api) ui.api.value = s.api;
-      if (s.token) ui.token.value = s.token;
-      if (s.model) ui.model.value = s.model;
-      if (typeof s.stream === "boolean") ui.stream.checked = s.stream;
-      if (typeof s.sse === "boolean") ui.sse.checked = s.sse;
-    } catch {}
-  }
-
-  // ---- network helpers -----------------------------------------------------
-  // Non-SSE JSON path
-  async function fetchJSON(endpoint, payload) {
-    const res = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-    const data = await res.json();
-
-    // Try OpenAI-style first
-    if (data?.choices?.[0]?.message?.content) {
-      return data.choices[0].message.content;
-    }
-    // Some proxies return { content: "..." }
-    if (typeof data?.content === "string") {
-      return data.content;
-    }
-    // Netlify function may wrap as { success, data: { choices... } }
-    if (data?.data?.choices?.[0]?.message?.content) {
-      return data.data.choices[0].message.content;
-    }
-    // Fallback: pretty print
-    return JSON.stringify(data, null, 2);
-  }
-
-  // Streaming via SSE-compatible response (server sends "data: {json}\n\n")
-  async function fetchStream(endpoint, payload, onDelta, onDone) {
-    const res = await fetch(endpoint, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload),
-    });
-    if (!res.ok) throw new Error(`HTTP ${res.status}`);
-
-    // Expect text/event-stream, but we'll be tolerant and parse "data:" lines
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder("utf-8");
-    let buffer = "";
-
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-
-      // split by SSE frame separator
-      let idx;
-      while ((idx = buffer.indexOf("\n\n")) >= 0) {
-        const frame = buffer.slice(0, idx).trim();
-        buffer = buffer.slice(idx + 2);
-
-        // Only handle data: lines
-        const lines = frame.split("\n").filter(Boolean);
-        for (const line of lines) {
-          if (!line.startsWith("data:")) continue;
-          const payload = line.slice(5).trim();
-          if (payload === "[DONE]") {
-            onDone?.();
-            return;
-          }
-          try {
-            const json = JSON.parse(payload);
-            // OpenAI-style chunk
-            const delta = json?.choices?.[0]?.delta?.content ?? "";
-            if (delta) onDelta(delta);
-            // Some backends send { content: "..." } directly
-            if (!delta && typeof json?.content === "string") onDelta(json.content);
-          } catch {
-            // tolerate non-JSON data lines (debug frames)
-            if (payload) onDelta(payload + "\n");
-          }
-        }
+      if (!res.ok) {
+        // Show full error body (often HTML or JSON) so we can see root cause
+        const errText = await res.text().catch(() => "");
+        out.innerHTML =
+          `⚠ Upstream error (${res.status} ${res.statusText})\n\n` +
+          (errText ? errText : "(empty response)");
+        out.style.whiteSpace = "pre-wrap";
+        return;
       }
-    }
-    onDone?.();
-  }
 
-  // ---- send flow -----------------------------------------------------------
-  async function send(message) {
-    const endpoint = ui.api.value.trim();
-    if (!endpoint) return bubble("assistant", "⚠️ Please set the API endpoint first.");
-
-    const model = ui.model.value;
-    const clientToken = ui.token.value.trim();
-    const stream = !!ui.stream.checked;
-    const expectSSE = !!ui.sse.checked;
-
-    // user bubble
-    bubble("user", message);
-
-    // payload matches our Netlify/OpenAI proxy
-    const payload = {
-      model,
-      stream,
-      client_token: clientToken || undefined,
-      // minimal OpenAI-style messages array
-      messages: [{ role: "user", content: message }],
-    };
-
-    log("POST", endpoint, { stream, expectSSE });
-    saveState();
-
-    // assistant bubble placeholder for streaming or final reply
-    const slot = bubble("assistant", expectSSE ? "…" : "");
-
-    try {
-      if (expectSSE) {
-        // STREAMING
-        await fetchStream(
-          endpoint,
-          payload,
-          (delta) => {
-            slot.innerHTML += esc(delta).replace(/\n/g, "<br/>");
-            ui.feed.scrollTop = ui.feed.scrollHeight;
-          },
-          () => {
-            // done
-          }
-        );
+      if (wantSSE) {
+        await readSSE(res, out);
       } else {
-        // JSON (non-SSE)
-        const text = await fetchJSON(endpoint, payload);
-        slot.innerHTML = esc(text).replace(/\n/g, "<br/>");
+        await readJSONorText(res, out);
       }
-    } catch (err) {
-      slot.innerHTML = `⚠️ ${esc(err.message || String(err))}`;
+    } catch (e) {
+      out.innerHTML = `⚠ Network error:\n\n${escapeHtml(String(e?.message || e))}`;
+      out.style.whiteSpace = "pre-wrap";
+    } finally {
+      input.value = "";
     }
-  }
+  };
 
-  // ---- events & boot -------------------------------------------------------
-  function wire() {
-    // Enter = send; Shift+Enter = newline
-    ui.input.addEventListener("keydown", (e) => {
-      if (e.key === "Enter" && !e.shiftKey) {
-        e.preventDefault();
-        if (ui.input.value.trim()) {
-          const m = ui.input.value.trim();
-          ui.input.value = "";
-          send(m);
+  const readJSONorText = async (res, outBubble) => {
+    // Try JSON first
+    const ctype = res.headers.get("content-type") || "";
+    if (ctype.includes("application/json")) {
+      const data = await res.json();
+      // Support both OpenAI’s shape and a simple proxy {content:"..."}
+      let text = "";
+      if (data?.choices?.length) {
+        const msg = data.choices[0]?.message;
+        text = msg?.content ?? "";
+      } else if (typeof data?.content === "string") {
+        text = data.content;
+      } else if (typeof data?.reply === "string") {
+        text = data.reply;
+      } else {
+        text = JSON.stringify(data, null, 2);
+        outBubble.style.whiteSpace = "pre-wrap";
+      }
+      outBubble.innerHTML = escapeHtml(text);
+      return;
+    }
+
+    // Not JSON → fallback to text to avoid JSON.parse crashes
+    const txt = await res.text();
+    outBubble.innerHTML =
+      `⚠ Non-JSON response (content-type: ${escapeHtml(ctype)})\n\n` +
+      escapeHtml(txt.slice(0, 4000));
+    outBubble.style.whiteSpace = "pre-wrap";
+  };
+
+  const readSSE = async (res, outBubble) => {
+    // Stream Server-Sent Events: parse "data: ..." lines
+    const reader = res.body?.getReader();
+    if (!reader) {
+      outBubble.textContent = "⚠ Streaming not supported in this browser.";
+      return;
+    }
+    const decoder = new TextDecoder();
+    let buffer = "", done = false, acc = "";
+
+    while (!done) {
+      const chunk = await reader.read();
+      done = chunk.done;
+      buffer += decoder.decode(chunk.value || new Uint8Array(), { stream: !done });
+
+      // Process complete lines
+      let idx;
+      while ((idx = buffer.indexOf("\n")) >= 0) {
+        const line = buffer.slice(0, idx).trim();
+        buffer = buffer.slice(idx + 1);
+
+        if (!line) continue;
+        if (!line.startsWith("data:")) continue;
+
+        const payload = line.slice(5).trim();
+        if (payload === "[DONE]") {
+          done = true;
+          break;
+        }
+
+        try {
+          const obj = JSON.parse(payload);
+          // OpenAI chat.completion.chunk shape
+          const delta = obj?.choices?.[0]?.delta?.content ?? "";
+          if (typeof delta === "string" && delta.length) {
+            acc += delta;
+            outBubble.textContent = acc;
+          }
+        } catch {
+          // Some proxies may forward plain text; show it raw
+          acc += payload + "\n";
+          outBubble.textContent = acc;
         }
       }
-    });
-
-    ui.sendBtn.addEventListener("click", () => {
-      if (!ui.input.value.trim()) return;
-      const m = ui.input.value.trim();
-      ui.input.value = "";
-      send(m);
-    });
-
-    // persist on changes
-    [ui.api, ui.token, ui.model, ui.stream, ui.sse].forEach((n) =>
-      n.addEventListener("change", saveState)
-    );
-
-    // expose a console helper for quick tests
-    window.__send = (m) => send(m || ui.input.value.trim());
-
-    // greet
-    if (!ui.feed.querySelector(".msg")) {
-      bubble(
-        "assistant",
-        "Hi! I’m here and working. What can I help you with today?\n\n• Ask a quick question\n• Summarize a paragraph\n• Generate a short code snippet\n• Translate a sentence"
-      );
     }
-  }
+  };
 
-  loadState();
-  wire();
-  log("UI found:", Object.fromEntries(Object.entries(ui).map(([k, v]) => [k, !!v])));
-  log("Ready. Tip: call window.__send() in console to force a send.");
+  // ---------- wire up ----------
+  const doSend = () => {
+    if (!input.value.trim()) return;
+    sendJSON();
+  };
+
+  sendBtn.addEventListener("click", doSend);
+  form.addEventListener("submit", (e) => {
+    e.preventDefault();
+    doSend();
+  });
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter" && !e.shiftKey) {
+      e.preventDefault();
+      doSend();
+    }
+  });
+
+  // Utility buttons
+  $("clearBtn")?.addEventListener("click", () => {
+    feed.innerHTML = "";
+    input.value = "";
+  });
+  $("resetBtn")?.addEventListener("click", () => {
+    feed.innerHTML = "";
+    input.value = "";
+    addSystemTip("Hi! I’m here and working. What can I help you with today?\n\n• Ask a quick question\n• Summarize a paragraph\n• Generate a short code snippet\n• Translate a sentence");
+  });
+  $("exportBtn")?.addEventListener("click", () => {
+    const text = [...feed.querySelectorAll(".bubble")]
+      .map((el) => el.textContent.trim())
+      .join("\n\n");
+    const blob = new Blob([text], { type: "text/plain;charset=utf-8" });
+    const url = URL.createObjectURL(blob);
+    const a = Object.assign(document.createElement("a"), { href: url, download: `keilani-chat-${Date.now()}.txt` });
+    document.body.appendChild(a); a.click(); a.remove(); URL.revokeObjectURL(url);
+  });
+  $("saveBtn")?.addEventListener("click", () => {
+    const cfg = {
+      api: apiCtrl.value, model: modelSel.value,
+      stream: !!streamChk.checked, sse: !!sseChk.checked,
+    };
+    localStorage.setItem("keilani.chat.cfg", JSON.stringify(cfg));
+    addSystemTip("Saved ✓");
+  });
+
+  // Raw inspector for quick debugging
+  rawBtn?.addEventListener("click", () => {
+    const pre = document.createElement("pre");
+    pre.className = "bubble";
+    pre.style.whiteSpace = "pre-wrap";
+    pre.textContent = JSON.stringify(lastRequestMeta, null, 2);
+    const wrap = document.createElement("div");
+    wrap.className = "msg";
+    wrap.appendChild(pre);
+    feed.appendChild(wrap);
+    pre.scrollIntoView({ behavior: "smooth", block: "end" });
+  });
+
+  // Restore saved prefs
+  try {
+    const cfg = JSON.parse(localStorage.getItem("keilani.chat.cfg") || "{}");
+    if (cfg.api) apiCtrl.value = cfg.api;
+    if (cfg.model) modelSel.value = cfg.model;
+    if (typeof cfg.stream === "boolean") streamChk.checked = cfg.stream;
+    if (typeof cfg.sse === "boolean") sseChk.checked = cfg.sse;
+  } catch {}
+
+  // Warm welcome
+  addSystemTip("Hi! I’m here and working. What can I help you with today?\n\n• Ask a quick question\n• Summarize a paragraph\n• Generate a short code snippet\n• Translate a sentence");
+
+  // Debug helper
+  window.__send = doSend;
 })();
