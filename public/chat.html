@@ -2,288 +2,166 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Keilani • Chat (Streaming + Voice)</title>
+    <title>Keilani Chat • Streaming + Voice</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
 
+    <!-- Theme & basic styles -->
     <style>
       :root {
         --bg: #0b0f1a;
-        --panel: #0f1422;
-        --bubble: #151b2b;
-        --muted: #8aa0c9;
-        --text: #e6efff;
-        --accent: #8856fc;
-        --accent-2: #66e0ff;
-        --border: #1f2a44;
-        --btn: #2d3a66;
-        --btnh: #34446e;
+        --panel: #111927;
+        --border: #22304a;
+        --text: #d7def2;
+        --accent: #8b65ff;
+        --btn: #34446b;
+        --btnHover: #22334d;
       }
       * {
         box-sizing: border-box;
       }
       body {
         margin: 0;
-        background:
-          radial-gradient(1200px 600px at 80% -20%, #0d1b30 0%, #0b0f1a 55%)
-            fixed,
-          var(--bg);
+        background: var(--bg);
         color: var(--text);
-        font:
-          14px/1.5 system-ui,
-          -apple-system,
-          Segoe UI,
-          Roboto,
-          Inter,
-          sans-serif;
+        font-family: system-ui, sans-serif;
+        font-size: 15px;
+        display: flex;
+        flex-direction: column;
+        height: 100vh;
       }
-      .toolbar {
-        position: sticky;
-        top: 0;
-        z-index: 2;
+      header {
+        display: flex;
+        align-items: center;
+        gap: 1rem;
+        padding: 0.75rem 1rem;
+        background: var(--panel);
+        border-bottom: 1px solid var(--border);
+      }
+      header h1 {
+        font-size: 16px;
+        margin: 0;
+      }
+      #toolbar {
         display: flex;
         gap: 0.5rem;
         align-items: center;
-        padding: 0.75rem 1rem;
-        background: linear-gradient(
-          180deg,
-          rgba(11, 15, 26, 0.95),
-          rgba(11, 15, 26, 0.74)
-        );
-        border-bottom: 1px solid var(--border);
-      }
-      .chip {
-        background: var(--bubble);
-        color: var(--muted);
-        border: 1px solid var(--border);
-        padding: 0.35rem 0.6rem;
-        border-radius: 999px;
-      }
-      input[type="text"],
-      input[type="password"],
-      select {
-        width: 320px;
-        background: var(--panel);
-        color: var(--text);
-        border: 1px solid var(--border);
-        border-radius: 0.6rem;
-        padding: 0.55rem 0.7rem;
-        outline: none;
-      }
-      select {
-        width: 140px;
-      }
-      input#api {
-        width: 420px;
-      }
-      .btn {
-        background: var(--btn);
-        color: var(--text);
-        border: 1px solid var(--border);
-        border-radius: 0.6rem;
-        padding: 0.5rem 0.8rem;
-        cursor: pointer;
-      }
-      .btn:hover {
-        background: var(--btnh);
-      }
-      .toggle {
-        display: flex;
-        align-items: center;
-        gap: 0.35rem;
-      }
-      .grow {
-        flex: 1;
-      }
-
-      main {
-        max-width: 1100px;
-        margin: 0 auto;
-        padding: 1rem;
+        flex-wrap: wrap;
       }
       #feed {
-        display: flex;
-        flex-direction: column;
-        gap: 0.75rem;
-        min-height: 40vh;
+        flex: 1;
+        overflow-y: auto;
+        padding: 1rem;
       }
       .msg {
-        display: flex;
-      }
-      .msg[data-role="assistant"] {
-        justify-content: flex-start;
-      }
-      .msg[data-role="user"] {
-        justify-content: flex-end;
-      }
-      .msg-bubble {
-        max-width: 80%;
-        background: var(--bubble);
-        border: 1px solid var(--border);
-        border-radius: 0.8rem;
-        padding: 0.6rem 0.75rem;
-      }
-      .msg[data-role="user"] .msg-bubble {
-        background: #0f1b35;
-      }
-      .msg-meta {
-        color: var(--muted);
-        font-size: 0.8rem;
-        margin-bottom: 0.25rem;
-      }
-      .msg-content {
+        margin-bottom: 1rem;
+        padding: 0.75rem 1rem;
+        border-radius: 0.6rem;
+        max-width: 75%;
+        line-height: 1.4;
         white-space: pre-wrap;
       }
-      .muted {
-        color: var(--muted);
+      .msg.you {
+        background: var(--btn);
+        margin-left: auto;
       }
-
-      /* composer */
-      #composer {
-        position: sticky;
-        bottom: 0;
-        padding: 1rem 0;
-        background: linear-gradient(
-          180deg,
-          rgba(11, 15, 26, 0) 0%,
-          rgba(11, 15, 26, 1) 60%
-        );
+      .msg.keilani {
+        background: var(--panel);
+        border: 1px solid var(--border);
+        margin-right: auto;
       }
-      #composer-form {
+      form {
         display: flex;
-        gap: 0.75rem;
-        align-items: flex-end;
+        padding: 0.75rem;
         background: var(--panel);
-        border: 1px solid var(--border);
-        border-radius: 1rem;
-        padding: 0.6rem;
+        border-top: 1px solid var(--border);
+        gap: 0.5rem;
       }
-      #composer-input {
+      #input {
         flex: 1;
-        min-height: 52px;
-        max-height: 240px;
-        resize: vertical;
-        background: transparent;
-        color: var(--text);
-        border: 0;
-        outline: none;
-        padding: 0.25rem 0.4rem;
-        font: inherit;
-      }
-      #send-btn {
-        min-width: 84px;
-      }
-
-      /* voice dock */
-      #voice-dock {
-        display: none;
-        margin-top: 1rem;
-        padding: 0.6rem;
-        border: 1px solid var(--border);
-        border-radius: 0.8rem;
-        background: var(--panel);
-      }
-      #voice-video,
-      #voice-audio {
-        width: 100%;
+        resize: none;
+        padding: 0.6rem 0.8rem;
         border-radius: 0.5rem;
+        border: 1px solid var(--border);
+        background: var(--bg);
+        color: var(--text);
+        font-size: 14px;
+        min-height: 48px;
       }
-      #voice-audio {
+      #send {
+        background: var(--accent);
+        border: none;
+        border-radius: 0.5rem;
+        color: white;
+        font-weight: bold;
+        padding: 0 1.2rem;
+        cursor: pointer;
+        transition: background 0.2s;
+      }
+      #send:hover {
+        background: #6a4fd8;
+      }
+      /* Hidden voice/video */
+      #voiceAudio,
+      #voiceVideo {
         display: none;
       }
     </style>
+
+    <!-- highlight.js theme -->
+    <link rel="stylesheet" href="/vendor/github-dark.min.css" />
   </head>
   <body>
-    <div class="toolbar">
-      <span class="chip">Streaming</span>
-      <label class="muted">Model:</label>
-      <select id="model">
-        <option value="gpt-5" selected>gpt-5</option>
-        <option value="gpt-4.1">gpt-4.1</option>
-        <option value="o4-mini">o4-mini</option>
-      </select>
-
-      <input
-        id="api"
-        type="text"
-        placeholder="https://api.keilani.ai/api/chat"
-      />
-      <input id="token" type="text" placeholder="Client Token (optional)" />
-
-      <button class="btn" id="save">Save</button>
-      <button class="btn" id="export">Export .txt</button>
-      <button class="btn" id="clear">Clear</button>
-      <button class="btn" id="reset">Reset Session</button>
-
-      <label class="toggle"
-        ><input id="stream" type="checkbox" checked />
-        <span class="muted">Stream</span></label
-      >
-      <label class="toggle"
-        ><input id="expect-sse" type="checkbox" checked />
-        <span class="muted">Expect SSE</span></label
-      >
-
-      <div class="grow"></div>
-
-      <div class="chip">Tokens: <span id="tokens">0 • 0/s</span></div>
-      <div class="chip">SID: <span id="sid">—</span></div>
-    </div>
-
-    <main>
-      <div id="feed">
-        <!-- bubbles rendered here -->
-        <div class="msg" data-role="assistant">
-          <div class="msg-bubble">
-            <div class="msg-meta">
-              Keilani <span class="muted" id="hello-ts"></span>
-            </div>
-            <div class="msg-content">
-              Hi! I’m here and working. What can I help you with today? • Ask a
-              quick question • Summarize a paragraph • Generate a short code
-              snippet • Translate a sentence
-            </div>
-          </div>
-        </div>
-      </div>
-
-      <!-- Voice dock (video preferred, audio fallback) -->
-      <div id="voice-dock">
-        <video id="voice-video" playsinline controls></video>
-        <audio id="voice-audio" controls></audio>
-      </div>
-
-      <!-- Composer -->
-      <section id="composer">
-        <form id="composer-form">
-          <textarea
-            id="composer-input"
-            placeholder="Type your message…"
-          ></textarea>
-          <select id="voice-mode" class="btn" style="min-width: 110px">
-            <option value="off" selected>Voice: Off</option>
-            <option value="audio">Voice: Audio (Local)</option>
-            <option value="avatar">Voice: D-ID Avatar</option>
+    <header>
+      <h1>Keilani Chat</h1>
+      <div id="toolbar">
+        <span class="chip">Streaming</span>
+        <label
+          >Model:
+          <select id="model">
+            <option value="gpt-5" selected>gpt-5</option>
+            <option value="gpt-4o-mini">gpt-4o-mini</option>
           </select>
-          <button id="send-btn" class="btn">Send ↵</button>
-        </form>
-        <div class="muted" style="margin-top: 0.35rem">
-          Tip: <b>Enter</b> to send • <b>Shift+Enter</b> for newline
-        </div>
-      </section>
-    </main>
+        </label>
+        <input id="api" value="/api/chat" style="width: 220px" />
+        <input
+          id="token"
+          placeholder="Client Token (optional)"
+          style="width: 200px"
+        />
+        <button id="save">Save</button>
+        <button id="export">Export .txt</button>
+        <button id="clear">Clear</button>
+        <button id="reset">Reset Session</button>
+        <label><input type="checkbox" id="stream" checked /> Stream</label>
+        <label><input type="checkbox" id="sse" checked /> Expect SSE</label>
+        <label
+          >Voice:
+          <select id="voice">
+            <option value="off" selected>Off</option>
+            <option value="local">Local Voice</option>
+            <option value="did">D-ID Avatar</option>
+          </select>
+        </label>
+        <span id="tokens">Tokens: 0 • 0/s</span>
+        <span id="sid">SID: —</span>
+      </div>
+    </header>
 
-    <!-- App script last so all IDs exist -->
-    <script src="/js/chat.js?v=voice2" defer></script>
-    <script>
-      // tiny timestamp for the hello bubble
-      document.addEventListener("DOMContentLoaded", () => {
-        const el = document.getElementById("hello-ts");
-        if (el)
-          el.textContent = new Date()
-            .toISOString()
-            .replace("T", " ")
-            .slice(0, 19);
-      });
-    </script>
+    <main id="feed"></main>
+
+    <form id="form">
+      <textarea id="input" placeholder="Type your message..."></textarea>
+      <button id="send" type="submit">Send ↵</button>
+    </form>
+
+    <!-- Voice/Video playback hooks -->
+    <audio id="voiceAudio" autoplay playsinline></audio>
+    <video id="voiceVideo" autoplay playsinline muted></video>
+
+    <!-- Scripts -->
+    <script src="/vendor/dayjs.min.js"></script>
+    <script src="/vendor/marked.umd.min.js"></script>
+    <script src="/vendor/highlight.min.js"></script>
+    <script src="/js/chat.js"></script>
   </body>
 </html>
