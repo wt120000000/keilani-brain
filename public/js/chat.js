@@ -1,14 +1,14 @@
-/* Keilani Chat – resilient client (SSE + JSON)
- * v3.1
+/* Keilani Chat – resilient client v3.2
+ * - Guaranteed submit: form submit + button click + Enter
+ * - If Expect SSE = OFF => force stream:false (JSON path)
+ * - Robust SSE/JSON parsing
  */
 
 (() => {
-  // ---------- DOM helpers (robust selectors) ----------
+  // ---------------- DOM helpers ----------------
   const $ = (sel) => document.querySelector(sel);
   const byId = (id) => document.getElementById(id);
-
-  // Try a few known ids/classes to be resilient to HTML changes
-  const getEl = (...ids) => {
+  const pick = (...ids) => {
     for (const id of ids) {
       if (!id) continue;
       const el =
@@ -22,29 +22,27 @@
     return null;
   };
 
-  const feed    = getEl('feed', 'messages', 'chat-feed');
-  const input   = getEl('composer', 'input', 'prompt', 'message', 'chat-input');
-  const sendBtn = getEl('send', 'sendBtn', 'chat-send');
-  const apiEl   = getEl('api', 'endpoint', 'api-url');
-  const modelEl = getEl('model', 'modelSelect');
-  const tokenEl = getEl('client', 'clientToken', 'client-token');
-  const streamEl= getEl('stream', 'streamToggle');
-  const sseEl   = getEl('sse', 'expectSSE', 'sseToggle');
-  const resetEl = getEl('reset', 'resetSession');
-  const saveEl  = getEl('save', 'saveBtn');
+  // Expected IDs/classes in your chat.html
+  const feed     = pick('feed','messages','chat-feed');
+  const input    = pick('composer','input','prompt','message','chat-input');
+  const form     = $('form#chat') || input?.closest('form') || $('form');
+  const sendBtn  = pick('send','sendBtn','chat-send');
+  const apiEl    = pick('api','endpoint','api-url');
+  const modelEl  = pick('model','modelSelect');
+  const tokenEl  = pick('client','clientToken','client-token');
+  const streamEl = pick('stream','streamToggle');
+  const sseEl    = pick('sse','expectSSE','sseToggle');
+  const resetEl  = pick('reset','resetSession');
 
-  if (!feed || !input) {
-    console.error('[chat.js] Missing required DOM nodes. Ensure ids: feed & composer (textarea) exist.');
-    return;
-  }
+  if (!feed)  { console.error('[chat.js] Missing #feed container'); return; }
+  if (!input) { console.error('[chat.js] Missing #composer / input'); return; }
 
-  // ---------- Utilities ----------
-  const nowISO = () => new Date().toISOString().replace('T', ' ').slice(0, 19);
+  const nowISO = () => new Date().toISOString().replace('T',' ').slice(0,19);
 
-  function bubble(role, text, opts = {}) {
+  function bubble(role, text, {asHTML=false, meta=true} = {}) {
     const msg = document.createElement('div');
     msg.className = 'msg';
-    msg.setAttribute('data-role', role);
+    msg.dataset.role = role;
 
     const who = document.createElement('div');
     who.className = 'who';
@@ -52,47 +50,57 @@
 
     const body = document.createElement('div');
     body.className = 'content';
-    body.textContent = ''; // will fill below
-
-    if (opts.asHTML) {
-      body.innerHTML = text;
-    } else {
-      body.textContent = text;
-    }
+    if (asHTML) body.innerHTML = text; else body.textContent = text ?? '';
 
     msg.appendChild(who);
     msg.appendChild(body);
 
-    // Optional small timestamp
-    const ts = document.createElement('div');
-    ts.className = 'meta';
-    ts.textContent = nowISO();
-    msg.appendChild(ts);
+    if (meta) {
+      const ts = document.createElement('div');
+      ts.className = 'meta';
+      ts.textContent = nowISO();
+      msg.appendChild(ts);
+    }
 
     feed.appendChild(msg);
     feed.scrollTo({ top: feed.scrollHeight, behavior: 'smooth' });
-    return body; // return the content node for streaming updates
+    return body; // return content node for streaming updates
   }
 
-  function showError(err) {
-    const text = typeof err === 'string' ? err : (err?.message || 'Unknown error');
+  function showError(text) {
     bubble('assistant', `⚠️ ${text}`);
+  }
+
+  function getInputText() {
+    // Support textarea or contenteditable fallback
+    if (typeof input.value === 'string') return (input.value || '').trim();
+    if (input.isContentEditable) return (input.textContent || '').trim();
+    return '';
+  }
+
+  function clearInput() {
+    if (typeof input.value === 'string') input.value = '';
+    else if (input.isContentEditable) input.textContent = '';
   }
 
   function getConfig() {
     const api   = (apiEl?.value || 'https://api.keilani.ai/api/chat').trim();
     const model = (modelEl?.value || 'gpt-5').trim();
     const token = (tokenEl?.value || '').trim();
-    const stream = !!(streamEl?.checked ?? true);
-    const expectSSE = !!(sseEl?.checked ?? true);
+    const uiStream   = !!(streamEl?.checked ?? true);
+    const expectSSE  = !!(sseEl?.checked ?? true);
+
+    // IMPORTANT: if Expect SSE is OFF, force non-stream request
+    const stream = expectSSE ? uiStream : false;
+
     return { api, model, token, stream, expectSSE };
   }
 
-  // ---------- SSE reader (very tolerant) ----------
+  // ---------------- SSE reader ----------------
   async function readSSE(stream, onEvent) {
     const reader = stream.getReader();
     const decoder = new TextDecoder();
-    let buffer = '';
+    let buf = '';
     let finalText = '';
 
     const push = (s) => {
@@ -106,39 +114,31 @@
       if (done) break;
 
       const chunk = decoder.decode(value, { stream: true });
-      buffer += chunk;
-      onEvent?.({ type: 'raw', data: chunk });
+      buf += chunk;
 
-      const lines = buffer.split(/\r?\n/);
-      buffer = lines.pop() ?? '';
+      const lines = buf.split(/\r?\n/);
+      buf = lines.pop() ?? '';
 
       for (const line of lines) {
         if (!line || line.startsWith(':')) continue;
         if (!line.startsWith('data:')) continue;
+        const payload = line.slice(5).trim();
 
-        const payload = line.slice(5).trim().replace(/^\s*/, '');
         if (!payload) continue;
-
         if (payload === '[DONE]' || payload === '[done]' || payload === '__END__') {
           onEvent?.({ type: 'done', final: finalText });
           return;
         }
 
-        // Try JSON, fall back to plain text
         try {
           const obj = JSON.parse(payload);
 
-          // Extremely flexible "find the text" logic
           let delta =
-            // OpenAI chat
             obj?.choices?.[0]?.delta?.content ??
-            // OpenAI content array
             (Array.isArray(obj?.choices?.[0]?.delta?.content)
               ? obj.choices[0].delta.content.map(x => x?.text || '').join('')
               : undefined) ??
-            // Llama-ish
             obj?.delta ??
-            // Anthropic/generic
             obj?.content ??
             obj?.text ??
             obj?.message ??
@@ -147,7 +147,7 @@
           if (typeof delta !== 'string') delta = String(delta || '');
           if (delta) push(delta);
 
-          if (obj.error) onEvent?.({ type: 'error', data: obj.error });
+          if (obj?.error) onEvent?.({ type: 'error', data: obj.error });
         } catch {
           // plain text streaming
           push(payload);
@@ -158,70 +158,58 @@
     onEvent?.({ type: 'done', final: finalText });
   }
 
-  // ---------- JSON (non-SSE) parsing ----------
+  // ---------------- JSON path ----------------
   async function parseJSONResponse(resp) {
-    // Some backends return invalid content-type but still JSON
-    let text;
+    const text = await resp.text(); // tolerate wrong content-type
     try {
-      text = await resp.text();
-    } catch (e) {
-      throw new Error(`Failed reading response: ${e?.message || e}`);
-    }
+      const data = JSON.parse(text);
 
-    // If not JSON, return the raw text
-    let data;
-    try {
-      data = JSON.parse(text);
+      const finalText =
+        data?.output_text ??
+        data?.message ??
+        data?.response ??
+        data?.output ??
+        data?.content ??
+        data?.text ??
+        data?.choices?.[0]?.message?.content ??
+        data?.choices?.[0]?.delta?.content ??
+        '';
+
+      if (typeof finalText === 'string' && finalText.length) return finalText;
+      return typeof data === 'string' ? data : JSON.stringify(data, null, 2);
     } catch {
-      // Plain text (valid) – just return it
+      // not JSON – treat as plain text
       return text;
     }
-
-    const finalText =
-      data?.output_text ??
-      data?.message ??
-      data?.response ??
-      data?.output ??
-      data?.content ??
-      data?.text ??
-      data?.choices?.[0]?.message?.content ??
-      data?.choices?.[0]?.delta?.content ??
-      '';
-
-    if (typeof finalText === 'string' && finalText.length) return finalText;
-
-    // If no obvious field, return prettified JSON to help debugging
-    return typeof data === 'string' ? data : JSON.stringify(data, null, 2);
   }
 
-  // ---------- Send logic ----------
-  async function sendMessage(e) {
-    if (e) e.preventDefault();
-    const msg = (input.value || '').trim();
+  // ---------------- SEND ----------------
+  let sending = false;
+  async function sendMessage(ev) {
+    if (ev) ev.preventDefault();
+    if (sending) return;
+
+    const msg = getInputText();
     if (!msg) return;
 
     const { api, model, token, stream, expectSSE } = getConfig();
 
-    // Render user bubble
+    // render user + assistant placeholder
     bubble('user', msg);
-    input.value = '';
-    input.focus();
+    clearInput();
+    const assistantBody = bubble('assistant', '…', { meta: true });
 
-    // Create placeholder assistant bubble we can stream into
-    const assistantBody = bubble('assistant', '');
+    sending = true;
 
-    const headers = {
-      'Content-Type': 'application/json'
-    };
+    const headers = { 'Content-Type': 'application/json' };
     if (token) headers['Authorization'] = `Bearer ${token}`;
 
-    // Build a tolerant payload; DO NOT include temperature for gpt-5
-    const body = {
+    // Do NOT include temperature for gpt-5
+    const payload = {
       model,
-      stream: !!stream,
-      // server might accept either `message` or `messages`
+      stream, // already forced false if expectSSE is off
       message: msg,
-      messages: [{ role: 'user', content: msg }]
+      messages: [{ role: 'user', content: msg }],
     };
 
     let resp;
@@ -229,95 +217,122 @@
       resp = await fetch(api, {
         method: 'POST',
         headers,
-        body: JSON.stringify(body),
+        body: JSON.stringify(payload),
       });
-    } catch (err) {
-      assistantBody.textContent = `⚠️ Network error: ${err?.message || err}`;
+    } catch (e) {
+      sending = false;
+      assistantBody.textContent = `⚠️ Network error: ${e?.message || e}`;
       return;
     }
 
     if (!resp.ok) {
-      let errText = `HTTP ${resp.status}`;
-      try {
-        const t = await resp.text();
-        // Try to extract upstream error details if present
-        errText += ` – ${t}`;
-      } catch { /* ignore */ }
-      assistantBody.textContent = `⚠️ ${errText}`;
+      sending = false;
+      let t = '';
+      try { t = await resp.text(); } catch {}
+      assistantBody.textContent = `⚠️ HTTP ${resp.status}${t ? ` – ${t}` : ''}`;
       return;
     }
 
-    // STREAMING path
-    if (stream && expectSSE) {
-      try {
-        await readSSE(resp.body, (ev) => {
-          if (ev.type === 'chunk') {
-            assistantBody.textContent += ev.data;
-            feed.scrollTo({ top: feed.scrollHeight });
-          } else if (ev.type === 'error') {
-            assistantBody.textContent += `\n[error] ${ev.data}`;
+    try {
+      if (stream && expectSSE) {
+        assistantBody.textContent = '';
+        await readSSE(resp.body, (evt) => {
+          if (evt.type === 'chunk') {
+            assistantBody.textContent += evt.data;
+            feed.scrollTop = feed.scrollHeight;
           }
         });
-      } catch (err) {
-        assistantBody.textContent += `\n⚠️ Stream error: ${err?.message || err}`;
+      } else {
+        const txt = await parseJSONResponse(resp);
+        assistantBody.textContent = txt;
       }
-      return;
-    }
-
-    // NON-STREAM (JSON or text) path
-    try {
-      const finalText = await parseJSONResponse(resp);
-      assistantBody.textContent = finalText;
-    } catch (err) {
-      assistantBody.textContent = `⚠️ Invalid JSON response (try enabling “Expect SSE”): ${err?.message || err}`;
+    } catch (e) {
+      assistantBody.textContent = `⚠️ Parse error: ${e?.message || e}`;
+    } finally {
+      sending = false;
     }
   }
 
-  // ---------- Wire up ----------
-  function init() {
-    // Enter to send; Shift+Enter for newline
-    input?.addEventListener('keydown', (e) => {
-      if (e.key === 'Enter' && !e.shiftKey) {
+  // ---------------- WIRING ----------------
+  function wireSubmitHandlers() {
+    // Enter on textarea/contenteditable
+    input.addEventListener('keydown', (e) => {
+      const isEnter = e.key === 'Enter';
+      const isShift = e.shiftKey;
+      if (isEnter && !isShift) {
         e.preventDefault();
         sendMessage();
       }
     });
 
+    // Send button
     sendBtn?.addEventListener('click', sendMessage);
-    resetEl?.addEventListener('click', () => {
-      // Simple visual reset
-      feed.innerHTML = '';
-      bubble('assistant',
-        `Hi! I’m here and working. What can I help you with?\n\n• Ask a quick question\n• Summarize a paragraph\n• Generate a short code snippet\n• Translate a sentence`
-      );
+
+    // Form submit (covers button + Enter in some browsers)
+    form?.addEventListener('submit', sendMessage);
+
+    // Document-level fallback (if focus is elsewhere)
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && (document.activeElement === document.body)) {
+        e.preventDefault();
+        sendMessage();
+      }
     });
 
-    // Render a tiny welcome if the feed is empty
-    if (!feed.children.length) {
-      bubble('assistant',
-        `Hi! I’m here and working. What can I help you with?\n\n• Ask a quick question\n• Summarize a paragraph\n• Generate a short code snippet\n• Translate a sentence`
-      );
-    }
-
-    // Optional: persist a few fields
-    const ls = (k, v) => (v === undefined ? localStorage.getItem(k) : localStorage.setItem(k, v));
-    ['api', 'model', 'client', 'stream', 'sse'].forEach((k) => {
-      const el = getEl(k);
-      if (!el) return;
-      const key = `chat:${k}`;
-      // load
-      if (el.type === 'checkbox') {
-        const v = ls(key);
-        if (v !== null) el.checked = v === '1';
-        el.addEventListener('change', () => ls(key, el.checked ? '1' : '0'));
-      } else {
-        const v = ls(key);
-        if (v !== null) el.value = v;
-        el.addEventListener('change', () => ls(key, el.value || ''));
-        el.addEventListener('blur',   () => ls(key, el.value || ''));
-      }
+    // Reset session just clears UI
+    resetEl?.addEventListener('click', (e) => {
+      e.preventDefault();
+      feed.innerHTML = '';
+      welcome();
     });
   }
 
-  init();
+  function welcome() {
+    bubble('assistant',
+`Hi! I’m here and working. What can I help you with today?
+
+• Ask a quick question
+• Summarize a paragraph
+• Generate a short code snippet
+• Translate a sentence`);
+  }
+
+  function restorePersisted() {
+    const ls = (k,v) => (v===undefined ? localStorage.getItem(k) : localStorage.setItem(k,v));
+    const fields = [
+      ['api', apiEl],
+      ['model', modelEl],
+      ['client', tokenEl],
+      ['stream', streamEl, 'checkbox'],
+      ['sse', sseEl, 'checkbox'],
+    ];
+    for (const [key, el, type] of fields) {
+      if (!el) continue;
+      const lsKey = `chat:${key}`;
+      if (type === 'checkbox') {
+        const v = ls(lsKey);
+        if (v !== null) el.checked = v === '1';
+        el.addEventListener('change', () => ls(lsKey, el.checked ? '1' : '0'));
+      } else {
+        const v = ls(lsKey);
+        if (v !== null) el.value = v;
+        const save = () => ls(lsKey, el.value || '');
+        el.addEventListener('change', save);
+        el.addEventListener('blur', save);
+      }
+    }
+  }
+
+  function init() {
+    restorePersisted();
+    wireSubmitHandlers();
+    if (!feed.children.length) welcome();
+  }
+
+  // Wait for DOM if needed
+  if (document.readyState === 'loading') {
+    document.addEventListener('DOMContentLoaded', init);
+  } else {
+    init();
+  }
 })();
