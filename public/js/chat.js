@@ -1,371 +1,323 @@
-/* Keilani Chat UI — CSP-safe, streaming + SSE, resilient feed creation */
+/* Keilani Chat – resilient client (SSE + JSON)
+ * v3.1
+ */
 
 (() => {
-  // ---------- Utilities ----------
-  const $ = (s, r = document) => r.querySelector(s);
-  const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
-  const store = {
-    get k() { return 'keilani.chat.v1'; },
-    read() {
-      try { return JSON.parse(localStorage.getItem(this.k) || '{}'); } catch { return {}; }
-    },
-    write(obj) { localStorage.setItem(this.k, JSON.stringify(obj || {})); }
+  // ---------- DOM helpers (robust selectors) ----------
+  const $ = (sel) => document.querySelector(sel);
+  const byId = (id) => document.getElementById(id);
+
+  // Try a few known ids/classes to be resilient to HTML changes
+  const getEl = (...ids) => {
+    for (const id of ids) {
+      if (!id) continue;
+      const el =
+        byId(id) ||
+        document.querySelector(`#${id}`) ||
+        document.querySelector(`[name="${id}"]`) ||
+        document.querySelector(`[data-id="${id}"]`) ||
+        document.querySelector(`.${id}`);
+      if (el) return el;
+    }
+    return null;
   };
 
-  // Ensure feed exists even if HTML changes
-  function ensureFeed() {
-    let feed = $('#feed');
-    if (!feed) {
-      feed = document.createElement('div');
-      feed.id = 'feed';
-      feed.className = 'feed';
-      const composer = $('#composer');
-      const main = $('#main') || document.body;
-      if (composer && composer.parentNode) composer.parentNode.insertBefore(feed, composer);
-      else main.prepend(feed);
-    }
-    return feed;
+  const feed    = getEl('feed', 'messages', 'chat-feed');
+  const input   = getEl('composer', 'input', 'prompt', 'message', 'chat-input');
+  const sendBtn = getEl('send', 'sendBtn', 'chat-send');
+  const apiEl   = getEl('api', 'endpoint', 'api-url');
+  const modelEl = getEl('model', 'modelSelect');
+  const tokenEl = getEl('client', 'clientToken', 'client-token');
+  const streamEl= getEl('stream', 'streamToggle');
+  const sseEl   = getEl('sse', 'expectSSE', 'sseToggle');
+  const resetEl = getEl('reset', 'resetSession');
+  const saveEl  = getEl('save', 'saveBtn');
+
+  if (!feed || !input) {
+    console.error('[chat.js] Missing required DOM nodes. Ensure ids: feed & composer (textarea) exist.');
+    return;
   }
 
-  // ---------- DOM refs ----------
-  const modelSel   = $('#model');
-  const apiInput   = $('#api');
-  const tokenInput = $('#token');
-  const saveBtn    = $('#save');
-  const exportBtn  = $('#export');
-  const clearBtn   = $('#clear');
-  const resetBtn   = $('#reset');
-  const streamCk   = $('#stream');
-  const sseCk      = $('#sse');
-  const tokenBadge = $('#tokencounter');
-  const sidBadge   = $('#sid');
-  const rawBtn     = $('#inspector');
-  const rawPre     = $('#raw');
-  const promptEl   = $('#prompt');
-  const sendBtn    = $('#send');
+  // ---------- Utilities ----------
+  const nowISO = () => new Date().toISOString().replace('T', ' ').slice(0, 19);
 
-  let FEED = ensureFeed();
+  function bubble(role, text, opts = {}) {
+    const msg = document.createElement('div');
+    msg.className = 'msg';
+    msg.setAttribute('data-role', role);
 
-  // ---------- State ----------
-  let sessionId = shortId();
-  let messages = [];
-  let tokens = 0;
+    const who = document.createElement('div');
+    who.className = 'who';
+    who.textContent = role === 'user' ? 'You' : 'Keilani';
 
-  function shortId() {
-    return Math.random().toString(36).slice(2, 10);
-  }
+    const body = document.createElement('div');
+    body.className = 'content';
+    body.textContent = ''; // will fill below
 
-  function loadConfig() {
-    const s = store.read();
-    if (s.model)  modelSel.value = s.model;
-    if (s.api)    apiInput.value = s.api;
-    if (s.token)  tokenInput.value = s.token;
-    if (typeof s.stream === 'boolean') streamCk.checked = s.stream;
-    if (typeof s.sse === 'boolean')    sseCk.checked = s.sse;
-    if (s.sessionId) sessionId = s.sessionId;
-    sidBadge.textContent = `SID: ${sessionId}`;
-  }
-
-  function saveConfig() {
-    store.write({
-      model: modelSel.value.trim(),
-      api: apiInput.value.trim(),
-      token: tokenInput.value,
-      stream: !!streamCk.checked,
-      sse: !!sseCk.checked,
-      sessionId
-    });
-  }
-
-  // ---------- Rendering ----------
-  function bubble(role, html, opts = {}) {
-    const wrap = document.createElement('div');
-    wrap.className = `msg ${role === 'user' ? 'me' : role}`;
-    const b = document.createElement('div');
-    b.className = 'bubble';
-    b.innerHTML = html;
-    wrap.appendChild(b);
-    (FEED || ensureFeed()).appendChild(wrap);
-    FEED.scrollTop = FEED.scrollHeight;
-    if (opts.codeHighlight) {
-      try { hljs.highlightAll(); } catch {}
-    }
-  }
-
-  function showError(text) {
-    bubble('error', escapeHtml(text));
-  }
-
-  function escapeHtml(s) {
-    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
-  }
-
-  function renderUser(text) {
-    const md = window.marked?.marked || ((t)=>escapeHtml(t));
-    bubble('user', md.parse(text));
-  }
-
-  function renderAssistantChunk(chunk) {
-    // Append to a streaming block (last assistant bubble) or create one
-    let last = FEED.lastElementChild;
-    const isAssistant = last && last.classList.contains('assistant');
-    if (!isAssistant) {
-      last = document.createElement('div');
-      last.className = 'msg assistant';
-      const b = document.createElement('div');
-      b.className = 'bubble';
-      last.appendChild(b);
-      FEED.appendChild(last);
-    }
-    const bubbleEl = last.querySelector('.bubble');
-    bubbleEl.insertAdjacentText('beforeend', chunk);
-    FEED.scrollTop = FEED.scrollHeight;
-  }
-
-  function renderAssistantFinal(text) {
-    const md = window.marked?.marked || ((t)=>escapeHtml(t));
-    // Replace the last assistant bubble with parsed markdown
-    let last = FEED.lastElementChild;
-    const isAssistant = last && last.classList.contains('assistant');
-    if (!isAssistant) {
-      const wrap = document.createElement('div');
-      wrap.className = 'msg assistant';
-      wrap.innerHTML = `<div class="bubble"></div>`;
-      FEED.appendChild(wrap);
-      last = wrap;
-    }
-    const bubbleEl = last.querySelector('.bubble');
-    bubbleEl.innerHTML = md.parse(text);
-    // highlight code
-    try { hljs.highlightAll(); } catch {}
-  }
-
-  function setTokens(count, rate) {
-    tokens = count;
-    tokenBadge.textContent = `Tokens: ${count} • ${rate ?? 0}/s`;
-  }
-
-  // ---------- Network ----------
-  async function sendMessage() {
-    FEED = ensureFeed();
-
-    const api = apiInput.value.trim() || 'https://api.keilani.ai/api/chat';
-    const model = modelSel.value.trim();
-    const stream = !!streamCk.checked;
-    const expectSSE = !!sseCk.checked;
-    const token = tokenInput.value || undefined;
-
-    const text = promptEl.value.trim();
-    if (!text) return;
-
-    // UI: render user bubble immediately
-    renderUser(text);
-
-    // keep history for messages API
-    messages.push({ role: 'user', content: text });
-
-    // Clear prompt + focus
-    promptEl.value = '';
-    promptEl.focus();
-
-    // request payload uses messages[] (server also supports single message)
-    const payload = {
-      model,
-      stream,
-      session_id: sessionId,
-      messages
-    };
-
-    const headers = { 'Content-Type': 'application/json' };
-    if (token) headers['X-Client-Token'] = token;
-
-    let res;
-    try {
-      res = await fetch(api, {
-        method: 'POST',
-        headers,
-        body: JSON.stringify(payload)
-      });
-    } catch (err) {
-      showError(`Network error: ${err.message || err}`);
-      return;
-    }
-
-    // Capture raw (for inspector)
-    rawPre.textContent = ''; // reset
-    const isSSE = expectSSE && res.headers.get('content-type')?.includes('text/event-stream');
-
-    if (!res.ok && !isSSE) {
-      let errText = '';
-      try { errText = await res.text(); } catch {}
-      showError(`[Error] HTTP ${res.status}${errText ? ' – ' + errText : ''}`);
-      return;
-    }
-
-    if (stream && isSSE) {
-      // ---------- SSE path ----------
-      try {
-        await readSSE(res.body, (evt) => {
-          if (evt.type === 'chunk') {
-            renderAssistantChunk(evt.data);
-          } else if (evt.type === 'done') {
-            if (evt.final) {
-              renderAssistantFinal(evt.final);
-              messages.push({ role: 'assistant', content: evt.final });
-            }
-          } else if (evt.type === 'error') {
-            showError(evt.data || 'SSE error');
-          } else if (evt.type === 'raw') {
-            rawPre.textContent += evt.data;
-          } else if (evt.type === 'stats') {
-            setTokens(evt.tokens ?? tokens, evt.rate ?? 0);
-          }
-        });
-      } catch (e) {
-        showError(`SSE read error: ${e.message || e}`);
-      }
+    if (opts.asHTML) {
+      body.innerHTML = text;
     } else {
-      // ---------- JSON path ----------
-      let data = null;
-      try { data = await res.json(); }
-      catch (e) {
-        const txt = await res.text().catch(()=> '');
-        showError(`Invalid JSON response${txt ? ' – ' + txt.slice(0,200) : ''}`);
-        return;
-      }
-      rawPre.textContent = JSON.stringify(data, null, 2);
-
-      const finalText = (data?.output_text) || (data?.message) || (data?.choices?.[0]?.message?.content) || '';
-      if (finalText) {
-        renderAssistantFinal(finalText);
-        messages.push({ role: 'assistant', content: finalText });
-      } else {
-        showError('No assistant text in response.');
-      }
-
-      const t = Number(data?.usage?.total_tokens) || tokens;
-      setTokens(t);
+      body.textContent = text;
     }
+
+    msg.appendChild(who);
+    msg.appendChild(body);
+
+    // Optional small timestamp
+    const ts = document.createElement('div');
+    ts.className = 'meta';
+    ts.textContent = nowISO();
+    msg.appendChild(ts);
+
+    feed.appendChild(msg);
+    feed.scrollTo({ top: feed.scrollHeight, behavior: 'smooth' });
+    return body; // return the content node for streaming updates
   }
 
-  // Basic SSE reader for event-stream bodies
+  function showError(err) {
+    const text = typeof err === 'string' ? err : (err?.message || 'Unknown error');
+    bubble('assistant', `⚠️ ${text}`);
+  }
+
+  function getConfig() {
+    const api   = (apiEl?.value || 'https://api.keilani.ai/api/chat').trim();
+    const model = (modelEl?.value || 'gpt-5').trim();
+    const token = (tokenEl?.value || '').trim();
+    const stream = !!(streamEl?.checked ?? true);
+    const expectSSE = !!(sseEl?.checked ?? true);
+    return { api, model, token, stream, expectSSE };
+  }
+
+  // ---------- SSE reader (very tolerant) ----------
   async function readSSE(stream, onEvent) {
     const reader = stream.getReader();
     const decoder = new TextDecoder();
     let buffer = '';
     let finalText = '';
 
+    const push = (s) => {
+      if (!s) return;
+      finalText += s;
+      onEvent?.({ type: 'chunk', data: s });
+    };
+
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
+
       const chunk = decoder.decode(value, { stream: true });
       buffer += chunk;
       onEvent?.({ type: 'raw', data: chunk });
 
-      // Parse by lines
       const lines = buffer.split(/\r?\n/);
       buffer = lines.pop() ?? '';
+
       for (const line of lines) {
         if (!line || line.startsWith(':')) continue;
-        if (line.startsWith('data: ')) {
-          const dataStr = line.slice(6);
-          if (dataStr === '[DONE]') {
-            onEvent?.({ type: 'done', final: finalText });
-            return;
-          }
-          try {
-            const obj = JSON.parse(dataStr);
-            if (typeof obj.delta === 'string') {
-              finalText += obj.delta;
-              onEvent?.({ type: 'chunk', data: obj.delta });
-            }
-            if (obj.tokens || obj.rate) {
-              onEvent?.({ type: 'stats', tokens: obj.tokens, rate: obj.rate });
-            }
-            if (obj.error) {
-              onEvent?.({ type: 'error', data: obj.error });
-            }
-          } catch {
-            // Some servers stream plain text chunks
-            finalText += dataStr;
-            onEvent?.({ type: 'chunk', data: dataStr });
-          }
+        if (!line.startsWith('data:')) continue;
+
+        const payload = line.slice(5).trim().replace(/^\s*/, '');
+        if (!payload) continue;
+
+        if (payload === '[DONE]' || payload === '[done]' || payload === '__END__') {
+          onEvent?.({ type: 'done', final: finalText });
+          return;
+        }
+
+        // Try JSON, fall back to plain text
+        try {
+          const obj = JSON.parse(payload);
+
+          // Extremely flexible "find the text" logic
+          let delta =
+            // OpenAI chat
+            obj?.choices?.[0]?.delta?.content ??
+            // OpenAI content array
+            (Array.isArray(obj?.choices?.[0]?.delta?.content)
+              ? obj.choices[0].delta.content.map(x => x?.text || '').join('')
+              : undefined) ??
+            // Llama-ish
+            obj?.delta ??
+            // Anthropic/generic
+            obj?.content ??
+            obj?.text ??
+            obj?.message ??
+            '';
+
+          if (typeof delta !== 'string') delta = String(delta || '');
+          if (delta) push(delta);
+
+          if (obj.error) onEvent?.({ type: 'error', data: obj.error });
+        } catch {
+          // plain text streaming
+          push(payload);
         }
       }
     }
+
     onEvent?.({ type: 'done', final: finalText });
   }
 
-  // ---------- Actions ----------
-  function clearChat() {
-    messages = [];
-    (FEED || ensureFeed()).innerHTML = '';
-    setTokens(0, 0);
-    rawPre.textContent = '';
+  // ---------- JSON (non-SSE) parsing ----------
+  async function parseJSONResponse(resp) {
+    // Some backends return invalid content-type but still JSON
+    let text;
+    try {
+      text = await resp.text();
+    } catch (e) {
+      throw new Error(`Failed reading response: ${e?.message || e}`);
+    }
+
+    // If not JSON, return the raw text
+    let data;
+    try {
+      data = JSON.parse(text);
+    } catch {
+      // Plain text (valid) – just return it
+      return text;
+    }
+
+    const finalText =
+      data?.output_text ??
+      data?.message ??
+      data?.response ??
+      data?.output ??
+      data?.content ??
+      data?.text ??
+      data?.choices?.[0]?.message?.content ??
+      data?.choices?.[0]?.delta?.content ??
+      '';
+
+    if (typeof finalText === 'string' && finalText.length) return finalText;
+
+    // If no obvious field, return prettified JSON to help debugging
+    return typeof data === 'string' ? data : JSON.stringify(data, null, 2);
   }
 
-  function resetSession() {
-    clearChat();
-    sessionId = shortId();
-    sidBadge.textContent = `SID: ${sessionId}`;
-    saveConfig();
+  // ---------- Send logic ----------
+  async function sendMessage(e) {
+    if (e) e.preventDefault();
+    const msg = (input.value || '').trim();
+    if (!msg) return;
+
+    const { api, model, token, stream, expectSSE } = getConfig();
+
+    // Render user bubble
+    bubble('user', msg);
+    input.value = '';
+    input.focus();
+
+    // Create placeholder assistant bubble we can stream into
+    const assistantBody = bubble('assistant', '');
+
+    const headers = {
+      'Content-Type': 'application/json'
+    };
+    if (token) headers['Authorization'] = `Bearer ${token}`;
+
+    // Build a tolerant payload; DO NOT include temperature for gpt-5
+    const body = {
+      model,
+      stream: !!stream,
+      // server might accept either `message` or `messages`
+      message: msg,
+      messages: [{ role: 'user', content: msg }]
+    };
+
+    let resp;
+    try {
+      resp = await fetch(api, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(body),
+      });
+    } catch (err) {
+      assistantBody.textContent = `⚠️ Network error: ${err?.message || err}`;
+      return;
+    }
+
+    if (!resp.ok) {
+      let errText = `HTTP ${resp.status}`;
+      try {
+        const t = await resp.text();
+        // Try to extract upstream error details if present
+        errText += ` – ${t}`;
+      } catch { /* ignore */ }
+      assistantBody.textContent = `⚠️ ${errText}`;
+      return;
+    }
+
+    // STREAMING path
+    if (stream && expectSSE) {
+      try {
+        await readSSE(resp.body, (ev) => {
+          if (ev.type === 'chunk') {
+            assistantBody.textContent += ev.data;
+            feed.scrollTo({ top: feed.scrollHeight });
+          } else if (ev.type === 'error') {
+            assistantBody.textContent += `\n[error] ${ev.data}`;
+          }
+        });
+      } catch (err) {
+        assistantBody.textContent += `\n⚠️ Stream error: ${err?.message || err}`;
+      }
+      return;
+    }
+
+    // NON-STREAM (JSON or text) path
+    try {
+      const finalText = await parseJSONResponse(resp);
+      assistantBody.textContent = finalText;
+    } catch (err) {
+      assistantBody.textContent = `⚠️ Invalid JSON response (try enabling “Expect SSE”): ${err?.message || err}`;
+    }
   }
 
-  function exportTxt() {
-    let txt = '';
-    $$('#feed .msg').forEach(msg => {
-      const isUser = msg.classList.contains('me');
-      const role = isUser ? 'You' : (msg.classList.contains('assistant') ? 'Keilani' : 'System');
-      const content = msg.querySelector('.bubble')?.innerText || '';
-      txt += `${role}:\n${content}\n\n`;
-    });
-    const blob = new Blob([txt], { type: 'text/plain' });
-    const url  = URL.createObjectURL(blob);
-    const a = Object.assign(document.createElement('a'), { href: url, download: `keilani_chat_${sessionId}.txt` });
-    document.body.appendChild(a); a.click(); a.remove();
-    URL.revokeObjectURL(url);
-  }
-
-  function toggleInspector() {
-    rawPre.classList.toggle('hidden');
-  }
-
-  // ---------- Events ----------
-  function bindEvents() {
-    saveBtn.addEventListener('click', saveConfig);
-    exportBtn.addEventListener('click', exportTxt);
-    clearBtn.addEventListener('click', clearChat);
-    resetBtn.addEventListener('click', resetSession);
-    rawBtn.addEventListener('click', toggleInspector);
-
-    // Enter to send; Shift+Enter newline
-    promptEl.addEventListener('keydown', (e) => {
+  // ---------- Wire up ----------
+  function init() {
+    // Enter to send; Shift+Enter for newline
+    input?.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         sendMessage();
       }
     });
-    sendBtn.addEventListener('click', sendMessage);
-  }
 
-  // ---------- Init ----------
-  function boot() {
-    ensureFeed();
-    loadConfig();
-    bindEvents();
-    // First-time welcome
-    if (FEED.childElementCount === 0) {
-      bubble('assistant', `
-        <b>Hi! I’m here and working.</b> What can I help you with?
-        <ul>
-          <li>Ask a quick question</li>
-          <li>Summarize a paragraph</li>
-          <li>Generate a short code snippet</li>
-          <li>Translate a sentence</li>
-        </ul>
-      `, { codeHighlight: false });
+    sendBtn?.addEventListener('click', sendMessage);
+    resetEl?.addEventListener('click', () => {
+      // Simple visual reset
+      feed.innerHTML = '';
+      bubble('assistant',
+        `Hi! I’m here and working. What can I help you with?\n\n• Ask a quick question\n• Summarize a paragraph\n• Generate a short code snippet\n• Translate a sentence`
+      );
+    });
+
+    // Render a tiny welcome if the feed is empty
+    if (!feed.children.length) {
+      bubble('assistant',
+        `Hi! I’m here and working. What can I help you with?\n\n• Ask a quick question\n• Summarize a paragraph\n• Generate a short code snippet\n• Translate a sentence`
+      );
     }
+
+    // Optional: persist a few fields
+    const ls = (k, v) => (v === undefined ? localStorage.getItem(k) : localStorage.setItem(k, v));
+    ['api', 'model', 'client', 'stream', 'sse'].forEach((k) => {
+      const el = getEl(k);
+      if (!el) return;
+      const key = `chat:${k}`;
+      // load
+      if (el.type === 'checkbox') {
+        const v = ls(key);
+        if (v !== null) el.checked = v === '1';
+        el.addEventListener('change', () => ls(key, el.checked ? '1' : '0'));
+      } else {
+        const v = ls(key);
+        if (v !== null) el.value = v;
+        el.addEventListener('change', () => ls(key, el.value || ''));
+        el.addEventListener('blur',   () => ls(key, el.value || ''));
+      }
+    });
   }
 
-  boot();
+  init();
 })();
