@@ -1,315 +1,371 @@
-/* Keilani Chat – App Script (CSP-safe, no inline JS) */
-/* global marked, hljs, DOMPurify, dayjs */
+/* Keilani Chat UI — CSP-safe, streaming + SSE, resilient feed creation */
 
 (() => {
-  // ---------- DOM helpers ----------
-  const $ = (s, p = document) => p.querySelector(s);
-  const $$ = (s, p = document) => [...p.querySelectorAll(s)];
-  const on = (el, ev, fn, opts) => el.addEventListener(ev, fn, opts);
+  // ---------- Utilities ----------
+  const $ = (s, r = document) => r.querySelector(s);
+  const $$ = (s, r = document) => Array.from(r.querySelectorAll(s));
+  const store = {
+    get k() { return 'keilani.chat.v1'; },
+    read() {
+      try { return JSON.parse(localStorage.getItem(this.k) || '{}'); } catch { return {}; }
+    },
+    write(obj) { localStorage.setItem(this.k, JSON.stringify(obj || {})); }
+  };
 
-  // ---------- Elements (ids must match chat.html) ----------
+  // Ensure feed exists even if HTML changes
+  function ensureFeed() {
+    let feed = $('#feed');
+    if (!feed) {
+      feed = document.createElement('div');
+      feed.id = 'feed';
+      feed.className = 'feed';
+      const composer = $('#composer');
+      const main = $('#main') || document.body;
+      if (composer && composer.parentNode) composer.parentNode.insertBefore(feed, composer);
+      else main.prepend(feed);
+    }
+    return feed;
+  }
+
+  // ---------- DOM refs ----------
   const modelSel   = $('#model');
   const apiInput   = $('#api');
-  const tokenInput = $('#clientToken');
-  const streamChk  = $('#stream');
-  const sseChk     = $('#sse');
+  const tokenInput = $('#token');
   const saveBtn    = $('#save');
-  const resetBtn   = $('#reset');
   const exportBtn  = $('#export');
   const clearBtn   = $('#clear');
-  const sendBtn    = $('#send');
-  const form       = $('#composer');
-  const promptEl   = $('#prompt');
-  const feed       = $('#feed');
+  const resetBtn   = $('#reset');
+  const streamCk   = $('#stream');
+  const sseCk      = $('#sse');
+  const tokenBadge = $('#tokencounter');
   const sidBadge   = $('#sid');
-  const tokensChip = $('#tokens');
+  const rawBtn     = $('#inspector');
+  const rawPre     = $('#raw');
+  const promptEl   = $('#prompt');
+  const sendBtn    = $('#send');
 
-  // ---------- Persistence ----------
-  const LS_KEYS = {
-    api: 'kln.chat.api',
-    model: 'kln.chat.model',
-    token: 'kln.chat.client_token',
-    stream: 'kln.chat.stream',
-    sse: 'kln.chat.sse',
-    sid: 'kln.chat.sid',
-  };
-  const ls = {
-    get: (k, d = '') => {
-      try { const v = localStorage.getItem(k); return v ?? d; } catch { return d; }
-    },
-    set: (k, v) => { try { localStorage.setItem(k, v); } catch {} },
-    del: (k) => { try { localStorage.removeItem(k); } catch {} },
-  };
+  let FEED = ensureFeed();
 
-  // ---------- SID ----------
-  const newSID = () => Math.random().toString(16).slice(2, 10);
-  const SID = (() => {
-    let v = ls.get(LS_KEYS.sid);
-    if (!v) { v = newSID(); ls.set(LS_KEYS.sid, v); }
-    return v;
-  })();
-  if (sidBadge) sidBadge.textContent = SID;
+  // ---------- State ----------
+  let sessionId = shortId();
+  let messages = [];
+  let tokens = 0;
 
-  // ---------- Load persisted config ----------
-  (function hydrate() {
-    const api = ls.get(LS_KEYS.api, apiInput?.value || '');
-    if (apiInput) apiInput.value = api;
+  function shortId() {
+    return Math.random().toString(36).slice(2, 10);
+  }
 
-    const model = ls.get(LS_KEYS.model, modelSel?.value || 'gpt-5');
-    if (modelSel) modelSel.value = model;
+  function loadConfig() {
+    const s = store.read();
+    if (s.model)  modelSel.value = s.model;
+    if (s.api)    apiInput.value = s.api;
+    if (s.token)  tokenInput.value = s.token;
+    if (typeof s.stream === 'boolean') streamCk.checked = s.stream;
+    if (typeof s.sse === 'boolean')    sseCk.checked = s.sse;
+    if (s.sessionId) sessionId = s.sessionId;
+    sidBadge.textContent = `SID: ${sessionId}`;
+  }
 
-    const tok = ls.get(LS_KEYS.token, tokenInput?.value || '');
-    if (tokenInput && tok) tokenInput.value = tok;
-
-    const stream = ls.get(LS_KEYS.stream, '1') === '1';
-    if (streamChk) streamChk.checked = stream;
-
-    const sse = ls.get(LS_KEYS.sse, '1') === '1';
-    if (sseChk) sseChk.checked = sse;
-  })();
-
-  // ---------- Utils ----------
-  const fmtTime = () => dayjs().format('h:mm:ss A');
-  const sanitize = (html) =>
-    DOMPurify.sanitize(html, { ALLOWED_URI_REGEXP: /^(?:(?:https?|mailto|tel):|[^a-z]|[a-z+.\-]+(?:[^a-z+.\-:]|$))/i });
-
-  const md = (txt) => {
-    try {
-      const html = marked.parse(txt ?? '');
-      return sanitize(html);
-    } catch {
-      return sanitize((txt ?? '').replace(/[&<>]/g, s => ({'&':'&amp;','<':'&lt;','>':'&gt;'}[s])));
-    }
-  };
-
-  const showError = (text) => {
-    const wrap = document.createElement('div');
-    wrap.className = 'msg error';
-    wrap.innerHTML = `
-      <div class="row">
-        <div class="bubble">
-          <div class="code"><pre><code class="language-json">${sanitize(text)}</code></pre></div>
-        </div>
-        <div class="meta">${fmtTime()}</div>
-      </div>`;
-    feed.appendChild(wrap);
-    wrap.scrollIntoView({ behavior: 'smooth', block: 'end' });
-    try { $$('pre code', wrap).forEach(b => hljs.highlightElement(b)); } catch {}
-  };
-
-  const appendUser = (text) => {
-    const wrap = document.createElement('div');
-    wrap.className = 'msg user';
-    wrap.innerHTML = `
-      <div class="row">
-        <div class="bubble">${md(text)}</div>
-        <div class="meta">${fmtTime()}</div>
-      </div>`;
-    feed.appendChild(wrap);
-    wrap.scrollIntoView({ behavior: 'smooth', block: 'end' });
-  };
-
-  const appendBotStart = () => {
-    const wrap = document.createElement('div');
-    wrap.className = 'msg bot';
-    wrap.innerHTML = `
-      <div class="row">
-        <div class="bubble"><div class="typing"><span class="dot"></span><span class="dot"></span><span class="dot"></span></div></div>
-        <div class="meta">${fmtTime()}</div>
-      </div>`;
-    feed.appendChild(wrap);
-    wrap.scrollIntoView({ behavior: 'smooth', block: 'end' });
-    return wrap;
-  };
-
-  const updateBotBubble = (wrap, html) => {
-    const bubble = $('.bubble', wrap);
-    if (bubble) bubble.innerHTML = html;
-    try { $$('pre code', wrap).forEach(b => hljs.highlightElement(b)); } catch {}
-  };
-
-  const setTokens = (n, rate) => {
-    if (!tokensChip) return;
-    tokensChip.textContent = `Tokens: ${n} • ${rate || '0'}/s`;
-  };
-
-  // ---------- Save config ----------
-  const persist = () => {
-    if (apiInput)   ls.set(LS_KEYS.api, apiInput.value.trim());
-    if (modelSel)   ls.set(LS_KEYS.model, modelSel.value);
-    if (tokenInput) ls.set(LS_KEYS.token, tokenInput.value.trim());
-    if (streamChk)  ls.set(LS_KEYS.stream, streamChk.checked ? '1' : '0');
-    if (sseChk)     ls.set(LS_KEYS.sse, sseChk.checked ? '1' : '0');
-  };
-
-  if (saveBtn)  on(saveBtn, 'click', persist);
-  if (resetBtn) on(resetBtn, 'click', () => { ls.del(LS_KEYS.sid); location.reload(); });
-  if (clearBtn) on(clearBtn, 'click', () => { feed.innerHTML = ''; setTokens(0, '0'); });
-
-  if (exportBtn) on(exportBtn, 'click', () => {
-    const lines = $$('.msg', feed).map(m => {
-      const who = m.classList.contains('user') ? 'You' : (m.classList.contains('bot') ? 'Keilani' : 'Sys');
-      const text = $('.bubble', m)?.textContent || '';
-      const t = $('.meta', m)?.textContent || '';
-      return `[${t}] ${who}: ${text}`;
+  function saveConfig() {
+    store.write({
+      model: modelSel.value.trim(),
+      api: apiInput.value.trim(),
+      token: tokenInput.value,
+      stream: !!streamCk.checked,
+      sse: !!sseCk.checked,
+      sessionId
     });
-    const blob = new Blob([lines.join('\n')], { type: 'text/plain;charset=utf-8' });
-    const a = document.createElement('a');
-    a.href = URL.createObjectURL(blob);
-    a.download = `keilani-chat-${SID}.txt`;
-    a.click();
-    URL.revokeObjectURL(a.href);
-  });
+  }
 
-  // ---------- Networking ----------
-  async function sendMessage(ev) {
-    ev?.preventDefault?.();
+  // ---------- Rendering ----------
+  function bubble(role, html, opts = {}) {
+    const wrap = document.createElement('div');
+    wrap.className = `msg ${role === 'user' ? 'me' : role}`;
+    const b = document.createElement('div');
+    b.className = 'bubble';
+    b.innerHTML = html;
+    wrap.appendChild(b);
+    (FEED || ensureFeed()).appendChild(wrap);
+    FEED.scrollTop = FEED.scrollHeight;
+    if (opts.codeHighlight) {
+      try { hljs.highlightAll(); } catch {}
+    }
+  }
 
-    const api   = apiInput?.value.trim();
-    const model = modelSel?.value || 'gpt-5';
-    const cTok  = tokenInput?.value.trim() || '';
-    const useStream = !!(streamChk?.checked);
-    const expectSSE = !!(sseChk?.checked);
-    const content = promptEl?.value.trim();
+  function showError(text) {
+    bubble('error', escapeHtml(text));
+  }
 
-    if (!api) { showError('Missing API URL'); return; }
-    if (!content) return;
+  function escapeHtml(s) {
+    return String(s).replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
 
-    // Persist current config
-    persist();
+  function renderUser(text) {
+    const md = window.marked?.marked || ((t)=>escapeHtml(t));
+    bubble('user', md.parse(text));
+  }
 
-    // Show user message
-    appendUser(content);
+  function renderAssistantChunk(chunk) {
+    // Append to a streaming block (last assistant bubble) or create one
+    let last = FEED.lastElementChild;
+    const isAssistant = last && last.classList.contains('assistant');
+    if (!isAssistant) {
+      last = document.createElement('div');
+      last.className = 'msg assistant';
+      const b = document.createElement('div');
+      b.className = 'bubble';
+      last.appendChild(b);
+      FEED.appendChild(last);
+    }
+    const bubbleEl = last.querySelector('.bubble');
+    bubbleEl.insertAdjacentText('beforeend', chunk);
+    FEED.scrollTop = FEED.scrollHeight;
+  }
 
-    // Prepare bot container
-    const botWrap = appendBotStart();
+  function renderAssistantFinal(text) {
+    const md = window.marked?.marked || ((t)=>escapeHtml(t));
+    // Replace the last assistant bubble with parsed markdown
+    let last = FEED.lastElementChild;
+    const isAssistant = last && last.classList.contains('assistant');
+    if (!isAssistant) {
+      const wrap = document.createElement('div');
+      wrap.className = 'msg assistant';
+      wrap.innerHTML = `<div class="bubble"></div>`;
+      FEED.appendChild(wrap);
+      last = wrap;
+    }
+    const bubbleEl = last.querySelector('.bubble');
+    bubbleEl.innerHTML = md.parse(text);
+    // highlight code
+    try { hljs.highlightAll(); } catch {}
+  }
 
-    // Build payload for our proxy
-    const body = {
+  function setTokens(count, rate) {
+    tokens = count;
+    tokenBadge.textContent = `Tokens: ${count} • ${rate ?? 0}/s`;
+  }
+
+  // ---------- Network ----------
+  async function sendMessage() {
+    FEED = ensureFeed();
+
+    const api = apiInput.value.trim() || 'https://api.keilani.ai/api/chat';
+    const model = modelSel.value.trim();
+    const stream = !!streamCk.checked;
+    const expectSSE = !!sseCk.checked;
+    const token = tokenInput.value || undefined;
+
+    const text = promptEl.value.trim();
+    if (!text) return;
+
+    // UI: render user bubble immediately
+    renderUser(text);
+
+    // keep history for messages API
+    messages.push({ role: 'user', content: text });
+
+    // Clear prompt + focus
+    promptEl.value = '';
+    promptEl.focus();
+
+    // request payload uses messages[] (server also supports single message)
+    const payload = {
       model,
-      stream: useStream,
-      messages: [{ role: 'user', content }],
-      // Pass through client token; server ignores if not needed
-      client_token: cTok || undefined,
-      sid: SID,
+      stream,
+      session_id: sessionId,
+      messages
     };
 
+    const headers = { 'Content-Type': 'application/json' };
+    if (token) headers['X-Client-Token'] = token;
+
+    let res;
     try {
-      if (useStream && expectSSE) {
-        await sseFetch(api, body, botWrap);
+      res = await fetch(api, {
+        method: 'POST',
+        headers,
+        body: JSON.stringify(payload)
+      });
+    } catch (err) {
+      showError(`Network error: ${err.message || err}`);
+      return;
+    }
+
+    // Capture raw (for inspector)
+    rawPre.textContent = ''; // reset
+    const isSSE = expectSSE && res.headers.get('content-type')?.includes('text/event-stream');
+
+    if (!res.ok && !isSSE) {
+      let errText = '';
+      try { errText = await res.text(); } catch {}
+      showError(`[Error] HTTP ${res.status}${errText ? ' – ' + errText : ''}`);
+      return;
+    }
+
+    if (stream && isSSE) {
+      // ---------- SSE path ----------
+      try {
+        await readSSE(res.body, (evt) => {
+          if (evt.type === 'chunk') {
+            renderAssistantChunk(evt.data);
+          } else if (evt.type === 'done') {
+            if (evt.final) {
+              renderAssistantFinal(evt.final);
+              messages.push({ role: 'assistant', content: evt.final });
+            }
+          } else if (evt.type === 'error') {
+            showError(evt.data || 'SSE error');
+          } else if (evt.type === 'raw') {
+            rawPre.textContent += evt.data;
+          } else if (evt.type === 'stats') {
+            setTokens(evt.tokens ?? tokens, evt.rate ?? 0);
+          }
+        });
+      } catch (e) {
+        showError(`SSE read error: ${e.message || e}`);
+      }
+    } else {
+      // ---------- JSON path ----------
+      let data = null;
+      try { data = await res.json(); }
+      catch (e) {
+        const txt = await res.text().catch(()=> '');
+        showError(`Invalid JSON response${txt ? ' – ' + txt.slice(0,200) : ''}`);
+        return;
+      }
+      rawPre.textContent = JSON.stringify(data, null, 2);
+
+      const finalText = (data?.output_text) || (data?.message) || (data?.choices?.[0]?.message?.content) || '';
+      if (finalText) {
+        renderAssistantFinal(finalText);
+        messages.push({ role: 'assistant', content: finalText });
       } else {
-        await jsonFetch(api, body, botWrap);
+        showError('No assistant text in response.');
       }
-    } catch (e) {
-      updateBotBubble(botWrap, md(`**[Error]** ${e.message || e}`));
-    } finally {
-      if (promptEl) promptEl.value = '';
+
+      const t = Number(data?.usage?.total_tokens) || tokens;
+      setTokens(t);
     }
   }
 
-  async function jsonFetch(api, body, botWrap) {
-    const res = await fetch(api, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      const errText = await res.text().catch(() => `${res.status} ${res.statusText}`);
-      showError(`[Error] HTTP ${res.status} — ${errText}`);
-      return;
-    }
-    const data = await res.json();
-    const txt = data?.message || data?.content || data?.choices?.[0]?.message?.content || '';
-    updateBotBubble(botWrap, md(txt || '_[no content]_'));
-    setTokens(data?.usage?.total_tokens ?? 0, '0');
-  }
-
-  async function sseFetch(api, body, botWrap) {
-    const res = await fetch(api, {
-      method: 'POST',
-      headers: { 'Accept': 'text/event-stream', 'Content-Type': 'application/json' },
-      body: JSON.stringify(body),
-    });
-    if (!res.ok) {
-      const errText = await res.text().catch(() => `${res.status} ${res.statusText}`);
-      showError(`[Error] HTTP ${res.status} — ${errText}`);
-      return;
-    }
-    const reader = res.body.getReader();
-    const dec = new TextDecoder();
-    let buf = '';
-    let accText = '';
-
-    const flush = () => {
-      if (!buf) return;
-      // Parse SSE lines (data: ...)
-      const lines = buf.split(/\r?\n/);
-      buf = lines.pop() || '';
-      for (const ln of lines) {
-        if (!ln.startsWith('data:')) continue;
-        const payload = ln.slice(5).trim();
-        if (!payload || payload === '[DONE]') continue;
-        try {
-          const chunk = JSON.parse(payload);
-          if (chunk?.error) throw new Error(chunk.error);
-          const delta = chunk?.delta ?? chunk?.content ?? '';
-          if (delta) {
-            accText += delta;
-            updateBotBubble(botWrap, md(accText));
-          }
-          if (chunk?.usage?.total_tokens != null) {
-            setTokens(chunk.usage.total_tokens, chunk.rate || '0');
-          }
-        } catch { /* ignore malformed lines */ }
-      }
-    };
+  // Basic SSE reader for event-stream bodies
+  async function readSSE(stream, onEvent) {
+    const reader = stream.getReader();
+    const decoder = new TextDecoder();
+    let buffer = '';
+    let finalText = '';
 
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
-      buf += dec.decode(value, { stream: true });
-      flush();
-    }
-    // Final flush
-    buf += dec.decode();
-    flush();
+      const chunk = decoder.decode(value, { stream: true });
+      buffer += chunk;
+      onEvent?.({ type: 'raw', data: chunk });
 
-    if (!accText) {
-      updateBotBubble(botWrap, md('_[no content]_'));
+      // Parse by lines
+      const lines = buffer.split(/\r?\n/);
+      buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        if (!line || line.startsWith(':')) continue;
+        if (line.startsWith('data: ')) {
+          const dataStr = line.slice(6);
+          if (dataStr === '[DONE]') {
+            onEvent?.({ type: 'done', final: finalText });
+            return;
+          }
+          try {
+            const obj = JSON.parse(dataStr);
+            if (typeof obj.delta === 'string') {
+              finalText += obj.delta;
+              onEvent?.({ type: 'chunk', data: obj.delta });
+            }
+            if (obj.tokens || obj.rate) {
+              onEvent?.({ type: 'stats', tokens: obj.tokens, rate: obj.rate });
+            }
+            if (obj.error) {
+              onEvent?.({ type: 'error', data: obj.error });
+            }
+          } catch {
+            // Some servers stream plain text chunks
+            finalText += dataStr;
+            onEvent?.({ type: 'chunk', data: dataStr });
+          }
+        }
+      }
     }
+    onEvent?.({ type: 'done', final: finalText });
   }
 
-  // ---------- Keyboard + Click handlers ----------
-  if (form) on(form, 'submit', sendMessage);
-  if (sendBtn) on(sendBtn, 'click', sendMessage);
+  // ---------- Actions ----------
+  function clearChat() {
+    messages = [];
+    (FEED || ensureFeed()).innerHTML = '';
+    setTokens(0, 0);
+    rawPre.textContent = '';
+  }
 
-  if (promptEl) {
-    // Enter to send; Shift+Enter for newline
-    on(promptEl, 'keydown', (e) => {
+  function resetSession() {
+    clearChat();
+    sessionId = shortId();
+    sidBadge.textContent = `SID: ${sessionId}`;
+    saveConfig();
+  }
+
+  function exportTxt() {
+    let txt = '';
+    $$('#feed .msg').forEach(msg => {
+      const isUser = msg.classList.contains('me');
+      const role = isUser ? 'You' : (msg.classList.contains('assistant') ? 'Keilani' : 'System');
+      const content = msg.querySelector('.bubble')?.innerText || '';
+      txt += `${role}:\n${content}\n\n`;
+    });
+    const blob = new Blob([txt], { type: 'text/plain' });
+    const url  = URL.createObjectURL(blob);
+    const a = Object.assign(document.createElement('a'), { href: url, download: `keilani_chat_${sessionId}.txt` });
+    document.body.appendChild(a); a.click(); a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  function toggleInspector() {
+    rawPre.classList.toggle('hidden');
+  }
+
+  // ---------- Events ----------
+  function bindEvents() {
+    saveBtn.addEventListener('click', saveConfig);
+    exportBtn.addEventListener('click', exportTxt);
+    clearBtn.addEventListener('click', clearChat);
+    resetBtn.addEventListener('click', resetSession);
+    rawBtn.addEventListener('click', toggleInspector);
+
+    // Enter to send; Shift+Enter newline
+    promptEl.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
         e.preventDefault();
         sendMessage();
       }
     });
+    sendBtn.addEventListener('click', sendMessage);
   }
 
-  // ---------- Warm greeting for empty feed ----------
-  if (!feed.querySelector('.msg')) {
-    const wrap = document.createElement('div');
-    wrap.className = 'msg bot';
-    wrap.innerHTML = `
-      <div class="row">
-        <div class="bubble">
-          <p>Hi! I’m here and working. How can I help today? If you’re testing, you can try:</p>
-          <ul>
-            <li>Ask a quick question</li>
-            <li>Summarize a paragraph</li>
-            <li>Generate a short code snippet</li>
-            <li>Translate a sentence</li>
-          </ul>
-        </div>
-        <div class="meta">${fmtTime()}</div>
-      </div>`;
-    feed.appendChild(wrap);
+  // ---------- Init ----------
+  function boot() {
+    ensureFeed();
+    loadConfig();
+    bindEvents();
+    // First-time welcome
+    if (FEED.childElementCount === 0) {
+      bubble('assistant', `
+        <b>Hi! I’m here and working.</b> What can I help you with?
+        <ul>
+          <li>Ask a quick question</li>
+          <li>Summarize a paragraph</li>
+          <li>Generate a short code snippet</li>
+          <li>Translate a sentence</li>
+        </ul>
+      `, { codeHighlight: false });
+    }
   }
+
+  boot();
 })();
