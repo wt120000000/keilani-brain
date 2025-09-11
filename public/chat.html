@@ -5,23 +5,21 @@
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>Keilani Chat • Streaming</title>
 
-    <!-- Minimal inlined CSS (CSP-safe). No inline JS. -->
+    <!-- minimal theme (inline ok under your CSP) -->
     <style>
       :root {
         --bg: #0b0f1a;
-        --bga: #0f1422;
-        --panel: #101828;
-        --text: #d7def2;
+        --panel: #0f1422;
         --muted: #8aa0c9;
-        --accent: #8856fc;
-        --accent-2: #6ee7ff;
-        --accent-3: #22c55e;
-        --btn: #25375b;
-        --btnh: #34446b;
-        --border: #223055;
-        --bubble: #121d34;
-        --ok: #06c167;
-        --err: #e74141;
+        --text: #dde7f2;
+        --chip: #182742;
+        --accent: #88c5ff;
+        --accent-2: #66e0ff;
+        --border: #223c5e;
+        --bubble: #0e1629;
+        --bubble2: #0e1629;
+        --btn: #3578e5;
+        --btnh: #2c64bf;
       }
       * {
         box-sizing: border-box;
@@ -33,13 +31,12 @@
       body {
         margin: 0;
         background:
-          radial-gradient(1200px 600px at 80% 20%, #0d1b30 0%, #0b0f1a 55%)
+          radial-gradient(1000px 600px at 80% -10%, #0d1b30 0%, #0b0f1a 55%)
             fixed,
           var(--bg);
         color: var(--text);
         font:
-          14px/1.45 ui-sans-serif,
-          system-ui,
+          14px/1.5 system-ui,
           -apple-system,
           Segoe UI,
           Roboto,
@@ -49,176 +46,194 @@
       .toolbar {
         position: sticky;
         top: 0;
-        z-index: 4;
+        z-index: 5;
         display: flex;
-        gap: 0.75rem;
+        gap: 0.6rem;
         align-items: center;
-        padding: 0.75rem 1rem;
+        padding: 0.6rem 0.8rem;
         background: linear-gradient(
           180deg,
-          rgba(11, 15, 26, 0.95),
-          rgba(11, 15, 26, 0.74) 60%,
-          rgba(11, 15, 26, 0) 100%
+          rgba(11, 15, 26, 0.96),
+          rgba(11, 15, 26, 0.84) 70%,
+          rgba(11, 15, 26, 0)
         );
-        backdrop-filter: saturate(140%) blur(6px);
+        border-bottom: 1px solid rgba(34, 60, 94, 0.35);
+        backdrop-filter: blur(6px);
       }
       .dot {
-        width: 8px;
-        height: 8px;
-        border-radius: 999px;
-        background: var(--accent-3);
+        width: 9px;
+        height: 9px;
+        border-radius: 50%;
+        background: #15cf82;
         box-shadow: 0 0 0 3px #14251a;
       }
       .chip {
-        background: var(--btn);
-        color: var(--text);
-        border: 1px solid var(--border);
+        background: var(--chip);
+        color: #a7c1ff;
         padding: 0.35rem 0.6rem;
         border-radius: 999px;
-        font-size: 0.8rem;
+        border: 1px solid rgba(136, 197, 255, 0.25);
       }
       select,
       input[type="text"],
       input[type="password"] {
-        height: 36px;
-        padding: 0 0.6rem;
-        border: 1px solid var(--border);
         background: var(--panel);
         color: var(--text);
-        border-radius: 0.6rem;
-        outline: none;
-      }
-      input[type="text"],
-      input[type="password"] {
-        width: 360px;
-        max-width: 38vw;
-      }
-      button {
-        height: 36px;
-        padding: 0 0.8rem;
         border: 1px solid var(--border);
         border-radius: 0.6rem;
+        padding: 0.5rem 0.7rem;
+        outline: none;
+        min-width: 120px;
+      }
+      input[type="text"]#api {
+        min-width: 360px;
+      }
+      button {
         background: var(--btn);
-        color: var(--text);
+        color: #fff;
+        border: 1px solid var(--border);
+        border-radius: 0.6rem;
+        padding: 0.55rem 0.8rem;
         cursor: pointer;
       }
       button:hover {
         background: var(--btnh);
       }
-      .btn-danger {
-        background: #0d1325;
-        border-color: #223055;
-        color: #d4e0ff;
+      .btn-ghost {
+        background: transparent;
+        color: var(--muted);
       }
-      .btn-primary {
-        background: linear-gradient(90deg, #6a5cff, #8b5cf6);
+      .btn-ghost:hover {
+        background: #0f1a2e;
       }
-      .row {
-        display: flex;
-        gap: 0.6rem;
-        align-items: center;
+      .spacer {
+        flex: 1;
       }
-      main {
-        max-width: 1100px;
+      main.container {
+        max-width: 1024px;
         margin: 0 auto;
         padding: 1rem;
       }
-      #messages {
-        margin: 0.75rem 0 1rem;
+      .tip {
+        color: var(--muted);
+        margin: 0.25rem 0 1rem;
+        font-size: 0.92rem;
       }
-      #feed {
+      .feed {
         display: flex;
         flex-direction: column;
-        gap: 0.75rem;
+        gap: 0.7rem;
       }
       .msg {
         display: flex;
-        gap: 0.65rem;
+        gap: 0.6rem;
         align-items: flex-start;
       }
       .msg .bubble {
         background: var(--bubble);
         border: 1px solid var(--border);
         border-radius: 0.8rem;
-        padding: 0.8rem 0.9rem;
-        margin: 0.25rem 0;
-        width: 100%;
+        padding: 0.9rem 0.95rem;
+        max-width: 100%;
       }
-      .msg.me .bubble {
-        background: transparent;
-        border-style: dashed;
+      .msg.you .bubble {
+        background: #0f192a;
+      }
+      .meta {
         color: var(--muted);
+        font-size: 0.8rem;
+        margin: 0.25rem 0 0.2rem 0.25rem;
       }
-      .msg.error .bubble {
-        border-color: #3b1c1c;
-        background: #1a0f14;
-        color: #ffd6d6;
-      }
-      .code {
+      pre,
+      code {
         font-family:
           ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono",
           monospace;
-        background: #0c1220;
-        border: 1px solid #1f2a44;
-        padding: 0.25rem 0.4rem;
-        border-radius: 0.35rem;
       }
-      .toolbar .right {
-        margin-left: auto;
+      .composer {
+        position: sticky;
+        bottom: 0;
+        z-index: 4;
+        margin-top: 1rem;
+        padding: 0.6rem 0.8rem 0.9rem;
+        background: linear-gradient(
+          180deg,
+          rgba(11, 15, 26, 0),
+          rgba(11, 15, 26, 0.85) 25%,
+          rgba(11, 15, 26, 0.95) 55%
+        );
+        backdrop-filter: blur(6px);
+        border-top: 1px solid rgba(34, 60, 94, 0.35);
+      }
+      .composer .row {
+        display: flex;
+        gap: 0.6rem;
+        align-items: flex-end;
+        background: var(--bubble);
+        border: 1px solid var(--border);
+        border-radius: 0.8rem;
+        padding: 0.35rem;
+      }
+      textarea {
+        flex: 1;
+        resize: vertical;
+        min-height: 46px;
+        max-height: 220px;
+        background: transparent;
+        border: 0;
+        outline: 0;
+        color: var(--text);
+        padding: 0.6rem 0.7rem;
+        font: inherit;
+        line-height: 1.4;
+      }
+      .right {
         display: flex;
         gap: 0.5rem;
         align-items: center;
+        padding: 0.25rem;
       }
-      #composer {
-        position: sticky;
-        bottom: 0;
-        padding: 0.75rem 1rem;
-        background: linear-gradient(
-          180deg,
-          rgba(11, 15, 26, 0) 0%,
-          rgba(11, 15, 26, 0.75) 40%,
-          rgba(11, 15, 26, 0.95) 100%
-        );
+      .row2 {
+        display: flex;
+        gap: 0.6rem;
+        align-items: center;
+        justify-content: space-between;
+        margin-top: 0.4rem;
       }
-      #prompt {
-        width: 100%;
-        min-height: 48px;
-        max-height: 38vh;
-        padding: 0.75rem 0.85rem;
-        border: 1px solid var(--border);
-        background: var(--panel);
-        color: var(--text);
-        border-radius: 0.8rem;
-        outline: none;
-        resize: vertical;
+      .pill {
+        background: rgba(21, 207, 130, 0.08);
+        border: 1px solid rgba(21, 207, 130, 0.25);
+        color: #7fe7c4;
+        padding: 0.25rem 0.45rem;
+        border-radius: 0.7rem;
+        font-size: 0.8rem;
       }
-      .tip {
-        color: var(--muted);
-        font-size: 0.85rem;
+      .kbd {
+        border: 1px solid #334867;
+        color: #a8c4ff;
+        background: #0f1626;
+        padding: 0.1rem 0.35rem;
+        border-radius: 0.35rem;
+        font-size: 0.8rem;
       }
-      .hidden {
+      .hide {
         display: none;
-      }
-      .badge {
-        background: #14223a;
-        border: 1px solid #223055;
-        border-radius: 999px;
-        padding: 0.2rem 0.45rem;
-        font-size: 0.72rem;
       }
     </style>
 
-    <!-- Local vendor (CSP-friendly) -->
+    <!-- syntax highlight theme -->
     <link rel="stylesheet" href="/vendor/github-dark.min.css" />
   </head>
   <body>
+    <!-- ===== Toolbar / Controls ===== -->
     <div class="toolbar">
-      <span class="dot"></span><span class="chip">Keilani Chat</span
-      ><span class="chip">Streaming</span>
+      <span class="dot" title="online"></span>
+      <span class="chip">Keilani Chat</span>
+      <span class="chip">Streaming</span>
 
       <select id="model" title="Model">
         <option value="gpt-5" selected>gpt-5</option>
-        <option value="gpt-4.1">gpt-4.1</option>
+        <option value="gpt-4.1-mini">gpt-4.1-mini</option>
         <option value="o4-mini">o4-mini</option>
       </select>
 
@@ -229,75 +244,71 @@
       />
       <input id="token" type="password" placeholder="Client Token (optional)" />
 
-      <button id="save">Save</button>
-      <button id="export">Export .txt</button>
-      <button id="clear" class="btn-danger">Clear</button>
-      <button id="reset">Reset Session</button>
+      <button id="save" title="Save prefs">Save</button>
+      <button id="export" class="btn-ghost" title="Export .txt">
+        Export .txt
+      </button>
+      <button id="clear" class="btn-ghost" title="Clear conversation">
+        Clear
+      </button>
+      <button id="reset" class="btn-ghost" title="New session">
+        Reset Session
+      </button>
 
-      <div class="right">
-        <label class="row"
-          ><input id="stream" type="checkbox" checked />
-          <span>Stream</span></label
-        >
-        <label class="row"
-          ><input id="sse" type="checkbox" checked />
-          <span>Expect SSE</span></label
-        >
-        <span id="tokencounter" class="badge">Tokens: 0 • 0/s</span>
-        <span id="sid" class="badge">SID: —</span>
-        <button id="inspector">Raw Inspector</button>
-      </div>
+      <span class="spacer"></span>
+
+      <label class="chip" title="Stream chunks">
+        <input id="stream" type="checkbox" checked /> Stream
+      </label>
+      <label class="chip" title="Expect SSE (EventSource)">
+        <input id="expectSSE" type="checkbox" checked /> Expect SSE
+      </label>
+
+      <span id="tokens" class="chip" title="Token meter">Tokens: 0 • 0/s</span>
+      <span id="sid" class="chip" title="Session id">SID: —</span>
+      <button id="raw" class="btn-ghost" title="Raw inspector">
+        Raw Inspector
+      </button>
     </div>
 
-    <main id="main">
-      <!-- Tip -->
-      <div class="tip" style="padding: 0.25rem 1rem 0 1rem">
+    <main class="container">
+      <div class="tip">
         Tip: <b>Enter</b> to send • <b>Shift+Enter</b> for newline
       </div>
 
-      <!-- Messages feed (required) -->
-      <section id="messages">
-        <div id="feed" class="feed" aria-live="polite" aria-busy="false"></div>
-      </section>
+      <!-- ===== FEED (chat bubbles get appended here) ===== -->
+      <main
+        id="feed"
+        class="feed"
+        aria-live="polite"
+        aria-label="Conversation"
+      ></main>
 
-      <!-- Raw inspector (toggle) -->
-      <pre
-        id="raw"
-        class="hidden"
-        style="
-          background: #0c1220;
-          border: 1px solid #1f2a44;
-          border-radius: 0.6rem;
-          padding: 0.75rem;
-          overflow: auto;
-        "
-      ></pre>
+      <!-- ===== Composer ===== -->
+      <section class="composer" aria-label="Composer">
+        <div class="row">
+          <textarea id="composer" placeholder="Type your message…"></textarea>
+          <div class="right">
+            <button id="send" title="Send (Enter)">Send ↵</button>
+          </div>
+        </div>
 
-      <!-- Composer -->
-      <section id="composer">
-        <textarea
-          id="composer"
-          placeholder="Type your message…"
-          spellcheck="true"
-        ></textarea>
-        <div class="row" style="margin-top: 0.5rem; align-items: center">
-          <span class="tip"
-            >Press <span class="code">Enter</span> to send •
-            <span class="code">Shift+Enter</span> for newline</span
-          >
-          <button id="send" class="btn-primary" style="margin-left: auto">
-            Send ↵
-          </button>
+        <div class="row2">
+          <div class="tip">
+            Press <span class="kbd">Enter</span> to send •
+            <span class="kbd">Shift+Enter</span> for newline
+          </div>
+          <div class="pill" id="statusPill" aria-live="polite"></div>
         </div>
       </section>
     </main>
 
-    <!-- Vendor JS (local) -->
+    <!-- ===== Vendor libs (local) ===== -->
     <script src="/vendor/dayjs.min.js"></script>
     <script src="/vendor/highlight.min.js"></script>
     <script src="/vendor/marked.umd.min.js"></script>
 
-    <!-- App JS -->
-    <script src="/js/chat.js?v=3" defer></script>
+    <!-- ===== App JS ===== -->
+    <script src="/js/chat.js?v=4"></script>
   </body>
 </html>
