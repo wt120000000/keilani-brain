@@ -1,277 +1,340 @@
-/* Keilani Chat front-end (compat + optional toggles)
- * - Streams/JSON to /api/chat
- * - Voice modes: "voice" (audio) and "avatar" (video) via /api/did-speak
- * - Optional UI controls (SSE/Stream/Voice/Model/API/Token). No hard failures.
- */
+/* chat.js — Keilani Chat + Voice (Local + D-ID)
+   v3 — robust audio unlock, Local speech queue, and D-ID audio/video playback
+*/
 
-/* =========================
- *   CONFIG – UPDATE THESE
- * ========================= */
-const DID_CFG = {
-  VOICE_ID: "REPLACE_WITH_DID_VOICE_ID",   // D-ID voice id
-  AVATAR_URL: "REPLACE_WITH_DID_AVATAR_URL" // Avatar image/video URL for D-ID
+/* ========= DOM HOOKS ========= */
+const $ = (sel) => document.querySelector(sel);
+
+const ui = {
+  feed:      $('#feed') || $('#msgs') || $('#messages'),
+  input:     $('#input'),
+  form:      $('#composer') || $('#form'),
+  sendBtn:   $('#send'),
+  model:     $('#model'),
+  api:       $('#api'),
+  token:     $('#token'),
+  stream:    $('#stream'),           // checkbox
+  sse:       $('#sse'),              // checkbox “Expect SSE”
+  voice:     $('#voice'),            // select: Off | Local (audio) | D-ID Avatar
+  voiceAudio:$('#voiceAudio'),
+  voiceVideo:$('#voiceVideo')
 };
 
-/* =========================
- *   PERSISTENCE HELPERS
- * ========================= */
+function need(name) {
+  if (!ui[name]) {
+    alert(`Missing UI node: ${name}`);
+    throw new Error(`Missing UI node: ${name}`);
+  }
+}
+['feed','input','sendBtn','model','api','stream','sse','voice','voiceAudio','voiceVideo'].forEach(need);
+
+console.log('[chat.js] UI found:', ui);
+
+/* ========= PERSISTED CONFIG ========= */
 const store = {
-  get(k, d) { try { const v = localStorage.getItem(k); return v == null ? d : JSON.parse(v); } catch { return d; } },
-  set(k, v) { try { localStorage.setItem(k, JSON.stringify(v)); } catch {} }
+  get k() { return 'kln.chat.cfg.v1'; },
+  load() {
+    try {
+      const v = JSON.parse(localStorage.getItem(this.k) || '{}');
+      return v && typeof v === 'object' ? v : {};
+    } catch { return {}; }
+  },
+  save(cfg) { localStorage.setItem(this.k, JSON.stringify(cfg||{})); }
 };
+const cfg = Object.assign({
+  api: ui.api?.value || '/api/chat',
+  model: ui.model?.value || 'gpt-5',
+  stream: !!ui.stream?.checked,
+  sse: !!ui.sse?.checked,
+  voice: ui.voice?.value || 'off'
+}, store.load());
 
-/* =========================
- *   COMPAT SELECTOR HELPERS
- * ========================= */
-function firstOf(selectors, scope = document) {
-  for (const s of selectors) { const n = scope.querySelector(s); if (n) return n; }
-  return null;
-}
-function need(node, name) { if (!node) throw new Error(`Missing UI node: ${name}`); return node; }
+/* reflect */
+if (ui.api)   ui.api.value   = cfg.api;
+if (ui.model) ui.model.value = cfg.model;
+if (ui.stream)ui.stream.checked = !!cfg.stream;
+if (ui.sse)   ui.sse.checked    = !!cfg.sse;
+if (ui.voice) ui.voice.value    = cfg.voice;
 
-/* Build UI map – REQUIRED things must exist, OPTIONAL are allowed to be null */
-function $ui() {
-  // REQUIRED
-  const feed     = firstOf(["#feed", ".feed", "#messages", ".messages"]);
-  const composer = firstOf(["#composer", ".composer", "form#chat-form", "form.composer", "form"]);
-  const input =
-    (composer && firstOf(["#input", "#message", "textarea[name='message']", "textarea#composer-input", "textarea"], composer)) ||
-    firstOf(["#input", "#message", "textarea[name='message']", "textarea#composer-input", "textarea"]);
-  const sendBtn =
-    (composer && firstOf(["#sendBtn", "[data-send]", "button[type='submit']", "button[type='button']", "button"], composer)) ||
-    firstOf(["#sendBtn", "[data-send]", "button[type='submit']", "button[type='button']", "button"]);
-
-  // OPTIONAL top controls
-  const model  = firstOf(["#model", "select#model", "select[name='model']"]);
-  const api    = firstOf(["#api", "input#api", "input[name='api']"]);
-  const token  = firstOf(["#token", "input#token", "input[name='token']", "input[placeholder*='Client Token']"]);
-  const stream = firstOf(["#stream", "input#stream", "input[name='stream']"]);
-  const sse    = firstOf(["#sse", "input#sse", "input[name='sse']", "input[name='Expect SSE']"]);
-  const voice  = firstOf(["#voice", "select#voice", "select[name='voice']"]);
-
-  // Voice dock (auto-inject if missing)
-  let voiceDock  = firstOf(["#voiceDock", ".voice-dock"]);
-  let voiceAudio = firstOf(["#voiceAudio", "audio#voiceAudio", "audio.voice"]);
-  let voiceVideo = firstOf(["#voiceVideo", "video#voiceVideo", "video.voice"]);
-  if (!voiceDock) {
-    voiceDock = document.createElement("div");
-    voiceDock.id = "voiceDock";
-    voiceDock.style.cssText = "display:flex; gap:.75rem; align-items:center; margin:.5rem 0;";
-    voiceAudio = document.createElement("audio");
-    voiceAudio.id = "voiceAudio";
-    voiceAudio.controls = true;
-    voiceAudio.preload = "auto";
-    voiceVideo = document.createElement("video");
-    voiceVideo.id = "voiceVideo";
-    voiceVideo.controls = true;
-    voiceVideo.muted = false;
-    voiceVideo.playsInline = true;
-    voiceVideo.style.maxWidth = "240px";
-    voiceDock.appendChild(voiceAudio);
-    voiceDock.appendChild(voiceVideo);
-    if (composer && composer.parentElement) composer.parentElement.insertBefore(voiceDock, composer);
-    else document.body.appendChild(voiceDock);
-  }
-
-  return {
-    // required
-    feed: need(feed, "feed"),
-    form: need(composer || document.body, "form"),
-    input: need(input, "input"),
-    sendBtn: need(sendBtn, "sendBtn"),
-    // optional
-    model, api, token, stream, sse, voice,
-    voiceDock, voiceAudio, voiceVideo
-  };
-}
-
-/* =========================
- *   UI RENDER HELPERS
- * ========================= */
-function nowISO() { const d=new Date(); const z=n=>String(n).padStart(2,"0"); return `${d.getFullYear()}-${z(d.getMonth()+1)}-${z(d.getDate())} ${z(d.getHours())}:${z(d.getMinutes())}:${z(d.getSeconds())}`; }
-function escapeHTML(s){return s.replace(/[&<>"']/g,c=>({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#039;" }[c]));}
-function autoscroll(feed){const near=feed.scrollHeight-feed.scrollTop-feed.clientHeight<120;if(near)feed.scrollTop=feed.scrollHeight;}
-function bubble({role, html, error=false}){const w=document.createElement("div");w.className=`msg ${role}${error?" msg-error":""}`;w.innerHTML=html;return w;}
-function addUserBubble(feed, text){
-  const html=`<div class="msg-head">You <span class="muted">${nowISO()}</span></div><div class="msg-body">${escapeHTML(text)}</div>`;
-  const n=bubble({role:"user", html}); feed.appendChild(n); autoscroll(feed);
-}
-function addAssistantBubble(feed, html, {error=false}={}){const n=bubble({role:"assistant", html, error}); feed.appendChild(n); autoscroll(feed); return n;}
-function setAssistantBody(node, html){ const b=node.querySelector(".msg-body"); if(b) b.innerHTML=html; }
-
-/* =========================
- *   NETWORK + SSE
- * ========================= */
-async function postJSON(url, body, signal){
-  return fetch(url, { method:"POST", headers:{ "Content-Type":"application/json" }, body:JSON.stringify(body), signal });
-}
-async function readJSON(res){
-  const ct=(res.headers.get("content-type")||"").toLowerCase();
-  if(!ct.includes("application/json")){
-    const t=await res.text().catch(()=>"(no body)");
-    throw new Error(`Expected JSON, got ${ct}. Body: ${t.slice(0,800)}`);
-  }
-  return res.json();
-}
-async function readSSE(res, onChunk){
-  const r=res.body.getReader(); const td=new TextDecoder(); let buf="";
-  while(true){
-    const {done, value}=await r.read(); if(done) break;
-    buf+=td.decode(value,{stream:true});
-    let i; while((i=buf.indexOf("\n\n"))>=0){
-      const block=buf.slice(0,i); buf=buf.slice(i+2);
-      block.split("\n").map(l=>l.trim()).filter(l=>l.startsWith("data:")).forEach(dl=>{
-        const json=dl.slice(5).trim(); if(json==="[DONE]") return;
-        try{ onChunk(JSON.parse(json)); }catch{ onChunk({type:"error", error:`Bad chunk: ${json}`});}
-      });
-    }
-  }
-}
-
-/* =========================
- *   PERSISTENCE
- * ========================= */
-function persistAfterUser(text){ const cur=store.get("chat.messages", []); cur.push({role:"user", content:text}); store.set("chat.messages", cur.slice(-20)); }
-function persistAfterAssistant(text){ const cur=store.get("chat.messages", []); cur.push({role:"assistant", content:text}); store.set("chat.messages", cur.slice(-20)); }
-
-/* =========================
- *   VOICE
- * ========================= */
-function ensureMediaSession(){
-  if("mediaSession" in navigator){
-    navigator.mediaSession.metadata=new MediaMetadata({ title:"Keilani", artist:"Assistant", album:"Keilani" });
-  }
-}
-async function speakWithDID({ text, mode }){
-  const body={ mode, text, voice_id: DID_CFG.VOICE_ID||"", source_url: DID_CFG.AVATAR_URL||"" };
-  const res=await postJSON("/api/did-speak", body);
-  if(!res.ok){ const t=await res.text().catch(()=>"(no details)"); throw new Error(`D-ID speak ${res.status}: ${t}`); }
-  const data=await readJSON(res);
-  if(!data.ok || !data.url) throw new Error(`Bad D-ID payload: ${JSON.stringify(data).slice(0,500)}`);
-  return data.url;
-}
-async function renderAssistant(ui, text){
-  if(!text) return;
-  const node=addAssistantBubble(ui.feed, `
-    <div class="msg-head">Keilani <span class="muted">${nowISO()}</span></div>
-    <div class="msg-body">${escapeHTML(text)}</div>
-  `);
-  persistAfterAssistant(text);
-
-  const mode=(ui.voice?.value||"off").toLowerCase();
-  if(mode==="off") return;
-  try{
-    ensureMediaSession();
-    if(mode==="voice"){
-      const url=await speakWithDID({ text, mode:"voice" });
-      ui.voiceDock.hidden=false; ui.voiceAudio.src=url; ui.voiceAudio.play().catch(()=>{});
-    }else if(mode==="avatar"){
-      const url=await speakWithDID({ text, mode:"avatar" });
-      ui.voiceDock.hidden=false; ui.voiceVideo.src=url; ui.voiceVideo.play().catch(()=>{});
-    }
-  }catch(err){
-    const errNode=bubble({ role:"assistant", html:`<div class="msg-body"><span class="muted">Voice error:</span> ${escapeHTML(err.message||String(err))}</div>`, error:true });
-    ui.feed.appendChild(errNode); autoscroll(ui.feed);
-  }
-}
-
-/* =========================
- *   SEND
- * ========================= */
-function gatherPayload(ui, msgText){
-  const messages=[...(store.get("chat.messages", [])), {role:"user", content:msgText}].slice(-20);
-  const payload={
-    model: ui.model?.value || "gpt-5",
-    stream: ui.stream ? !!ui.stream.checked : true,     // default true if toggle missing
-    expectSSE: ui.sse ? !!ui.sse.checked : true,        // default true if toggle missing
-    messages
-  };
-  const tok=ui.token?.value?.trim(); if(tok) payload.client_token=tok;
-  return payload;
-}
-async function send(ui){
-  const text=ui.input.value.trim(); if(!text) return;
-  addUserBubble(ui.feed, text); persistAfterUser(text); ui.input.value="";
-  const aNode=addAssistantBubble(ui.feed, `<div class="msg-head">Keilani <span class="muted">${nowISO()}</span></div><div class="msg-body">…</div>`);
-
-  const payload=gatherPayload(ui, text);
-  const endpoint=(ui.api?.value?.trim())||"/api/chat";
-  try{
-    const res=await postJSON(endpoint, payload);
-    if(!res.ok){ const t=await res.text().catch(()=>"(no body)"); throw new Error(`HTTP ${res.status}: ${t.slice(0,600)}`); }
-    const ct=(res.headers.get("content-type")||"").toLowerCase();
-
-    let finalText="";
-    if(ct.includes("text/event-stream")){
-      await readSSE(res,(chunk)=>{
-        if(chunk?.choices?.[0]?.delta?.content){
-          finalText+=chunk.choices[0].delta.content; setAssistantBody(aNode, escapeHTML(finalText));
-        }else if(chunk?.type==="error"){
-          setAssistantBody(aNode, `<span class="muted">${escapeHTML(chunk.error)}</span>`);
-        }
-      });
-      aNode.remove(); await renderAssistant(ui, finalText);
-    }else{
-      const data=await readJSON(res);
-      finalText = data?.choices?.[0]?.message?.content ?? "";
-      if(!finalText){
-        setAssistantBody(aNode, `<span class="muted">No content.</span><pre>${escapeHTML(JSON.stringify(data,null,2).slice(0,1500))}</pre>`);
-        return;
-      }
-      aNode.remove(); await renderAssistant(ui, finalText);
-    }
-  }catch(err){
-    setAssistantBody(aNode, `<span class="muted">Error:</span> ${escapeHTML(err.message||String(err))}`);
-  }
-}
-
-/* =========================
- *   BOOT
- * ========================= */
-function boot(){
-  const ui=$ui();
-
-  // restore persisted to existing controls only
-  if(ui.api)    ui.api.value   = store.get("chat.api", "/api/chat");
-  if(ui.model)  ui.model.value = store.get("chat.model", "gpt-5");
-  if(ui.stream) ui.stream.checked = store.get("chat.stream", true);
-  if(ui.sse)    ui.sse.checked    = store.get("chat.sse", true);
-  if(ui.voice)  ui.voice.value    = store.get("chat.voice", "off");
-  if(ui.token)  ui.token.value    = store.get("chat.client_token", "");
-
-  // previous conversation
-  const hist=store.get("chat.messages", []);
-  if(hist.length){
-    hist.forEach(m=>{
-      if(m.role==="user") addUserBubble(ui.feed, m.content);
-      else addAssistantBubble(ui.feed, `<div class="msg-head">Keilani <span class="muted">${nowISO()}</span></div><div class="msg-body">${escapeHTML(m.content)}</div>`);
-    });
-  }else{
-    addAssistantBubble(ui.feed, `<div class="msg-head">Keilani <span class="muted">${nowISO()}</span></div>
-      <div class="msg-body">Hi! I’m here and working. What can I help you with today? • Ask a quick question • Summarize a paragraph • Generate a short code snippet • Translate a sentence</div>`);
-  }
-
-  // persist only if control exists
-  ui.api   && ui.api.addEventListener("change", ()=>store.set("chat.api", ui.api.value.trim()));
-  ui.model && ui.model.addEventListener("change", ()=>store.set("chat.model", ui.model.value));
-  ui.stream&& ui.stream.addEventListener("change", ()=>store.set("chat.stream", !!ui.stream.checked));
-  ui.sse   && ui.sse.addEventListener("change", ()=>store.set("chat.sse", !!ui.sse.checked));
-  ui.voice && ui.voice.addEventListener("change", ()=>store.set("chat.voice", ui.voice.value));
-  ui.token && ui.token.addEventListener("change", ()=>store.set("chat.client_token", ui.token.value.trim()));
-
-  // handlers
-  ui.input.addEventListener("keydown",(e)=>{ if(e.key==="Enter" && !e.shiftKey){ e.preventDefault(); send(ui).catch(console.error); }});
-  ui.sendBtn.addEventListener("click", ()=>send(ui).catch(console.error));
-
-  console.log("[chat.js] UI found:", {
-    feed: !!ui.feed, input: !!ui.input, form: !!ui.form, sendBtn: !!ui.sendBtn,
-    model: !!ui.model, api: !!ui.api, token: !!ui.token, stream: !!ui.stream, sse: !!ui.sse,
-    voice: !!ui.voice, voiceDock: !!ui.voiceDock, voiceVideo: !!ui.voiceVideo, voiceAudio: !!ui.voiceAudio
+/* ========= SAVE ON CHANGE ========= */
+function persist() {
+  store.save({
+    api: ui.api.value.trim(),
+    model: ui.model.value,
+    stream: !!ui.stream.checked,
+    sse: !!ui.sse.checked,
+    voice: ui.voice.value
   });
-  console.log("[chat.js] Ready. Tip: call window.__send() in console to force a send.");
-  window.__send = ()=>send(ui);
+}
+['change','input'].forEach(ev=>{
+  [ui.api, ui.model, ui.stream, ui.sse, ui.voice].forEach(n=> n && n.addEventListener(ev, persist));
+});
+
+/* ========= UTIL ========= */
+function now() {
+  const d = new Date();
+  return d.toISOString().slice(0,19).replace('T',' ');
+}
+function addMsg(role, text) {
+  if (!ui.feed) return;
+  const wrap = document.createElement('div');
+  wrap.className = `msg ${role}`;
+  wrap.innerHTML = `<div class="bubble"><div class="meta">${role} ${now()}</div><div class="body"></div></div>`;
+  wrap.querySelector('.body').textContent = text;
+  ui.feed.appendChild(wrap);
+  ui.feed.scrollTop = ui.feed.scrollHeight;
+}
+function disabled(btn, on) { if (btn) btn.disabled = !!on; }
+
+/* ========= AUDIO UNLOCK (autoplay policies) ========= */
+let unlocked = false;
+let audioCtx;
+function unlockAudio() {
+  if (unlocked) return;
+  try {
+    // Any user gesture (click/keydown/touch) will call this once
+    audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+    if (audioCtx.state === 'suspended') audioCtx.resume();
+    // Prime the audio element with a tiny silent buffer
+    if (ui.voiceAudio) {
+      ui.voiceAudio.muted = false; // we want to hear it
+      ui.voiceAudio.playsInline = true;
+      const blob = new Blob([new Uint8Array([0])], {type:'audio/mp3'});
+      ui.voiceAudio.src = URL.createObjectURL(blob);
+      ui.voiceAudio.load();
+      ui.voiceAudio.play().catch(()=>{/* ignore primer error */});
+    }
+    // Prime video element
+    if (ui.voiceVideo) {
+      ui.voiceVideo.playsInline = true;
+      // leave muted = false; D-ID answers sometimes need unmuted to be heard
+    }
+    unlocked = true;
+    console.log('[chat.js] Audio unlocked');
+  } catch (e) {
+    console.warn('[chat.js] Audio unlock failed', e);
+  }
+}
+// First gesture unlockers
+['click','keydown','touchstart'].forEach(ev => window.addEventListener(ev, unlockAudio, { once:true }));
+
+/* ========= LOCAL VOICE (SpeechSynthesis) ========= */
+const synth = window.speechSynthesis;
+const speakQ = [];
+let speaking = false;
+
+function localSpeak(text) {
+  if (!text || !('speechSynthesis' in window)) return;
+  speakQ.push(String(text));
+  drainSpeak();
+}
+function drainSpeak() {
+  if (speaking || speakQ.length === 0) return;
+  speaking = true;
+  const text = speakQ.shift();
+
+  // Pick a voice if available; otherwise default.
+  let voicePick = null;
+  try {
+    const voices = synth.getVoices();
+    // Prefer something “female-ish”/US if present (rough heuristic)
+    voicePick = voices.find(v=>/en-US/i.test(v.lang) && /female|samantha|allison|jenny|aria/i.test(v.name))
+             || voices.find(v=>/en-US/i.test(v.lang))
+             || voices[0];
+  } catch {}
+  const u = new SpeechSynthesisUtterance(text);
+  if (voicePick) u.voice = voicePick;
+  u.rate = 1.0; u.pitch = 1.0;
+
+  u.onend = () => { speaking = false; drainSpeak(); };
+  u.onerror = () => { speaking = false; drainSpeak(); };
+
+  synth.cancel(); // prevent overlap
+  synth.speak(u);
 }
 
-document.addEventListener("DOMContentLoaded", ()=>{
-  try { boot(); } catch(e){ console.error(e); alert(e.message); }
+/* ========= D-ID VOICE / AVATAR =========
+   Expects your Netlify function /api/did-speak to accept:
+   { text, mode: 'avatar' | 'audio' }
+   and return one of:
+   { audio_url }  -> play in <audio>
+   { stream_url } -> set <video>.src to this (or WebRTC inside the function)
+   { video_url }  -> set <video>.src (for mp4/hls)
+*/
+async function didSpeak(text, mode) {
+  const endpoint = '/api/did-speak';
+  const res = await fetch(endpoint, {
+    method:'POST',
+    headers:{ 'Content-Type':'application/json' },
+    body: JSON.stringify({ text, mode })
+  });
+  if (!res.ok) {
+    const t = await res.text().catch(()=>String(res.status));
+    throw new Error(`did-speak ${res.status}: ${t}`);
+  }
+  const data = await res.json().catch(()=> ({}));
+  console.log('[chat.js] did-speak ->', data);
+
+  // Prefer explicit keys; handle both audio & video variants
+  if (data.audio_url) {
+    // Pure audio (voice only)
+    if (!ui.voiceAudio) throw new Error('voice audio element missing');
+    ui.voiceAudio.src = data.audio_url;
+    await ui.voiceAudio.play().catch(err => console.warn('audio play blocked', err));
+  } else if (data.stream_url || data.video_url) {
+    if (!ui.voiceVideo) throw new Error('voice video element missing');
+    ui.voiceVideo.src = data.stream_url || data.video_url;
+    ui.voiceVideo.muted = false;
+    await ui.voiceVideo.play().catch(err => console.warn('video play blocked', err));
+  } else {
+    console.warn('[chat.js] did-speak returned neither audio_url nor video_url');
+  }
+}
+
+/* ========= SENDER ========= */
+async function send(promptText) {
+  const api = (ui.api?.value || '/api/chat').trim();
+  const model = ui.model?.value || 'gpt-5';
+  const expectSSE = !!ui.sse?.checked;
+  const wantStream = !!ui.stream?.checked;
+
+  if (!promptText) promptText = ui.input.value.trim();
+  if (!promptText) return;
+
+  unlockAudio();                 // make sure audio is allowed
+  disabled(ui.sendBtn, true);
+
+  /* add user bubble */
+  addMsg('You', promptText);
+
+  /* build payload */
+  const payload = {
+    model,
+    stream: wantStream,
+    messages: [{ role:'user', content: promptText }]
+  };
+
+  try {
+    if (wantStream && expectSSE) {
+      // === SSE path ===
+      const ctrl = new AbortController();
+      const res = await fetch(api, {
+        method:'POST',
+        headers:{ 'Content-Type':'application/json' },
+        body: JSON.stringify(payload),
+        signal: ctrl.signal
+      });
+      if (!res.ok) throw new Error(`${res.status} ${res.statusText}`);
+      if (!res.headers.get('content-type')?.includes('text/event-stream')) {
+        // Not SSE — fall back to JSON chunk log
+        const txt = await res.text();
+        addMsg('Keilani', `⚠ Non-SSE response (content-type: ${res.headers.get('content-type')})\n\n${txt}`);
+      } else {
+        // stream events
+        let acc = '';
+        const reader = res.body.getReader();
+        const dec = new TextDecoder();
+        addMsg('Keilani', '…');    // placeholder
+        const last = ui.feed.lastElementChild?.querySelector('.body');
+
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          const chunk = dec.decode(value, { stream:true });
+          // minimal SSE line parser
+          chunk.split(/\r?\n/).forEach(line=>{
+            const m = line.match(/^data:\s*(.*)$/);
+            if (m) {
+              try {
+                const obj = JSON.parse(m[1]);
+                const delta = obj?.choices?.[0]?.delta?.content || obj?.delta?.content;
+                if (delta) {
+                  acc += delta;
+                  if (last) last.textContent = acc;
+                }
+              } catch {}
+            }
+          });
+        }
+
+        // Speak if voice is on
+        await maybeSpeak(acc);
+      }
+    } else {
+      // === JSON path ===
+      const res = await fetch(api, {
+        method:'POST',
+        headers:{ 'Content-Type':'application/json' },
+        body: JSON.stringify(payload)
+      });
+      if (!res.ok) {
+        const t = await res.text().catch(()=>String(res.status));
+        throw new Error(`HTTP ${res.status} ${t}`);
+      }
+      const data = await res.json();
+      const text =
+        data?.choices?.[0]?.message?.content ||
+        data?.message?.content ||
+        data?.content ||
+        JSON.stringify(data);
+      addMsg('Keilani', text);
+      await maybeSpeak(text);
+    }
+  } catch (err) {
+    console.error('[chat.js] send error', err);
+    addMsg('Keilani', `⚠ ${err.message || err}`);
+  } finally {
+    ui.input.value = '';
+    disabled(ui.sendBtn, false);
+  }
+}
+
+/* ========= VOICE DISPATCHER ========= */
+async function maybeSpeak(text) {
+  const mode = (ui.voice?.value || 'off').toLowerCase();
+
+  if (!text || mode === 'off') return;
+
+  if (mode.startsWith('local')) {
+    localSpeak(text);
+    return;
+  }
+  if (mode.includes('d-id')) {
+    // You can choose whether you want voice-only or avatar here:
+    // - keep it simple: always try avatar, the function can decide
+    // - or add two options in the <select> if you want “D-ID Audio” & “D-ID Avatar”
+    try {
+      await didSpeak(text, 'avatar'); // backend decides (voice cloned, etc.)
+    } catch (e) {
+      console.warn('didSpeak failed, falling back to Local', e);
+      localSpeak(text);
+    }
+    return;
+  }
+
+  // Fallback
+  localSpeak(text);
+}
+
+/* ========= WIRE UI ========= */
+ui.form?.addEventListener('submit', (e)=>{ e.preventDefault(); send(); });
+ui.sendBtn?.addEventListener('click', ()=> send());
+ui.input?.addEventListener('keydown', (e)=>{
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    send();
+  }
 });
+
+/* ========= EXPOSE FOR MANUAL TEST ========= */
+window.__send = send;
+
+/* ========= HELPER: greet once ========= */
+(function greetOnce(){
+  if (!ui.feed) return;
+  if (ui.feed.dataset.greeted) return;
+  ui.feed.dataset.greeted = '1';
+  addMsg('Keilani',
+`Hi! I’m here and working. What can I help you with today? 
+• Ask a quick question • Summarize a paragraph • Generate a short code snippet • Translate a sentence`);
+})();
