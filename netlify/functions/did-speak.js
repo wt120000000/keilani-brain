@@ -1,28 +1,25 @@
-// Keilani — D-ID voice proxy
-// Uses native fetch (Node 18+ on Netlify). No "node-fetch" needed.
+// Keilani — D-ID voice proxy (audio/video aware)
 
 const DID_API = "https://api.d-id.com";
-const API_KEY = process.env.DID_API_KEY || "";             // <— set in Netlify env
-const SOURCE_URL = process.env.DID_AVATAR_SOURCE_URL || ""; // <— set in Netlify env
+const API_KEY = process.env.DID_API_KEY || "";
+const SOURCE_URL = process.env.DID_AVATAR_SOURCE_URL || "";
 
 exports.handler = async (event) => {
   try {
     if (event.httpMethod === "OPTIONS") {
-      return ok({}, 204); // CORS preflight if needed
+      return ok({}, 204);
     }
 
     if (event.httpMethod === "GET") {
-      // Poll talk status: /api/did-speak?id=xxx
       const id = (event.queryStringParameters?.id || "").trim();
       if (!id) return bad("Missing id");
-      if (!API_KEY) return ok({ fallback: true }); // no D-ID configured
+      if (!API_KEY) return ok({ fallback: true });
 
       const r = await fetch(`${DID_API}/talks/${encodeURIComponent(id)}`, {
         headers: { "Authorization": `Basic ${API_KEY}` }
       });
       const j = await r.json();
 
-      // Shape normalization
       const status = j?.status || j?.state || "";
       const resultUrl =
         j?.result_url ||
@@ -34,7 +31,6 @@ exports.handler = async (event) => {
       return ok({ status, result_url: resultUrl });
     }
 
-    // POST: create a talk from text
     if (event.httpMethod === "POST") {
       const body = JSON.parse(event.body || "{}");
       const text = (body.text || "").trim();
@@ -42,11 +38,12 @@ exports.handler = async (event) => {
 
       if (!text) return bad("Missing text");
 
-      // If D-ID config is missing, tell client to fallback to local TTS
       if (!API_KEY || !SOURCE_URL || mode !== "D-ID Avatar") {
+        // fall back gracefully to local tts on the client
         return ok({ fallback: true, text });
       }
 
+      // Basic text talk request
       const payload = {
         script: { type: "text", input: text },
         source_url: SOURCE_URL
@@ -63,7 +60,7 @@ exports.handler = async (event) => {
 
       const data = await res.json();
 
-      // If API returns result_url right away, pass it through; otherwise return id to poll
+      // If the API returns a ready URL right away pass it through
       const resultUrl =
         data?.result_url ||
         data?.result_url_mp4 ||
@@ -74,12 +71,7 @@ exports.handler = async (event) => {
       if (resultUrl) return ok({ status: "done", result_url: resultUrl });
       if (data?.id) return ok({ id: data.id, status: data.status || "created" });
 
-      // If error shape
-      if (!res.ok) {
-        return ok({ fallback: true, error: data }, res.status);
-      }
-
-      // Unknown but not fatal — fallback
+      if (!res.ok) return ok({ fallback: true, error: data }, res.status);
       return ok({ fallback: true });
     }
 
@@ -89,7 +81,6 @@ exports.handler = async (event) => {
   }
 };
 
-// ---------- helpers ----------
 function ok(json, status = 200) {
   return {
     statusCode: status,
