@@ -12,6 +12,16 @@ const state = {
   voiceId: null, // selected ElevenLabs voice (persisted)
 };
 
+// --- add near top ---
+function speakBrowser(text) {
+  try {
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = 1.05; u.pitch = 1.0; u.volume = 1.0;
+    speechSynthesis.cancel();  // stop previous
+    speechSynthesis.speak(u);
+  } catch {}
+}
+
 // ---------------- Audio auto-play helpers ----------------
 let audioUnlocked = false;
 async function unlockAudio() {
@@ -45,6 +55,38 @@ async function playAudioUrl(url) {
     console.warn("Autoplay blocked; showing player UI.", e);
     $("ttsPlayer").src = url;         // user can press Play
   }
+}
+
+async function chatStream(message, onDelta) {
+  const res = await fetch("/api/chat-stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message }),
+  });
+  if (!res.ok || !res.body) throw new Error("stream failed");
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let text = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    const chunk = decoder.decode(value);
+
+    // SSE frames like: data: {...}\n\n
+    for (const line of chunk.split("\n\n")) {
+      if (!line.startsWith("data:")) continue;
+      const payload = line.slice(5).trim();
+      if (!payload) continue;
+      const msg = JSON.parse(payload);
+      if (msg.type === "delta" && msg.delta) {
+        text += msg.delta;
+        onDelta(text); // update UI live
+      }
+    }
+  }
+  return text;
 }
 
 // ---------------- Buttons: busy / enabled helpers ----------------

@@ -28,6 +28,11 @@
   status = 200
 
 [[redirects]]
+  from = "/api/chat-stream"
+  to = "/.netlify/functions/chat-stream"
+  status = 200
+
+[[redirects]]
   from = "/api/rtc/create-room"
   to = "/.netlify/functions/rtc-create-room"
   status = 200
