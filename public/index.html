@@ -3,658 +3,202 @@
   <head>
     <meta charset="utf-8" />
     <title>Keilani Brain — Live</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <meta name="color-scheme" content="dark" />
     <style>
       :root {
         font-family:
+          ui-sans-serif,
           system-ui,
           -apple-system,
           Segoe UI,
           Roboto,
-          Helvetica,
-          Arial,
-          "Apple Color Emoji",
-          "Segoe UI Emoji";
+          Arial;
       }
       body {
-        margin: 0;
-        background: #0b0f14;
-        color: #e6edf3;
+        margin: 24px;
+        background: #0b0b0f;
+        color: #e7e7ee;
       }
-      header {
-        padding: 16px 20px;
-        border-bottom: 1px solid #1f2937;
-        display: flex;
-        align-items: center;
-        justify-content: space-between;
-        gap: 12px;
-        flex-wrap: wrap;
+      .wrap {
+        max-width: 1100px;
+        margin: 0 auto;
       }
-      header h1 {
-        margin: 0;
-        font-size: 18px;
-      }
-      .health {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-      }
-      .badge {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        padding: 4px 8px;
-        border-radius: 999px;
-        font-size: 12px;
-        border: 1px solid #334155;
-        color: #93a2b9;
-      }
-      .dot {
-        width: 8px;
-        height: 8px;
-        border-radius: 999px;
-        background: #64748b;
-      }
-      .dot.ok {
-        background: #10b981;
-      }
-      .dot.warn {
-        background: #f59e0b;
-      }
-      .dot.err {
-        background: #ef4444;
-      }
-      button,
-      select,
-      input[type="number"] {
-        background: #0b1220;
-        color: #e6edf3;
-        border: 1px solid #263445;
-        border-radius: 8px;
-        padding: 8px 10px;
-      }
-      button {
-        background: #2563eb;
-        border: 0;
-        cursor: pointer;
-      }
-      button.secondary {
-        background: #0b1220;
-        border: 1px solid #263445;
-      }
-      button:disabled {
-        opacity: 0.6;
-        cursor: not-allowed;
-      }
-      main {
-        max-width: 1040px;
-        margin: 24px auto;
-        padding: 0 16px 40px;
+      h1 {
+        margin: 0 0 12px;
       }
       .grid {
         display: grid;
-        grid-template-columns: 1fr;
-        gap: 18px;
-      }
-      @media (min-width: 980px) {
-        .grid {
-          grid-template-columns: 1.2fr 0.8fr;
-        }
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
       }
       .card {
-        background: #0f1720;
-        border: 1px solid #1f2937;
-        border-radius: 10px;
+        background: #12121a;
+        border: 1px solid #1f1f2a;
+        border-radius: 16px;
         padding: 16px;
       }
-      .row {
-        display: flex;
-        gap: 10px;
-        flex-wrap: wrap;
+      label {
+        font-size: 12px;
+        color: #9aa3b2;
+        display: block;
+        margin-bottom: 6px;
       }
+      input,
       textarea,
-      input[type="text"] {
-        width: 100%;
-        background: #0b1220;
-        color: #e6edf3;
-        border: 1px solid #263445;
-        border-radius: 8px;
+      button {
+        border-radius: 10px;
+        border: 1px solid #2a2a38;
+        background: #161622;
+        color: #e7e7ee;
         padding: 10px;
+        width: 100%;
       }
       textarea {
-        min-height: 100px;
+        min-height: 110px;
         resize: vertical;
       }
-      .meta {
-        font-size: 12px;
-        color: #93a2b9;
-        margin-top: 6px;
+      .row {
+        display: grid;
+        gap: 12px;
+        grid-template-columns: 1fr 1fr;
       }
-      .reply {
-        white-space: pre-wrap;
-        background: #0b1220;
-        border: 1px solid #263445;
-        border-radius: 8px;
-        padding: 12px;
-      }
-      .matches {
-        margin-top: 12px;
-        font-size: 13px;
-      }
-      table {
-        width: 100%;
-        border-collapse: collapse;
-      }
-      th,
-      td {
-        text-align: left;
-        border-bottom: 1px solid #1f2937;
-        padding: 8px 6px;
-      }
-      .pill {
-        display: inline-block;
-        font-size: 12px;
-        padding: 2px 8px;
-        border: 1px solid #334155;
-        border-radius: 999px;
-        color: #93a2b9;
-      }
-      .row-opts {
+      .col {
         display: flex;
-        gap: 10px;
+        flex-direction: column;
+        gap: 8px;
+      }
+      .btn {
+        cursor: pointer;
+      }
+      .btn-primary {
+        background: #1f2937;
+        border-color: #2f3a4f;
+      }
+      .btn-accent {
+        background: #0f5132;
+        border-color: #0b3e27;
+      }
+      .btn-warn {
+        background: #512a0f;
+        border-color: #3e210b;
+      }
+      .flex {
+        display: flex;
+        gap: 8px;
         align-items: center;
-        margin: 8px 0 0;
-        flex-wrap: wrap;
       }
-      .notice {
-        color: #93a2b9;
+      .log {
+        white-space: pre-wrap;
+        background: #0d0d14;
+        padding: 10px;
+        border-radius: 10px;
+        min-height: 60px;
+      }
+      .small {
         font-size: 12px;
+        color: #9aa3b2;
       }
-      .spacer {
-        flex: 1;
+      iframe {
+        width: 100%;
+        height: 540px;
+        border: 0;
+        border-radius: 12px;
+        background: #000;
       }
-      .kbd {
-        font-family:
-          ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
-          "Liberation Mono", "Courier New", monospace;
+      .badge {
+        padding: 2px 8px;
+        border-radius: 999px;
         font-size: 12px;
-        background: #0b1220;
-        border: 1px solid #263445;
-        border-radius: 6px;
-        padding: 2px 6px;
+        border: 1px solid #2a2a38;
       }
     </style>
   </head>
   <body>
-    <header>
-      <h1>🧠 Keilani Brain — Live</h1>
-      <div class="health">
-        <span id="healthBadge" class="badge"
-          ><span class="dot" id="healthDot"></span
-          ><span id="healthText">checking…</span></span
-        >
-        <button id="healthRefresh" class="secondary" title="Refresh health">
-          Refresh
-        </button>
-      </div>
-    </header>
+    <div class="wrap">
+      <h1>Keilani Brain — Live</h1>
 
-    <main>
       <div class="grid">
-        <!-- Left: Chat & Output -->
-        <section class="card">
-          <label for="message">Message to Keilani</label>
-          <textarea
-            id="message"
-            placeholder="Say hi… e.g. “Using the Sales & Monetization playbook, create 3 offers at $10, $50, and $200 with clear CTAs.”"
-          ></textarea>
-
-          <div class="row-opts">
-            <label class="notice">
-              Retrieval threshold:
-              <input
-                id="threshold"
-                type="number"
-                min="0"
-                max="1"
-                step="0.05"
-                value="0.6"
-                style="width: 80px"
-              />
-            </label>
-            <label class="notice">
-              Match count:
-              <input
-                id="count"
-                type="number"
-                min="1"
-                max="20"
-                step="1"
-                value="8"
-                style="width: 80px"
-              />
-            </label>
-            <label class="notice">
-              <input id="skipContext" type="checkbox" />
-              Skip RAG (OpenAI only)
-            </label>
-            <span class="pill" id="status">idle</span>
-            <span class="spacer"></span>
-            <button id="toggleTTS" class="secondary">🔊 Browser TTS: On</button>
+        <!-- Chat + Push-to-talk -->
+        <div class="card">
+          <div class="row">
+            <div class="col">
+              <label>Message to Keilani</label>
+              <textarea id="textIn" placeholder="Say hi…"></textarea>
+              <div class="flex">
+                <button class="btn btn-primary" id="sendText">Send</button>
+                <button class="btn" id="speakReply">Speak Reply</button>
+              </div>
+            </div>
+            <div class="col">
+              <label>Push-to-talk</label>
+              <div class="flex">
+                <button class="btn btn-accent" id="pttBtn">Hold to talk</button>
+                <span id="recState" class="small badge">idle</span>
+              </div>
+              <label>Last transcript</label>
+              <div id="transcript" class="log"></div>
+            </div>
           </div>
 
-          <div class="row" style="margin-top: 10px">
-            <input
-              id="userId"
-              type="text"
-              value="00000000-0000-0000-0000-000000000001"
-            />
-            <button id="send">Send</button>
-          </div>
+          <label>Reply</label>
+          <div id="reply" class="log"></div>
+          <audio id="ttsPlayer" controls></audio>
+        </div>
 
-          <div class="meta">
-            Tip: lower threshold (e.g. <span class="kbd">0.5</span>) = more
-            context; raise (e.g. <span class="kbd">0.7</span>) = stricter
-            matches.
-          </div>
-
-          <h3 style="margin: 16px 0 6px">Reply</h3>
-          <div id="reply" class="reply">–</div>
-
-          <div class="matches">
-            <h3>Matches</h3>
-            <div id="matchesEmpty" class="notice">No matches yet.</div>
-            <table id="matchesTable" style="display: none">
-              <thead>
-                <tr>
-                  <th>Title</th>
-                  <th>Source</th>
-                  <th>Similarity</th>
-                </tr>
-              </thead>
-              <tbody id="matchesBody"></tbody>
-            </table>
-          </div>
-        </section>
-
-        <!-- Right: D-ID Bridge -->
-        <section class="card">
-          <h3 style="margin-top: 0">D-ID Bridge</h3>
-          <p class="meta">
-            This page auto-bridges D-ID → Brain → D-ID. After your D-ID client
-            connects, set:<br />
-            <span class="kbd"
-              >window.myDidSession = &lt;your live session object&gt;</span
-            ><br />
-            That’s it — the bridge attaches automatically.
+        <!-- D-ID Bridge (externalized in bridge.js) -->
+        <div class="card">
+          <h3>D-ID Bridge</h3>
+          <p class="small">
+            This page auto-bridges D-ID ⇄ Brain. After your D-ID client connects
+            in another tab, set
+            <code>window.myDidSession = &lt;your live session&gt;</code> and the
+            bridge will attach.
           </p>
-          <div class="meta">
-            Transcript events listened: <span class="kbd">transcript</span>,
-            <span class="kbd">speech.transcript</span>,
-            <span class="kbd">asr.transcript</span><br />
-            VAD barge-in: <span class="kbd">voice-activity-start</span>,
-            <span class="kbd">vad-start</span>,
-            <span class="kbd">voice-start</span>
+          <div class="flex" style="margin-bottom: 8px">
+            <span class="small">Status:</span>
+            <span id="didStatus" class="small badge">not attached</span>
+            <button class="btn" id="didDetach" style="margin-left: auto">
+              Detach
+            </button>
           </div>
-          <div class="meta" style="margin-top: 10px">
-            Status: <span id="bridgeStatus" class="pill">not attached</span>
+          <div class="small">
+            Transcript events listened: <code>transcript</code>,
+            <code>speech.transcript</code>, <code>asr.transcript</code><br />
+            VAD barge-in: <code>voice-activity-start</code>,
+            <code>vad-start</code>, <code>voice-start</code>
           </div>
-        </section>
+        </div>
       </div>
-    </main>
 
-    <script>
-      // ---------- Health badge ----------
-      const healthBadge = document.getElementById("healthBadge");
-      const healthDot = document.getElementById("healthDot");
-      const healthText = document.getElementById("healthText");
-      const healthRefresh = document.getElementById("healthRefresh");
+      <!-- Camera & Screen-share via Daily -->
+      <div class="card" style="margin-top: 16px">
+        <h3>Camera & Screen-share (Daily)</h3>
+        <div class="flex">
+          <button class="btn btn-primary" id="createRoom">Create room</button>
+          <button class="btn" id="openRoom">Open room</button>
+          <button class="btn btn-warn" id="closeRoom">Close room</button>
+          <span id="roomInfo" class="small">No room yet.</span>
+        </div>
+        <div id="dailyMount" style="margin-top: 10px"></div>
+        <p class="small">
+          Use the embedded Daily UI to enable mic/camera and share your screen.
+        </p>
+      </div>
 
-      async function refreshHealth() {
-        try {
-          healthText.textContent = "checking…";
-          healthDot.className = "dot";
-          const resp = await fetch("/api/health", { cache: "no-store" });
-          const ok = await resp.json();
-          const allTrue =
-            ok.has_OPENAI_API_KEY &&
-            ok.has_OPENAI_MODEL &&
-            ok.has_EMBED_MODEL &&
-            ok.has_SUPABASE_URL &&
-            ok.has_SUPABASE_SERVICE_ROLE;
-          healthDot.className = "dot " + (allTrue ? "ok" : "warn");
-          healthText.textContent = allTrue ? "OK" : "Degraded";
-          healthBadge.title = JSON.stringify(ok, null, 2);
-        } catch (e) {
-          healthDot.className = "dot err";
-          healthText.textContent = "Error";
-          healthBadge.title = e.message;
-        }
-      }
-      healthRefresh.addEventListener("click", refreshHealth);
-      refreshHealth();
-      setInterval(refreshHealth, 30000);
+      <!-- Avatar text feed (for any future video agent) -->
+      <div class="card" style="margin-top: 16px">
+        <h3>Avatar Hook</h3>
+        <p class="small">
+          We forward the model’s text here (and can add phonemes later for
+          lip-sync).
+        </p>
+        <div id="avatarFeed" class="log"></div>
+      </div>
+    </div>
 
-      // ---------- Helpers ----------
-      const statusEl = document.getElementById("status");
-      const replyEl = document.getElementById("reply");
-      const matchesEmpty = document.getElementById("matchesEmpty");
-      const matchesTable = document.getElementById("matchesTable");
-      const matchesBody = document.getElementById("matchesBody");
-      const thresholdEl = document.getElementById("threshold");
-      const countEl = document.getElementById("count");
-      const skipContextEl = document.getElementById("skipContext");
-      const userEl = document.getElementById("userId");
-
-      function setStatus(s) {
-        if (statusEl) statusEl.textContent = s;
-        const b = document.getElementById("bridgeStatus");
-        if (b) b.textContent = s;
-      }
-      function escapeHtml(s) {
-        return String(s).replace(
-          /[&<>"']/g,
-          (c) =>
-            ({
-              "&": "&amp;",
-              "<": "&lt;",
-              ">": "&gt;",
-              '"': "&quot;",
-              "'": "&#39;",
-            })[c],
-        );
-      }
-
-      // ---------- Optional browser TTS ----------
-      let browserTTS = true;
-      const toggleTTS = document.getElementById("toggleTTS");
-      toggleTTS.addEventListener("click", () => {
-        browserTTS = !browserTTS;
-        toggleTTS.textContent = browserTTS
-          ? "🔊 Browser TTS: On"
-          : "🔇 Browser TTS: Off";
-      });
-      function webSpeak(text) {
-        if (!browserTTS) return;
-        if (!("speechSynthesis" in window)) return;
-        speechSynthesis.cancel();
-        const u = new SpeechSynthesisUtterance(text);
-        u.rate = 1;
-        u.pitch = 1;
-        speechSynthesis.speak(u);
-      }
-
-      // ---------- Manual chat send (keeps the admin UI useful) ----------
-      const sendBtn = document.getElementById("send");
-      const msgEl = document.getElementById("message");
-      sendBtn.addEventListener("click", () => {
-        const msg = msgEl.value.trim();
-        if (!msg) return;
-        chatAndRender(msg)
-          .then(webSpeak)
-          .catch(() => {});
-        msgEl.value = "";
-        msgEl.focus();
-      });
-      msgEl.addEventListener("keydown", (e) => {
-        if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) sendBtn.click();
-      });
-
-      async function chatAndRender(message) {
-        const threshold = Number(thresholdEl?.value || 0.6);
-        const count = Number(countEl?.value || 8);
-        const skip = !!skipContextEl?.checked;
-        const qs = new URLSearchParams();
-        if (skip) qs.set("nocontext", "1");
-        else {
-          qs.set("threshold", String(threshold));
-          qs.set("count", String(count));
-        }
-        const url = `/api/chat?${qs.toString()}`;
-        const body = {
-          userId: userEl?.value || "00000000-0000-0000-0000-000000000001",
-          message,
-        };
-
-        setStatus("thinking…");
-        sendBtn.disabled = true;
-        const resp = await fetch(url, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(body),
-        }).catch((e) => {
-          throw new Error("network " + e.message);
-        });
-        const data = await resp.json().catch(() => ({}));
-        if (!resp.ok) {
-          replyEl.textContent = `⚠️ ${data.error || "Chat error"}`;
-          matchesEmpty.style.display = "block";
-          matchesTable.style.display = "none";
-          setStatus("idle");
-          sendBtn.disabled = false;
-          throw new Error("chat");
-        }
-
-        replyEl.textContent = data.reply || "—";
-        const matches = Array.isArray(data.matches) ? data.matches : [];
-        if (matches.length === 0) {
-          matchesEmpty.style.display = "block";
-          matchesTable.style.display = "none";
-        } else {
-          matchesEmpty.style.display = "none";
-          matchesTable.style.display = "";
-          matchesBody.innerHTML = matches
-            .map(
-              (m) =>
-                `<tr><td>${escapeHtml(m.title || "")}</td><td>${escapeHtml(m.source || "")}</td><td>${Number(m.similarity || 0).toFixed(3)}</td></tr>`,
-            )
-            .join("");
-        }
-
-        setStatus("idle");
-        sendBtn.disabled = false;
-        return (data.reply || "Got it.").trim();
-      }
-
-      // ---------- D-ID ⇄ Brain bridge ----------
-      (function () {
-        const TRANSCRIPT_EVENTS = [
-          "transcript",
-          "speech.transcript",
-          "asr.transcript",
-          "speech:transcript",
-          "asr:transcript",
-        ];
-        const VAD_START_EVENTS = [
-          "voice-activity-start",
-          "vad-start",
-          "voice-start",
-          "input_audio_buffer.speech_started",
-        ];
-        const CONNECT_EVENTS = ["connected", "ready"];
-
-        function isFinal(evt) {
-          return !!(
-            evt?.isFinal ||
-            evt?.final ||
-            evt?.segment?.is_final ||
-            evt?.payload?.final ||
-            evt?.type === "transcript-final" ||
-            evt?.event === "speech.final"
-          );
-        }
-        function getText(evt) {
-          return (
-            evt?.text ||
-            evt?.transcript ||
-            evt?.segment?.text ||
-            evt?.payload?.text ||
-            evt?.message ||
-            ""
-          ).trim();
-        }
-
-        const SILENCE_MS = 600; // debounce window if no explicit final flag
-        let partialTimer = null;
-        let partialBuf = "";
-        let inFlight = null; // AbortController for /api/chat
-        let speaking = false;
-
-        function wire(session, name, handler) {
-          try {
-            if (typeof session.on === "function") session.on(name, handler);
-            else if (typeof session.addEventListener === "function")
-              session.addEventListener(name, handler);
-            console.log("[bridge] listening:", name);
-          } catch (e) {
-            console.log("[bridge] cannot listen", name, e?.message);
-          }
-        }
-
-        async function didStop(session) {
-          try {
-            await session.stopSpeaking?.();
-          } catch {}
-          try {
-            await session.cancel?.();
-          } catch {}
-        }
-        async function didSpeak(session, text) {
-          speaking = true;
-          await session.speak({ text });
-          speaking = false;
-        }
-
-        async function callBrain(message) {
-          // reuse the same function the manual UI uses
-          return await chatAndRender(message);
-        }
-
-        function handleFinal(session, text) {
-          if (!text) return;
-          if (partialTimer) {
-            clearTimeout(partialTimer);
-            partialTimer = null;
-            partialBuf = "";
-          }
-          // cancel any in-flight brain call (barge-in safety)
-          if (inFlight?.abort) inFlight.abort();
-          const ctrl = new AbortController();
-          inFlight = ctrl;
-
-          setStatus("thinking…");
-          callBrain(text)
-            .then(async (reply) => {
-              await didSpeak(session, reply);
-              setStatus("idle");
-              inFlight = null;
-            })
-            .catch(async (e) => {
-              console.warn("[bridge] brain error:", e?.message || e);
-              try {
-                await didSpeak(
-                  session,
-                  "Sorry, I glitched. Can you repeat that?",
-                );
-              } catch {}
-              setStatus("idle");
-              inFlight = null;
-            });
-        }
-
-        function handlePartialMaybeFinal(session, text, finalFlag) {
-          if (!text) return;
-          if (finalFlag) {
-            handleFinal(session, text);
-            return;
-          }
-          partialBuf = text;
-          if (partialTimer) clearTimeout(partialTimer);
-          partialTimer = setTimeout(() => {
-            handleFinal(session, partialBuf);
-            partialBuf = "";
-            partialTimer = null;
-          }, SILENCE_MS);
-        }
-
-        function attach(session) {
-          if (!session) return console.warn("[bridge] no D-ID session found");
-          const bridgeStatus = document.getElementById("bridgeStatus");
-          if (bridgeStatus) bridgeStatus.textContent = "attached";
-
-          CONNECT_EVENTS.forEach((ev) =>
-            wire(session, ev, () => setStatus("connected")),
-          );
-          wire(session, "error", (e) =>
-            console.warn("[bridge] D-ID error:", e),
-          );
-
-          VAD_START_EVENTS.forEach((ev) =>
-            wire(session, ev, async () => {
-              if (speaking) await didStop(session);
-              if (inFlight?.abort) inFlight.abort();
-              inFlight = null;
-              setStatus("listening…");
-            }),
-          );
-
-          TRANSCRIPT_EVENTS.forEach((ev) =>
-            wire(session, ev, (evt) => {
-              try {
-                const text = getText(evt);
-                const finalFlag = isFinal(evt);
-                console.log("[bridge] transcript:", {
-                  event: ev,
-                  final: finalFlag,
-                  text,
-                });
-                handlePartialMaybeFinal(session, text, finalFlag);
-              } catch (e) {
-                console.warn("[bridge] transcript handler error:", e);
-              }
-            }),
-          );
-
-          setStatus("ready");
-        }
-
-        // Auto-attach when someone assigns window.myDidSession
-        Object.defineProperty(window, "myDidSession", {
-          configurable: true,
-          set(v) {
-            console.log("[bridge] myDidSession set");
-            attach(v);
-            this._did = v;
-          },
-          get() {
-            return this._did;
-          },
-        });
-
-        // If session was set before this script, re-set to trigger setter
-        if (window._did) attach(window._did);
-        if (window.myDidSession && !window._did) {
-          const s = window.myDidSession;
-          delete window.myDidSession;
-          window.myDidSession = s;
-        }
-      })();
-    </script>
+    <!-- External scripts (no inline JS; CSP-friendly) -->
+    <script src="/assets/bridge.js" defer></script>
     <script src="/assets/chat.js" defer></script>
-
-    <!--
-    IMPORTANT: After your D-ID client connects (wherever you run it),
-    set this on the page so the bridge can attach:
-
-      window.myDidSession = <your live session object>;
-
-    Example (pseudo):
-      const session = await DID.connect({...});
-      window.myDidSession = session;
-
-    The session should expose:
-      - .on(event, handler)  (or addEventListener)
-      - .speak({ text })
-      - .stopSpeaking()  (or .cancel())
-  --></body>
+  </body>
 </html>
