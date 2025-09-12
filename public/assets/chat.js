@@ -1,4 +1,4 @@
-// public/chat.js
+// public/assets/chat.js
 const $ = (id) => document.getElementById(id);
 const state = {
   mediaRecorder: null,
@@ -44,8 +44,11 @@ async function startRecording() {
   state.mediaRecorder.ondataavailable = (e) => state.chunks.push(e.data);
   state.mediaRecorder.onstop = async () => {
     $("recState").textContent = "processing…";
+    console.log("chunks recorded:", state.chunks.length);
     const blob = new Blob(state.chunks, { type: "audio/webm" });
+    console.log("blob size:", blob.size);
     const b64 = await blobToBase64(blob);
+    console.log("base64 length:", (b64 || "").length);
 
     const stt = await fetch("/api/stt", {
       method: "POST",
@@ -101,6 +104,7 @@ async function chat(message) {
 }
 
 async function tts(text) {
+  if (!text) return "";
   const r = await fetch("/api/tts", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -114,13 +118,10 @@ async function tts(text) {
   return URL.createObjectURL(blob);
 }
 
-// DAILY ROOM CONTROLS
+// DAILY ROOM (optional UI)
 $("createRoom").onclick = async () => {
   const r = await fetch("/api/rtc/create-room", { method: "POST" });
-  if (!r.ok) {
-    console.error("create room error", await r.text());
-    return;
-  }
+  if (!r.ok) { console.error("create room error", await r.text()); return; }
   const j = await r.json();
   state.dailyRoom = j.room;
   state.dailyUrl = j.url;
@@ -129,9 +130,7 @@ $("createRoom").onclick = async () => {
 
 let iframe;
 $("openRoom").onclick = async () => {
-  if (!state.dailyRoom) {
-    await $("createRoom").onclick();
-  }
+  if (!state.dailyRoom) await $("createRoom").onclick();
   const tokenRes = await fetch("/api/rtc/token", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
