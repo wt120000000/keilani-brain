@@ -1,6 +1,6 @@
 // public/assets/chat.js
 
-// ------------- DOM helpers & state -------------
+// ---------------- DOM helpers & state ----------------
 const $ = (id) => document.getElementById(id);
 const state = {
   mediaRecorder: null,
@@ -9,9 +9,48 @@ const state = {
   dailyUrl: null,
   meetingToken: null,
   lastReply: "",
+  voiceId: null, // selected ElevenLabs voice
 };
 
-// ------------- TEXT CHAT -------------
+// ---------------- Voice selector (dynamic) ----------------
+(async function initVoices() {
+  const sel = $("voiceSelect");
+  if (!sel) return; // page might not include the selector yet
+
+  sel.disabled = true;
+  sel.innerHTML = `<option>Loading voices…</option>`;
+  try {
+    const r = await fetch("/api/voices");
+    if (!r.ok) throw new Error(await r.text());
+    const { voices } = await r.json();
+
+    sel.innerHTML = "";
+    (voices || []).slice(0, 5).forEach((v) => {
+      const opt = document.createElement("option");
+      opt.value = v.voice_id;
+      opt.textContent = `${v.name} (${v.voice_id.slice(0, 6)}…)`;
+      sel.appendChild(opt);
+    });
+
+    if (!sel.options.length) {
+      const opt = document.createElement("option");
+      opt.value = "";
+      opt.textContent = "No voices available";
+      sel.appendChild(opt);
+      sel.disabled = true;
+    } else {
+      state.voiceId = sel.value || null;
+      sel.disabled = false;
+      sel.onchange = () => (state.voiceId = sel.value || null);
+    }
+  } catch (e) {
+    console.error("voices load failed:", e);
+    sel.innerHTML = `<option value="">(voices unavailable)</option>`;
+    sel.disabled = true;
+  }
+})();
+
+// ---------------- Text chat ----------------
 $("sendText").onclick = async () => {
   const message = $("textIn").value.trim();
   if (!message) return;
@@ -23,22 +62,27 @@ $("sendText").onclick = async () => {
 
 $("speakReply").onclick = async () => {
   if (!state.lastReply) return;
-  const audioUrl = await tts(state.lastReply);
-  if (audioUrl) {
-    const player = $("ttsPlayer");
-    player.src = audioUrl;
-    player.play();
+  const url = await tts(state.lastReply);
+  if (url) {
+    const p = $("ttsPlayer");
+    p.src = url;
+    p.play();
   }
 };
 
-// ------------- PUSH-TO-TALK (reliable recorder) -------------
+// ---------------- Push-to-talk (reliable recorder) ----------------
 const pttBtn = $("pttBtn");
 pttBtn.onmousedown = startRecording;
 pttBtn.onmouseup = stopRecording;
-pttBtn.ontouchstart = (e) => { e.preventDefault(); startRecording(); };
-pttBtn.ontouchend = (e) => { e.preventDefault(); stopRecording(); };
+pttBtn.ontouchstart = (e) => {
+  e.preventDefault();
+  startRecording();
+};
+pttBtn.ontouchend = (e) => {
+  e.preventDefault();
+  stopRecording();
+};
 
-// Choose the best-supported audio mime for speech
 function pickAudioMime() {
   const candidates = [
     "audio/webm;codecs=opus",
@@ -48,13 +92,12 @@ function pickAudioMime() {
   for (const t of candidates) {
     if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) return t;
   }
-  return ""; // browser will pick a default
+  return ""; // let browser choose
 }
 
 async function startRecording() {
   $("recState").textContent = "recording…";
 
-  // Ask for a clean single-channel mic with basic DSP
   const stream = await navigator.mediaDevices.getUserMedia({
     audio: {
       channelCount: 1,
@@ -82,18 +125,17 @@ async function startRecording() {
     console.log("blob size:", blob.size);
     console.log("duration (ms):", ms);
 
-    // Guard: require ~0.8s+ and a non-tiny blob (headers-only blobs are ~300–800 bytes)
+    // Guard tiny/short clips (headers-only blobs are a few hundred bytes)
     if (ms < 800 || blob.size < 12000) {
       $("transcript").textContent = "Hold the button and speak for ~1–2 seconds 👍";
       $("recState").textContent = "idle";
-      try { stream.getTracks().forEach(t => t.stop()); } catch {}
+      try { stream.getTracks().forEach((t) => t.stop()); } catch {}
       return;
     }
 
     const b64 = await blobToBase64(blob);
     console.log("base64 length:", (b64 || "").length);
 
-    // Send to STT
     const sttResp = await fetch("/api/stt", {
       method: "POST",
       headers: { "Content-Type": "application/json" },
@@ -104,7 +146,7 @@ async function startRecording() {
       console.error("STT error:", await sttResp.text());
       $("transcript").textContent = "Couldn’t transcribe. Try again.";
       $("recState").textContent = "idle";
-      try { stream.getTracks().forEach(t => t.stop()); } catch {}
+      try { stream.getTracks().forEach((t) => t.stop()); } catch {}
       return;
     }
 
@@ -117,20 +159,19 @@ async function startRecording() {
       state.lastReply = reply;
       feedAvatar(reply);
 
-      const audioUrl = await tts(reply);
-      if (audioUrl) {
-        const player = $("ttsPlayer");
-        player.src = audioUrl;
-        player.play();
+      const url = await tts(reply);
+      if (url) {
+        const p = $("ttsPlayer");
+        p.src = url;
+        p.play();
       }
     }
 
     $("recState").textContent = "idle";
-    try { stream.getTracks().forEach(t => t.stop()); } catch {}
+    try { stream.getTracks().forEach((t) => t.stop()); } catch {}
   };
 
-  // Start (single final chunk on stop)
-  state.mediaRecorder.start();
+  state.mediaRecorder.start(); // single final chunk on stop
 }
 
 function stopRecording() {
@@ -147,7 +188,7 @@ function blobToBase64(blob) {
   });
 }
 
-// ------------- API helpers -------------
+// ---------------- API helpers ----------------
 async function chat(message) {
   const r = await fetch("/api/chat", {
     method: "POST",
@@ -164,10 +205,13 @@ async function chat(message) {
 
 async function tts(text) {
   if (!text) return "";
+  const body = { text };
+  if (state.voiceId) body.voiceId = state.voiceId;
+
   const r = await fetch("/api/tts", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ text }),
+    body: JSON.stringify(body),
   });
   if (!r.ok) {
     console.error("TTS error", await r.text());
@@ -177,10 +221,13 @@ async function tts(text) {
   return URL.createObjectURL(blob);
 }
 
-// ------------- Daily room (camera / screen share) -------------
+// ---------------- Daily room (camera / screen share) ----------------
 $("createRoom").onclick = async () => {
   const r = await fetch("/api/rtc/create-room", { method: "POST" });
-  if (!r.ok) { console.error("create room error", await r.text()); return; }
+  if (!r.ok) {
+    console.error("create room error", await r.text());
+    return;
+  }
   const j = await r.json();
   state.dailyRoom = j.room;
   state.dailyUrl = j.url;
@@ -218,7 +265,7 @@ $("closeRoom").onclick = () => {
   iframe = null;
 };
 
-// ------------- Avatar feed hook (for future video agent) -------------
+// ---------------- Avatar feed hook ----------------
 function feedAvatar(text) {
   $("avatarFeed").textContent = (text || "").slice(0, 1200);
 }
