@@ -6,6 +6,38 @@
   node_bundler = "esbuild"
   external_node_modules = ["form-data", "node-fetch"] # harmless; not required by our CommonJS code but fine
 
+# Serve static assets directly (avoid SPA rewrite)
+[[redirects]]
+  from = "/assets/*"
+  to = "/assets/:splat"
+  status = 200
+
+# (your API redirects stay as-is)
+[[redirects]]
+  from = "/api/chat"
+  to = "/.netlify/functions/chat"
+  status = 200
+
+[[redirects]]
+  from = "/api/stt"
+  to = "/.netlify/functions/stt"
+  status = 200
+
+[[redirects]]
+  from = "/api/tts"
+  to = "/.netlify/functions/tts"
+  status = 200
+
+[[redirects]]
+  from = "/api/rtc/create-room"
+  to = "/.netlify/functions/rtc-create-room"
+  status = 200
+
+[[redirects]]
+  from = "/api/rtc/token"
+  to = "/.netlify/functions/rtc-token"
+  status = 200
+
 [[redirects]]
   from = "/api/chat"
   to = "/.netlify/functions/chat"
