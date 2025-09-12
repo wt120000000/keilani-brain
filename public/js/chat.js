@@ -1,359 +1,309 @@
-/* Keilani Chat — client with robust voice playback
-   - Voice modes: Off | Local Voice | D-ID Avatar
-   - SSE and non-SSE supported
+/* Keilani Chat — streaming + JSON + Voice (Local / D-ID)
+   - Fixes D-ID playback by using absolute result_url
+   - Works with CSP (no inline JS), local vendor libs, and Netlify routes
 */
 
 (() => {
-  // ---------- UI WIRING ----------
+  // ---------- UI ----------
   const ui = {
-    feed: document.querySelector('[data-feed]') || document.getElementById('feed') || document.querySelector('.feed'),
-    form: document.getElementById('form') || document.querySelector('form[data-chat]') || document.querySelector('form'),
-    input: document.getElementById('input') || document.querySelector('textarea, input[type="text"]'),
-    sendBtn: document.getElementById('send') || document.querySelector('[data-send]'),
-    model: document.getElementById('model') || document.querySelector('#model, select[name="model"]'),
-    api: document.getElementById('api') || document.querySelector('#api, input[name="api"]'),
-    token: document.getElementById('token') || document.querySelector('#token, input[name="token"]'),
-    stream: document.getElementById('stream') || document.querySelector('#stream, input[name="stream"]'),
-    sse: document.getElementById('sse') || document.querySelector('#sse, input[name="sse"]'),
-    voice: document.getElementById('voice') || document.querySelector('#voice, select[name="voice"]')
+    feed: document.getElementById('feed'),
+    input: document.getElementById('input'),
+    form: document.getElementById('form'),
+    sendBtn: document.getElementById('sendBtn'),
+    model: document.getElementById('model'),
+    api: document.getElementById('api'),
+    token: document.getElementById('token'),
+    stream: document.getElementById('stream'),
+    sse: document.getElementById('sse'),
+    voice: document.getElementById('voice'),
+
+    save: document.getElementById('save'),
+    exportBtn: document.getElementById('export'),
+    clear: document.getElementById('clear'),
+    reset: document.getElementById('reset'),
   };
 
-  const need = (name, el) => { if (!el) throw new Error(`Missing UI node: ${name}`); };
-  need('feed', ui.feed);
-  need('form', ui.form);
-  need('input', ui.input);
-  need('sendBtn', ui.sendBtn);
-  need('model', ui.model);
-  need('api', ui.api);
-  need('token', ui.token);
-  need('stream', ui.stream);
-  need('sse', ui.sse);
-  need('voice', ui.voice);
+  // Minimal state
+  let sid = null;
 
-  // Media elements (we’ll choose audio OR video at runtime)
-  let audioEl = document.getElementById('voice-audio');
-  if (!audioEl) {
-    audioEl = document.createElement('audio');
-    audioEl.id = 'voice-audio';
-    audioEl.preload = 'auto';
-    audioEl.playsInline = true;
-    audioEl.style.display = 'none';
-    document.body.appendChild(audioEl);
+  // ---------- Helpers ----------
+  const now = () => (window.dayjs ? dayjs().format('YYYY-MM-DD HH:mm:ss') : new Date().toLocaleString());
+
+  const toast = (msg) => console.log('[chat.js]', msg);
+
+  function addBubble(role, text) {
+    const el = document.createElement('div');
+    el.className = `msg ${role === 'user' ? 'you' : ''}`;
+    el.innerHTML = `
+      <div class="meta">${role === 'user' ? 'You' : 'Keilani'} <span class="right">${now()}</span></div>
+      <div class="body"></div>
+    `;
+    const body = el.querySelector('.body');
+
+    // Render markdown if available
+    if (window.marked && typeof marked.parse === 'function') {
+      body.innerHTML = marked.parse(text || '');
+      if (window.hljs) body.querySelectorAll('pre code').forEach((b) => hljs.highlightElement(b));
+    } else {
+      body.textContent = text || '';
+    }
+    ui.feed.appendChild(el);
+    el.scrollIntoView({ behavior: 'smooth', block: 'end' });
+    return body; // return the body for streaming append
   }
-  let videoEl = document.getElementById('voice-video');
-  if (!videoEl) {
-    videoEl = document.createElement('video');
-    videoEl.id = 'voice-video';
-    videoEl.preload = 'auto';
-    videoEl.playsInline = true;
-    videoEl.muted = false;
-    videoEl.style.display = 'none';
-    document.body.appendChild(videoEl);
+
+  function setBusy(b) {
+    ui.sendBtn.disabled = b;
+    ui.input.disabled = b;
   }
+
+  // ---------- Audio unlock (first interaction) ----------
+  (function unlockAudioOnce() {
+    let unlocked = false;
+    const unlock = () => {
+      if (unlocked) return;
+      unlocked = true;
+      try {
+        const a = new Audio();
+        // 1-frame silent mp3 (data URL)
+        a.src = 'data:audio/mp3;base64,//uQZAAAAAAAAAAAAAAAAAAAA';
+        a.play().catch(() => {});
+      } catch {}
+      console.log('[chat.js] Audio unlocked');
+      window.removeEventListener('click', unlock, true);
+      window.removeEventListener('keydown', unlock, true);
+      window.removeEventListener('touchstart', unlock, true);
+    };
+    window.addEventListener('click', unlock, true);
+    window.addEventListener('keydown', unlock, true);
+    window.addEventListener('touchstart', unlock, true);
+  })();
+
+  // ---------- Voice: local (SpeechSynthesis) ----------
+  function speakLocal(text) {
+    if (!('speechSynthesis' in window)) return;
+    const u = new SpeechSynthesisUtterance(text);
+    u.lang = 'en-US';
+    u.rate = 1.0;
+    u.pitch = 1.0;
+    // Pick a voice if available
+    const v = window.speechSynthesis.getVoices().find((v) => /en/i.test(v.lang));
+    if (v) u.voice = v;
+    window.speechSynthesis.cancel();
+    window.speechSynthesis.speak(u);
+  }
+
+  // ---------- Voice: D-ID ----------
+  function getVoiceMode() {
+    return (ui.voice?.value || 'off').toLowerCase(); // 'off' | 'audio' | 'did'
+  }
+
+  async function speakWithDID(text) {
+    try {
+      const res = await fetch('/api/did-speak', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ text, mode: 'D-ID Avatar' }),
+      });
+      const data = await res.json();
+
+      const url = data?.result_url;
+      const type = data?.content_type || '';
+
+      if (!url || !/^https?:\/\//i.test(url)) {
+        console.error('Invalid D-ID result', data);
+        toast('D-ID did not return a playable media URL.');
+        return;
+      }
+      await playUrlSmart(url, type);
+    } catch (err) {
+      console.error('D-ID speak failed', err);
+      toast('Voice (D-ID) failed.');
+    }
+  }
+
+  async function playUrlSmart(url, contentType = '') {
+    const isVideo = contentType.startsWith('video') || /\.mp4(\?|$)/i.test(url);
+    if (isVideo) return playVideo(url);
+    return playAudio(url);
+  }
+
+  function playAudio(url) {
+    return new Promise((resolve, reject) => {
+      const a = new Audio();
+      a.crossOrigin = 'anonymous';
+      a.src = url;           // MUST be absolute
+      a.preload = 'auto';
+      a.autoplay = true;
+      a.onplay = () => resolve();
+      a.onerror = () => reject(new Error('Audio playback error'));
+      // try to start early on canplay
+      a.oncanplay = () => a.play().catch(reject);
+    });
+  }
+
+  function playVideo(url) {
+    return new Promise((resolve, reject) => {
+      const v = document.createElement('video');
+      v.src = url;           // MUST be absolute
+      v.crossOrigin = 'anonymous';
+      v.playsInline = true;  // iOS
+      v.muted = true;        // allow autoplay, unmute after start
+      v.autoplay = true;
+      v.controls = true;
+
+      Object.assign(v.style, {
+        position: 'fixed',
+        right: '12px',
+        bottom: '12px',
+        width: '280px',
+        borderRadius: '12px',
+        boxShadow: '0 10px 28px rgba(0,0,0,.35)',
+        zIndex: 9999
+      });
+
+      v.onplay = () => {
+        setTimeout(() => { try { v.muted = false; v.volume = 1; } catch {} }, 160);
+        resolve();
+      };
+      v.onerror = () => reject(new Error('Video playback error'));
+
+      // If already exists, replace
+      const old = document.querySelector('video[data-did]');
+      if (old) old.remove();
+
+      v.setAttribute('data-did', '1');
+      document.body.appendChild(v);
+    });
+  }
+
+  // ---------- Chat send ----------
+  async function send(text) {
+    const api = ui.api.value.trim() || '/api/chat';
+    const model = ui.model.value;
+    const clientToken = ui.token.value.trim();
+    const useStream = !!ui.stream.checked;
+    const expectsSSE = !!ui.sse.checked;
+
+    const userBody = addBubble('user', text);
+    userBody.textContent = text;
+
+    const assistantBody = addBubble('assistant', '…');
+
+    setBusy(true);
+
+    try {
+      if (useStream && expectsSSE) {
+        // SSE mode
+        const r = await fetch(api, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(clientToken ? { 'X-Client-Token': clientToken } : {}),
+            ...(sid ? { 'X-Session-Id': sid } : {}),
+          },
+          body: JSON.stringify({ model, messages: [{ role: 'user', content: text }], stream: true }),
+        });
+        // capture session id if server returns it as header
+        const sidHdr = r.headers.get('x-session-id');
+        if (sidHdr) sid = sidHdr;
+
+        const reader = r.body.getReader();
+        const decoder = new TextDecoder();
+        let acc = '';
+
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          const chunk = decoder.decode(value, { stream: true });
+          // naive SSE parse: lines starting with "data: "
+          chunk.split('\n').forEach((line) => {
+            const m = line.match(/^data:\s*(.+)$/);
+            if (!m) return;
+            try {
+              const evt = JSON.parse(m[1]);
+              if (evt?.delta?.content) {
+                acc += evt.delta.content;
+                assistantBody.textContent = acc;
+              }
+            } catch {}
+          });
+        }
+
+        // voice (after stream)
+        if (acc && getVoiceMode() === 'audio') speakLocal(acc);
+        if (acc && getVoiceMode() === 'did') await speakWithDID(acc);
+
+      } else {
+        // JSON mode
+        const r = await fetch(api, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            ...(clientToken ? { 'X-Client-Token': clientToken } : {}),
+            ...(sid ? { 'X-Session-Id': sid } : {}),
+          },
+          body: JSON.stringify({ model, messages: [{ role: 'user', content: text }], stream: false }),
+        });
+        const sidHdr = r.headers.get('x-session-id');
+        if (sidHdr) sid = sidHdr;
+
+        if (!r.ok) {
+          const t = await r.text();
+          assistantBody.textContent = `Error: ${t}`;
+        } else {
+          const json = await r.json();
+          const content = json?.choices?.[0]?.message?.content || json?.content || '(no content)';
+          assistantBody.textContent = content;
+
+          if (getVoiceMode() === 'audio') speakLocal(content);
+          if (getVoiceMode() === 'did') await speakWithDID(content);
+        }
+      }
+    } catch (err) {
+      console.error(err);
+      assistantBody.textContent = `⚠️ ${err.message || err}`;
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  // ---------- Wire up ----------
+  ui.form.addEventListener('submit', (e) => {
+    e.preventDefault();
+    const text = (ui.input.value || '').trim();
+    if (!text) return;
+    send(text);
+    ui.input.value = '';
+  });
+
+  ui.clear.addEventListener('click', () => {
+    ui.feed.innerHTML = '';
+    sid = null;
+  });
+
+  ui.reset.addEventListener('click', () => {
+    sid = null;
+    toast('Session reset.');
+  });
+
+  ui.exportBtn.addEventListener('click', () => {
+    const text = [...ui.feed.querySelectorAll('.msg')]
+      .map((m) => m.innerText.replace(/\n{3,}/g, '\n\n'))
+      .join('\n\n');
+    const a = document.createElement('a');
+    a.href = URL.createObjectURL(new Blob([text], { type: 'text/plain' }));
+    a.download = `keilani-chat-${Date.now()}.txt`;
+    a.click();
+  });
+
+  // expose a dev helper
+  window.__send = (t) => send(t);
 
   console.log('[chat.js] UI found:', {
     feed: !!ui.feed, input: !!ui.input, form: !!ui.form, sendBtn: !!ui.sendBtn,
-    model: !!ui.model, api: !!ui.api, token: !!ui.token, stream: !!ui.stream,
-    sse: !!ui.sse, voice: !!ui.voice
+    model: !!ui.model, api: !!ui.api, token: !!ui.token,
+    stream: !!ui.stream, sse: !!ui.sse, voice: !!ui.voice
   });
-
-  // ---------- AUTOPLAY UNLOCK ----------
-  const unlockMedia = async () => {
-    try {
-      audioEl.volume = 1;
-      audioEl.muted = false;
-      await audioEl.play().catch(() => {});
-      audioEl.pause();
-      audioEl.currentTime = 0;
-
-      videoEl.volume = 1;
-      videoEl.muted = false;
-      await videoEl.play().catch(() => {});
-      videoEl.pause();
-      videoEl.currentTime = 0;
-
-      console.log('[chat.js] Media unlocked');
-    } catch {}
-    window.removeEventListener('click', unlockMedia, true);
-    window.removeEventListener('touchstart', unlockMedia, true);
-  };
-  window.addEventListener('click', unlockMedia, true);
-  window.addEventListener('touchstart', unlockMedia, true);
-
-  // ---------- RENDER HELPERS ----------
-  function now() {
-    const d = new Date();
-    return d.toISOString().slice(0, 19).replace('T', ' ');
-  }
-
-  function bubble(role, text, opts = {}) {
-    const node = document.createElement('div');
-    node.className = `msg msg-${role}`;
-    node.setAttribute('data-role', role);
-    const body = document.createElement('div');
-    body.className = 'msg-body';
-    body.textContent = text || '';
-    node.appendChild(body);
-
-    const meta = document.createElement('div');
-    meta.className = 'msg-meta';
-    meta.textContent = `${role === 'user' ? 'You' : 'Keilani'} ${now()}`;
-    node.appendChild(meta);
-
-    if (opts.muted) node.classList.add('muted');
-    if (opts.id) node.id = opts.id;
-
-    ui.feed.appendChild(node);
-    ui.feed.scrollTop = ui.feed.scrollHeight;
-    return body;
-  }
-
-  function appendChunk(bodyNode, text) {
-    if (!text) return;
-    bodyNode.textContent += text;
-    ui.feed.scrollTop = ui.feed.scrollHeight;
-  }
-
-  // ---------- CHAT SEND ----------
-  async function send(message) {
-    const apiURL = (ui.api.value || '/api/chat').trim();
-    const expectSSE = !!ui.sse.checked;
-    const doStream = !!ui.stream.checked;
-    const theModel = (ui.model.value || 'gpt-5').trim();
-    const clientToken = (ui.token.value || '').trim();
-    const voiceMode = (ui.voice.value || 'Off').trim(); // Off | Local Voice | D-ID Avatar
-
-    bubble('user', message);
-    const assistantBody = bubble('assistant', '', { muted: doStream });
-
-    const payload = {
-      model: theModel,
-      messages: [{ role: 'user', content: message }],
-      stream: doStream,
-      expectSSE
-    };
-    if (clientToken) payload.client_token = clientToken;
-
-    const headers = { 'Content-Type': 'application/json' };
-    let resp;
-    try {
-      resp = await fetch(apiURL, { method: 'POST', headers, body: JSON.stringify(payload) });
-    } catch (err) {
-      appendChunk(assistantBody, `\n[Error: failed to connect: ${err.message}]`);
-      return;
-    }
-
-    if (expectSSE) {
-      const finalText = await handleSSE(resp, assistantBody);
-      await maybeSpeak(finalText, voiceMode);
-    } else {
-      const finalText = await handleJSON(resp, assistantBody);
-      await maybeSpeak(finalText, voiceMode);
-    }
-  }
-
-  // ---------- STREAM (SSE) ----------
-  async function handleSSE(response, assistantBody) {
-    if (!response.ok || !response.body) {
-      appendChunk(assistantBody, `\n[Error: HTTP ${response.status}]`);
-      return '';
-    }
-
-    const reader = response.body.getReader();
-    const decoder = new TextDecoder('utf-8');
-    let buf = '';
-    let finalText = '';
-
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      buf += decoder.decode(value, { stream: true });
-      const parts = buf.split('\n\n');
-      buf = parts.pop();
-
-      for (const part of parts) {
-        if (!part.startsWith('data: ')) continue;
-        const data = part.slice(6).trim();
-        if (!data || data === '[DONE]') continue;
-
-        try {
-          const json = JSON.parse(data);
-          const delta = json?.choices?.[0]?.delta?.content || '';
-          if (delta) {
-            finalText += delta;
-            appendChunk(assistantBody, delta);
-          }
-        } catch {
-          appendChunk(assistantBody, data);
-        }
-      }
-    }
-
-    assistantBody.parentElement.classList.remove('muted');
-    return finalText.trim();
-  }
-
-  // ---------- NON-STREAM (JSON) ----------
-  async function handleJSON(response, assistantBody) {
-    let text = '';
-    try {
-      if (!response.ok) {
-        appendChunk(assistantBody, `\n[Error: HTTP ${response.status}]`);
-        return '';
-      }
-      const json = await response.json();
-      text =
-        json?.choices?.[0]?.message?.content ??
-        json?.message?.content ??
-        json?.content ??
-        (typeof json === 'string' ? json : '');
-
-      if (!text) text = JSON.stringify(json);
-      appendChunk(assistantBody, text);
-    } catch (err) {
-      appendChunk(assistantBody, `\n[Error parsing JSON: ${err.message}]`);
-    }
-    return text.trim();
-  }
-
-  // ---------- VOICE ----------
-  async function maybeSpeak(text, mode) {
-    if (!text) return;
-    if (mode === 'Off') return;
-
-    if (mode === 'Local Voice') {
-      await speakLocal(text);
-      return;
-    }
-
-    if (mode === 'D-ID Avatar') {
-      try {
-        const res = await fetch('/api/did-speak', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ text, mode })
-        });
-        const data = await res.json();
-        console.log('[voice] did-speak POST ->', data);
-
-        if (data?.fallback) {
-          await speakLocal(text);
-          return;
-        }
-
-        if (data?.result_url) {
-          await playUrlSmart(data.result_url);
-          return;
-        }
-
-        if (data?.id) {
-          const url = await pollDidResult(data.id, 35000);
-          console.log('[voice] polled result url:', url);
-          if (url) await playUrlSmart(url);
-          else await speakLocal(text);
-          return;
-        }
-
-        await speakLocal(text);
-      } catch (err) {
-        console.error('[voice] D-ID error', err);
-        await speakLocal(text);
-      }
-    }
-  }
-
-  async function speakLocal(text) {
-    if (!('speechSynthesis' in window)) {
-      console.warn('[voice] speechSynthesis not available');
-      return;
-    }
-    // Wait for voices if needed
-    await new Promise(res => {
-      const v = window.speechSynthesis.getVoices();
-      if (v && v.length) return res();
-      window.speechSynthesis.onvoiceschanged = () => res();
-      setTimeout(res, 750);
-    });
-
-    window.speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(text);
-    u.rate = 1.0;
-    u.pitch = 1.0;
-    u.volume = 1.0;
-    window.speechSynthesis.speak(u);
-    console.log('[voice] spoke locally via speechSynthesis');
-  }
-
-  async function pollDidResult(id, timeoutMs = 30000) {
-    const end = Date.now() + timeoutMs;
-    while (Date.now() < end) {
-      const r = await fetch(`/api/did-speak?id=${encodeURIComponent(id)}`);
-      const j = await r.json();
-      const status = j?.status || j?.state;
-      const url =
-        j?.result_url || j?.result_url_mp4 || j?.result?.url || j?.audio?.url || '';
-      console.log('[voice] poll status=', status, 'url=', url);
-      if ((status === 'done' || status === 'complete') && url) return url;
-      await new Promise(res => setTimeout(res, 1200));
-    }
-    return null;
-  }
-
-  async function playUrlSmart(url) {
-    try {
-      // quick guess by extension
-      const lower = url.toLowerCase();
-      let contentType = '';
-      try {
-        const head = await fetch(url, { method: 'HEAD' });
-        contentType = head.headers.get('content-type') || '';
-      } catch {}
-
-      console.log('[voice] play url:', url, 'ctype=', contentType);
-
-      // decide which element to use
-      const isVideo = contentType.startsWith('video/') || lower.endsWith('.mp4') || lower.endsWith('.webm');
-
-      if (isVideo) {
-        videoEl.src = url;
-        videoEl.volume = 1;
-        videoEl.muted = false;
-        await videoEl.play();
-        console.log('[voice] playing VIDEO');
-      } else {
-        audioEl.src = url;
-        audioEl.volume = 1;
-        audioEl.muted = false;
-        await audioEl.play();
-        console.log('[voice] playing AUDIO');
-      }
-    } catch (err) {
-      console.warn('[voice] media play blocked, waiting for next gesture', err);
-    }
-  }
-
-  // ---------- EVENTS ----------
-  ui.form.addEventListener('submit', (e) => {
-    e.preventDefault();
-    const msg = (ui.input.value || '').trim();
-    if (!msg) return;
-    ui.input.value = '';
-    send(msg);
-  });
-
-  ui.input.addEventListener('keydown', (e) => {
-    if (e.key === 'Enter' && !e.shiftKey) {
-      e.preventDefault();
-      ui.form.requestSubmit();
-    }
-  });
-
-  // Debug helper
-  window.__send = () => {
-    const msg = (ui.input.value || '').trim();
-    if (!msg) return;
-    ui.input.value = '';
-    send(msg);
-  };
+  console.log('[chat.js] Ready. Tip: call window.__send() in console to force a send.');
 })();

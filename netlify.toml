@@ -36,7 +36,7 @@
     Permissions-Policy = "camera=(), microphone=(), geolocation=()"
     Strict-Transport-Security = "max-age=63072000; includeSubDomains; preload"
     # Update connect-src as needed; includes OpenAI/Supabase/Stripe/Netlify/etc.
-    Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-inline' https://*.netlify.app; connect-src 'self' https://keilani-brain.netlify.app https://api.openai.com https://*.supabase.co https://*.netlify.app https://framer.com https://app.framerstatic.com https://api.stripe.com https://api.keilani.ai https://api.d-id.com; img-src 'self' data: blob:; media-src https://*.d-id.com https://*.amazonaws.com 'self' blob:; style-src 'self' 'unsafe-inline'; frame-ancestors 'self';"
+    Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-inline' https://*.netlify.app; connect-src 'self' https://keilani-brain.netlify.app https://api.openai.com https://*.supabase.co https://*.netlify.app https://framer.com https://app.framerstatic.com https://api.stripe.com https://api.keilani.ai https://api.d-id.com; img-src 'self' data: blob:; media-src https://*.d-id.com https://*.amazonaws.com 'self' blob: data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'self';"
 
 # Ensure JS modules get correct MIME
 [[headers]]

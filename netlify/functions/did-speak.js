@@ -1,96 +1,120 @@
-// Keilani — D-ID voice proxy (audio/video aware)
+// netlify/functions/did-speak.js
+// Runtime: Netlify Functions on Node 18+ (global fetch available)
 
-const DID_API = "https://api.d-id.com";
-const API_KEY = process.env.DID_API_KEY || "";
-const SOURCE_URL = process.env.DID_AVATAR_SOURCE_URL || "";
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization",
+};
 
 exports.handler = async (event) => {
   try {
+    // CORS preflight
     if (event.httpMethod === "OPTIONS") {
-      return ok({}, 204);
+      return { statusCode: 204, headers: CORS, body: "" };
     }
 
-    if (event.httpMethod === "GET") {
-      const id = (event.queryStringParameters?.id || "").trim();
-      if (!id) return bad("Missing id");
-      if (!API_KEY) return ok({ fallback: true });
-
-      const r = await fetch(`${DID_API}/talks/${encodeURIComponent(id)}`, {
-        headers: { "Authorization": `Basic ${API_KEY}` }
-      });
-      const j = await r.json();
-
-      const status = j?.status || j?.state || "";
-      const resultUrl =
-        j?.result_url ||
-        j?.result_url_mp4 ||
-        j?.result?.url ||
-        j?.audio?.url ||
-        "";
-
-      return ok({ status, result_url: resultUrl });
+    if (event.httpMethod !== "POST") {
+      return {
+        statusCode: 405,
+        headers: CORS,
+        body: JSON.stringify({ error: "Method not allowed. Use POST." }),
+      };
     }
 
-    if (event.httpMethod === "POST") {
-      const body = JSON.parse(event.body || "{}");
-      const text = (body.text || "").trim();
-      const mode = (body.mode || "D-ID Avatar").trim();
+    const env = process.env || {};
+    const DID_AGENT_KEY = env.DID_AGENT_KEY;
+    const DID_AGENT_ID  = env.DID_AGENT_ID;
 
-      if (!text) return bad("Missing text");
+    // Parse input
+    let payload = {};
+    try {
+      payload = JSON.parse(event.body || "{}");
+    } catch {
+      // ignore, will handle below
+    }
 
-      if (!API_KEY || !SOURCE_URL || mode !== "D-ID Avatar") {
-        // fall back gracefully to local tts on the client
-        return ok({ fallback: true, text });
-      }
+    const text = (payload.text || "").toString().trim();
+    const mode = (payload.mode || "D-ID Voice").toString();
 
-      // Basic text talk request
-      const payload = {
-        script: { type: "text", input: text },
-        source_url: SOURCE_URL
+    if (!text) {
+      return {
+        statusCode: 400,
+        headers: CORS,
+        body: JSON.stringify({ error: "Missing \"text\" in request body." }),
+      };
+    }
+
+    // If we have Agent creds, hit the Agent API
+    if (DID_AGENT_KEY && DID_AGENT_ID) {
+      // D-ID Agent “interact” endpoint
+      const url = `https://agent.d-id.com/v2/agents/${encodeURIComponent(DID_AGENT_ID)}/interact`;
+
+      // Minimum shape that works with Agents today:
+      // { input: { text: "..." } }
+      // (Agent behavior—voice/video, TTS, etc.—is controlled by the Agent’s configuration)
+      const body = {
+        input: { text },
       };
 
-      const res = await fetch(`${DID_API}/talks`, {
+      const res = await fetch(url, {
         method: "POST",
         headers: {
+          "Authorization": `Bearer ${DID_AGENT_KEY}`,
           "Content-Type": "application/json",
-          "Authorization": `Basic ${API_KEY}`
         },
-        body: JSON.stringify(payload)
+        body: JSON.stringify(body),
       });
 
-      const data = await res.json();
+      // Try to parse payload; if not JSON, return text
+      const contentType = res.headers.get("content-type") || "";
+      let data;
+      if (contentType.includes("application/json")) {
+        data = await res.json();
+      } else {
+        data = { text: await res.text() };
+      }
 
-      // If the API returns a ready URL right away pass it through
-      const resultUrl =
-        data?.result_url ||
-        data?.result_url_mp4 ||
-        data?.result?.url ||
-        data?.audio?.url ||
-        "";
+      if (!res.ok) {
+        return {
+          statusCode: res.status,
+          headers: CORS,
+          body: JSON.stringify({
+            ok: false,
+            used: "agent",
+            status: res.status,
+            data,
+          }),
+        };
+      }
 
-      if (resultUrl) return ok({ status: "done", result_url: resultUrl });
-      if (data?.id) return ok({ id: data.id, status: data.status || "created" });
-
-      if (!res.ok) return ok({ fallback: true, error: data }, res.status);
-      return ok({ fallback: true });
+      return {
+        statusCode: 200,
+        headers: { ...CORS, "Content-Type": "application/json" },
+        body: JSON.stringify({
+          ok: true,
+          used: "agent",
+          mode,
+          request: { text },
+          data,
+        }),
+      };
     }
 
-    return bad("Method not allowed", 405);
+    // No Agent creds → tell the UI to fall back to local SpeechSynthesis
+    return {
+      statusCode: 200,
+      headers: { ...CORS, "Content-Type": "application/json" },
+      body: JSON.stringify({
+        fallback: true,
+        reason: "DID_AGENT_KEY / DID_AGENT_ID not set",
+      }),
+    };
   } catch (err) {
-    return ok({ fallback: true, error: String(err) }, 200);
+    return {
+      statusCode: 500,
+      headers: CORS,
+      body: JSON.stringify({ error: "did-speak failed", message: String(err) }),
+    };
   }
 };
-
-function ok(json, status = 200) {
-  return {
-    statusCode: status,
-    headers: {
-      "Content-Type": "application/json",
-      "Cache-Control": "no-store"
-    },
-    body: JSON.stringify(json)
-  };
-}
-function bad(msg, status = 400) {
-  return ok({ error: msg }, status);
-}

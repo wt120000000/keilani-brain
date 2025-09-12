@@ -2,166 +2,228 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Keilani Chat • Streaming + Voice</title>
     <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Keilani Chat • Streaming + Voice</title>
 
-    <!-- Theme & basic styles -->
+    <!-- Minimal theme (CSP-safe inline) -->
     <style>
       :root {
         --bg: #0b0f1a;
-        --panel: #111927;
-        --border: #22304a;
+        --panel: #0f1422;
         --text: #d7def2;
-        --accent: #8b65ff;
-        --btn: #34446b;
-        --btnHover: #22334d;
+        --muted: #8aa0c9;
+        --accent: #8b56fc;
+        --accent-2: #6ee7ff;
+        --chip: #2245ee;
+        --error: #ff4d4f;
+        --border: #16213e;
+        --b: #2b3758;
+        --bubble: #11213d;
+        --bubble2: #0e1629;
       }
       * {
         box-sizing: border-box;
       }
+      html,
+      body {
+        height: 100%;
+      }
       body {
         margin: 0;
-        background: var(--bg);
         color: var(--text);
-        font-family: system-ui, sans-serif;
-        font-size: 15px;
-        display: flex;
-        flex-direction: column;
-        height: 100vh;
+        font:
+          14px/1.5 system-ui,
+          -apple-system,
+          Segoe UI,
+          Roboto,
+          Inter,
+          sans-serif;
+        background:
+          radial-gradient(1200px 600px at 80% -20%, #0d1b30 0%, #0b0f1a 55%)
+            fixed,
+          var(--bg);
       }
-      header {
+      .toolbar {
+        position: sticky;
+        top: 0;
+        z-index: 5;
         display: flex;
+        gap: 0.75rem;
         align-items: center;
-        gap: 1rem;
-        padding: 0.75rem 1rem;
-        background: var(--panel);
+        padding: 0.6rem 0.75rem;
+        background: linear-gradient(
+          180deg,
+          rgba(11, 15, 26, 0.95),
+          rgba(11, 15, 26, 0.78) 60%,
+          rgba(11, 15, 26, 0) 100%
+        );
         border-bottom: 1px solid var(--border);
       }
-      header h1 {
-        font-size: 16px;
-        margin: 0;
+      .chip {
+        background: var(--chip);
+        color: #fff;
+        border-radius: 0.5rem;
+        padding: 0.15rem 0.5rem;
+        font-size: 0.75rem;
       }
-      #toolbar {
-        display: flex;
-        gap: 0.5rem;
-        align-items: center;
-        flex-wrap: wrap;
+      select,
+      input[type="text"] {
+        background: var(--panel);
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 0.5rem;
+        padding: 0.5rem 0.6rem;
       }
-      #feed {
-        flex: 1;
-        overflow-y: auto;
+      button {
+        background: var(--accent);
+        color: #fff;
+        border: 0;
+        border-radius: 0.6rem;
+        padding: 0.45rem 0.7rem;
+        cursor: pointer;
+      }
+      button.ghost {
+        background: transparent;
+        border: 1px solid var(--border);
+      }
+      button:hover {
+        filter: brightness(1.05);
+      }
+      .wrap {
+        max-width: 1100px;
+        margin: 0 auto;
         padding: 1rem;
       }
       .msg {
-        margin-bottom: 1rem;
-        padding: 0.75rem 1rem;
-        border-radius: 0.6rem;
-        max-width: 75%;
-        line-height: 1.4;
-        white-space: pre-wrap;
+        background: var(--bubble);
+        border: 1px solid var(--border);
+        border-radius: 0.8rem;
+        margin: 0.6rem 0;
+        padding: 0.85rem;
       }
       .msg.you {
-        background: var(--btn);
+        background: var(--bubble2);
+      }
+      .meta {
+        color: var(--muted);
+        font-size: 0.8rem;
+        margin-bottom: 0.25rem;
+      }
+      .composer {
+        display: flex;
+        gap: 0.6rem;
+        align-items: center;
+        margin: 0.8rem 0;
+      }
+      textarea {
+        flex: 1;
+        min-height: 60px;
+        max-height: 180px;
+        resize: vertical;
+        background: transparent;
+        color: var(--text);
+        border: 1px solid var(--border);
+        border-radius: 0.6rem;
+        padding: 0.75rem;
+      }
+      .right {
         margin-left: auto;
       }
-      .msg.keilani {
-        background: var(--panel);
-        border: 1px solid var(--border);
-        margin-right: auto;
+      .kbd {
+        font:
+          600 11px SFMono-Regular,
+          Consolas,
+          ui-monospace,
+          Menlo,
+          monospace;
+        background: #091124;
+        border: 1px solid #13213d;
+        padding: 0.15rem 0.35rem;
+        border-radius: 0.35rem;
       }
-      form {
-        display: flex;
-        padding: 0.75rem;
-        background: var(--panel);
-        border-top: 1px solid var(--border);
-        gap: 0.5rem;
-      }
-      #input {
-        flex: 1;
-        resize: none;
-        padding: 0.6rem 0.8rem;
-        border-radius: 0.5rem;
-        border: 1px solid var(--border);
-        background: var(--bg);
-        color: var(--text);
-        font-size: 14px;
-        min-height: 48px;
-      }
-      #send {
-        background: var(--accent);
-        border: none;
-        border-radius: 0.5rem;
-        color: white;
-        font-weight: bold;
-        padding: 0 1.2rem;
-        cursor: pointer;
-        transition: background 0.2s;
-      }
-      #send:hover {
-        background: #6a4fd8;
-      }
-      /* Hidden voice/video */
-      #voiceAudio,
-      #voiceVideo {
-        display: none;
+      .tip {
+        color: var(--muted);
+        font-size: 0.82rem;
+        margin: 0.25rem 0;
       }
     </style>
 
-    <!-- highlight.js theme -->
+    <!-- Vendor (local, CSP-safe) -->
     <link rel="stylesheet" href="/vendor/github-dark.min.css" />
+    <script src="/vendor/dayjs.min.js" defer></script>
+    <script src="/vendor/highlight.min.js" defer></script>
+    <script src="/vendor/marked.umd.min.js" defer></script>
+    <script>
+      // tiny guard so we don't crash if libs load slowly
+      window.addEventListener("error", () => {});
+    </script>
   </head>
+
   <body>
-    <header>
-      <h1>Keilani Chat</h1>
-      <div id="toolbar">
-        <span class="chip">Streaming</span>
-        <label
-          >Model:
-          <select id="model">
-            <option value="gpt-5" selected>gpt-5</option>
-            <option value="gpt-4o-mini">gpt-4o-mini</option>
-          </select>
-        </label>
-        <input id="api" value="/api/chat" style="width: 220px" />
-        <input
-          id="token"
-          placeholder="Client Token (optional)"
-          style="width: 200px"
-        />
-        <button id="save">Save</button>
-        <button id="export">Export .txt</button>
-        <button id="clear">Clear</button>
-        <button id="reset">Reset Session</button>
-        <label><input type="checkbox" id="stream" checked /> Stream</label>
-        <label><input type="checkbox" id="sse" checked /> Expect SSE</label>
-        <label
-          >Voice:
-          <select id="voice">
-            <option value="off" selected>Off</option>
-            <option value="local">Local Voice</option>
-            <option value="did">D-ID Avatar</option>
-          </select>
-        </label>
-        <span id="tokens">Tokens: 0 • 0/s</span>
-        <span id="sid">SID: —</span>
+    <div class="toolbar">
+      <div class="chip">Streaming</div>
+
+      <label
+        >Model:
+        <select id="model">
+          <option value="gpt-5" selected>gpt-5</option>
+          <option value="gpt-4o-mini">gpt-4o-mini</option>
+        </select>
+      </label>
+
+      <input
+        id="api"
+        type="text"
+        placeholder="/api/chat"
+        value="/api/chat"
+        style="min-width: 280px"
+      />
+      <input
+        id="token"
+        type="text"
+        placeholder="Client Token (optional)"
+        style="min-width: 220px"
+      />
+
+      <button id="save">Save</button>
+      <button id="export" class="ghost">Export .txt</button>
+      <button id="clear" class="ghost">Clear</button>
+      <button id="reset" class="ghost">Reset Session</button>
+
+      <label class="right"
+        ><input id="stream" type="checkbox" checked /> Stream</label
+      >
+      <label><input id="sse" type="checkbox" checked /> Expect SSE</label>
+
+      <label
+        >Voice:
+        <select id="voice">
+          <option value="off" selected>Off</option>
+          <option value="audio">Audio (local)</option>
+          <option value="did">D-ID Avatar</option>
+        </select>
+      </label>
+    </div>
+
+    <div class="wrap">
+      <div id="feed" aria-live="polite"></div>
+
+      <div class="tip">
+        Tip: <span class="kbd">Enter</span> to send •
+        <span class="kbd">Shift+Enter</span> for newline
       </div>
-    </header>
 
-    <main id="feed"></main>
+      <form id="form" class="composer">
+        <textarea
+          id="input"
+          placeholder="Type your message..."
+          autocomplete="off"
+        ></textarea>
+        <button id="sendBtn" type="submit">Send ↵</button>
+      </form>
+    </div>
 
-    <form id="form">
-      <textarea id="input" placeholder="Type your message..."></textarea>
-      <button id="send" type="submit">Send ↵</button>
-    </form>
-
-    <!-- Voice/Video playback hooks -->
-    <audio id="voiceAudio" autoplay playsinline></audio>
-    <video id="voiceVideo" autoplay playsinline muted></video>
-
-    <!-- Scripts -->
-    <script src="/vendor/dayjs.min.js"></script>
-    <script src="/vendor/marked.umd.min.js"></script>
-    <script src="/vendor/highlight.min.js"></script>
-    <script src="/js/chat.js"></script>
+    <!-- App -->
+    <script defer src="/js/chat.js?v=voice2"></script>
   </body>
 </html>
