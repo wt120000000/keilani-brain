@@ -1,6 +1,5 @@
-// netlify/functions/chat.js (CommonJS)
-// POST { message, system?, model?, temperature?, history? }
-// -> { reply }
+// netlify/functions/chat.js
+// POST { message, system?, model?, history? } -> { reply }
 
 const ok = (obj, extra = {}) => ({
   statusCode: 200,
@@ -44,9 +43,8 @@ exports.handler = async (event) => {
     const {
       message,
       system,
-      model = "gpt-5",
-      temperature = 0.7,
-      history = [],
+      model = "gpt-5",      // pick your default
+      history = [],         // optional: [{role:'user'|'assistant'|'system', content:string}]
     } = input;
 
     if (!message || typeof message !== "string") return err(400, "Missing 'message' (string)");
@@ -62,16 +60,23 @@ exports.handler = async (event) => {
     }
     messages.push({ role: "user", content: message });
 
+    // IMPORTANT: do NOT send temperature (some models reject it outright)
+    const body = { model, messages };
+
     const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({ model, messages, temperature }),
+      body: JSON.stringify(body),
     });
 
-    if (!res.ok) return err(res.status, `OpenAI error: ${await res.text()}`);
+    if (!res.ok) {
+      const txt = await res.text();
+      return err(res.status, `OpenAI error: ${txt}`);
+    }
+
     const data = await res.json();
     const reply = data?.choices?.[0]?.message?.content ?? "";
     return ok({ reply });
