@@ -36,6 +36,11 @@
   from = "/api/rtc/token"
   to = "/.netlify/functions/rtc-token"
   status = 200
+  
+[[redirects]]
+  from = "/api/voices"
+  to = "/.netlify/functions/voices"
+  status = 200
 
 # Correct MIME type for .js in assets
 [[headers]]

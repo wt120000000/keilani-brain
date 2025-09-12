@@ -9,16 +9,62 @@ const state = {
   dailyUrl: null,
   meetingToken: null,
   lastReply: "",
-  voiceId: null, // selected ElevenLabs voice
+  voiceId: null, // selected ElevenLabs voice (persisted)
 };
+
+// ---------------- Audio auto-play helpers ----------------
+let audioUnlocked = false;
+async function unlockAudio() {
+  if (audioUnlocked) return;
+  try {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (Ctx) {
+      const ctx = new Ctx();
+      await ctx.resume();
+      const buf = ctx.createBuffer(1, 1, 22050);
+      const src = ctx.createBufferSource();
+      src.buffer = buf;
+      src.connect(ctx.destination);
+      src.start(0);
+    }
+  } catch {}
+  audioUnlocked = true;
+}
+document.addEventListener("click", unlockAudio, { once: true });
+document.addEventListener("touchstart", unlockAudio, { once: true });
+
+async function playAudioUrl(url) {
+  try {
+    const a = new Audio();
+    a.src = url;
+    a.autoplay = true;
+    a.onended = () => URL.revokeObjectURL(url);
+    await a.play();                   // try autoplay
+    $("ttsPlayer").src = url;         // also mirror into visible player
+  } catch (e) {
+    console.warn("Autoplay blocked; showing player UI.", e);
+    $("ttsPlayer").src = url;         // user can press Play
+  }
+}
+
+// ---------------- Buttons: busy / enabled helpers ----------------
+function setBusy(btn, busy, labelIdle, labelBusy) {
+  if (!btn) return;
+  btn.disabled = !!busy;
+  btn.textContent = busy ? labelBusy : labelIdle;
+}
 
 // ---------------- Voice selector (dynamic) ----------------
 (async function initVoices() {
   const sel = $("voiceSelect");
-  if (!sel) return; // page might not include the selector yet
+  if (!sel) return; // page may omit the selector
 
   sel.disabled = true;
   sel.innerHTML = `<option>Loading voices…</option>`;
+
+  // restore saved voiceId (if any) early so we can set selection later
+  const savedVoiceId = localStorage.getItem("voiceId") || "";
+
   try {
     const r = await fetch("/api/voices");
     if (!r.ok) throw new Error(await r.text());
@@ -38,15 +84,25 @@ const state = {
       opt.textContent = "No voices available";
       sel.appendChild(opt);
       sel.disabled = true;
+      state.voiceId = null;
     } else {
+      // set from saved value if present
+      if (savedVoiceId) {
+        const match = Array.from(sel.options).find(o => o.value === savedVoiceId);
+        if (match) sel.value = savedVoiceId;
+      }
       state.voiceId = sel.value || null;
       sel.disabled = false;
-      sel.onchange = () => (state.voiceId = sel.value || null);
+      sel.onchange = () => {
+        state.voiceId = sel.value || null;
+        localStorage.setItem("voiceId", state.voiceId || "");
+      };
     }
   } catch (e) {
     console.error("voices load failed:", e);
     sel.innerHTML = `<option value="">(voices unavailable)</option>`;
     sel.disabled = true;
+    state.voiceId = null;
   }
 })();
 
@@ -62,26 +118,24 @@ $("sendText").onclick = async () => {
 
 $("speakReply").onclick = async () => {
   if (!state.lastReply) return;
-  const url = await tts(state.lastReply);
-  if (url) {
-    const p = $("ttsPlayer");
-    p.src = url;
-    p.play();
+  const btn = $("speakReply");
+  setBusy(btn, true, "Speak Reply", "Speaking…");
+  try {
+    const url = await tts(state.lastReply);
+    if (url) await playAudioUrl(url);
+  } finally {
+    setBusy(btn, false, "Speak Reply", "Speaking…");
   }
 };
 
 // ---------------- Push-to-talk (reliable recorder) ----------------
 const pttBtn = $("pttBtn");
-pttBtn.onmousedown = startRecording;
-pttBtn.onmouseup = stopRecording;
-pttBtn.ontouchstart = (e) => {
-  e.preventDefault();
-  startRecording();
-};
-pttBtn.ontouchend = (e) => {
-  e.preventDefault();
-  stopRecording();
-};
+if (pttBtn) {
+  pttBtn.onmousedown = startRecording;
+  pttBtn.onmouseup = stopRecording;
+  pttBtn.ontouchstart = (e) => { e.preventDefault(); startRecording(); };
+  pttBtn.ontouchend = (e) => { e.preventDefault(); stopRecording(); };
+}
 
 function pickAudioMime() {
   const candidates = [
@@ -160,11 +214,7 @@ async function startRecording() {
       feedAvatar(reply);
 
       const url = await tts(reply);
-      if (url) {
-        const p = $("ttsPlayer");
-        p.src = url;
-        p.play();
-      }
+      if (url) await playAudioUrl(url);
     }
 
     $("recState").textContent = "idle";
@@ -224,10 +274,7 @@ async function tts(text) {
 // ---------------- Daily room (camera / screen share) ----------------
 $("createRoom").onclick = async () => {
   const r = await fetch("/api/rtc/create-room", { method: "POST" });
-  if (!r.ok) {
-    console.error("create room error", await r.text());
-    return;
-  }
+  if (!r.ok) { console.error("create room error", await r.text()); return; }
   const j = await r.json();
   state.dailyRoom = j.room;
   state.dailyUrl = j.url;
