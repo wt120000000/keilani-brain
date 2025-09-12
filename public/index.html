@@ -118,60 +118,32 @@
     <div class="wrap">
       <h1>Keilani Brain — Live</h1>
 
-      <div class="grid">
-        <!-- Chat + Push-to-talk -->
-        <div class="card">
-          <div class="row">
-            <div class="col">
-              <label>Message to Keilani</label>
-              <textarea id="textIn" placeholder="Say hi…"></textarea>
-              <div class="flex">
-                <button class="btn btn-primary" id="sendText">Send</button>
-                <button class="btn" id="speakReply">Speak Reply</button>
-              </div>
-            </div>
-            <div class="col">
-              <label>Push-to-talk</label>
-              <div class="flex">
-                <button class="btn btn-accent" id="pttBtn">Hold to talk</button>
-                <span id="recState" class="small badge">idle</span>
-              </div>
-              <label>Last transcript</label>
-              <div id="transcript" class="log"></div>
+      <div class="card">
+        <div class="row">
+          <div class="col">
+            <label>Message to Keilani</label>
+            <textarea id="textIn" placeholder="Say hi…"></textarea>
+            <div class="flex">
+              <button class="btn btn-primary" id="sendText">Send</button>
+              <button class="btn" id="speakReply">Speak Reply</button>
             </div>
           </div>
-
-          <label>Reply</label>
-          <div id="reply" class="log"></div>
-          <audio id="ttsPlayer" controls></audio>
-        </div>
-
-        <!-- D-ID Bridge (externalized in bridge.js) -->
-        <div class="card">
-          <h3>D-ID Bridge</h3>
-          <p class="small">
-            This page auto-bridges D-ID ⇄ Brain. After your D-ID client connects
-            in another tab, set
-            <code>window.myDidSession = &lt;your live session&gt;</code> and the
-            bridge will attach.
-          </p>
-          <div class="flex" style="margin-bottom: 8px">
-            <span class="small">Status:</span>
-            <span id="didStatus" class="small badge">not attached</span>
-            <button class="btn" id="didDetach" style="margin-left: auto">
-              Detach
-            </button>
-          </div>
-          <div class="small">
-            Transcript events listened: <code>transcript</code>,
-            <code>speech.transcript</code>, <code>asr.transcript</code><br />
-            VAD barge-in: <code>voice-activity-start</code>,
-            <code>vad-start</code>, <code>voice-start</code>
+          <div class="col">
+            <label>Push-to-talk</label>
+            <div class="flex">
+              <button class="btn btn-accent" id="pttBtn">Hold to talk</button>
+              <span id="recState" class="small badge">idle</span>
+            </div>
+            <label>Last transcript</label>
+            <div id="transcript" class="log"></div>
           </div>
         </div>
+
+        <label>Reply</label>
+        <div id="reply" class="log"></div>
+        <audio id="ttsPlayer" controls></audio>
       </div>
 
-      <!-- Camera & Screen-share via Daily -->
       <div class="card" style="margin-top: 16px">
         <h3>Camera & Screen-share (Daily)</h3>
         <div class="flex">
@@ -182,23 +154,20 @@
         </div>
         <div id="dailyMount" style="margin-top: 10px"></div>
         <p class="small">
-          Use the embedded Daily UI to enable mic/camera and share your screen.
+          Use the Daily UI to enable mic/camera and share your screen.
         </p>
       </div>
 
-      <!-- Avatar text feed (for any future video agent) -->
       <div class="card" style="margin-top: 16px">
         <h3>Avatar Hook</h3>
         <p class="small">
-          We forward the model’s text here (and can add phonemes later for
+          We forward the model’s text here (phonemes can be added later for
           lip-sync).
         </p>
         <div id="avatarFeed" class="log"></div>
       </div>
     </div>
 
-    <!-- External scripts (no inline JS; CSP-friendly) -->
-    <script src="/assets/bridge.js" defer></script>
-    <script src="/assets/chat.js" defer></script>
+    <script src="/chat.js" defer></script>
   </body>
 </html>
