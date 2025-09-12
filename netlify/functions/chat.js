@@ -1,104 +1,81 @@
-// netlify/functions/chat.js
-// CommonJS + native fetch (Node 18+). CORS + OPTIONS + JSON/SSE proxy.
+// netlify/functions/chat.js (CommonJS)
+// POST { message, system?, model?, temperature?, history? }
+// -> { reply }
 
-const CORS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "authorization,content-type",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-};
-
-const TEXT = (statusCode, body, extra = {}) => ({
-  statusCode,
-  headers: { "Content-Type": "text/plain; charset=utf-8", ...CORS, ...extra },
-  body,
-});
-
-const JSONR = (statusCode, obj, extra = {}) => ({
-  statusCode,
-  headers: { "Content-Type": "application/json", ...CORS, ...extra },
+const ok = (obj, extra = {}) => ({
+  statusCode: 200,
+  headers: {
+    "Content-Type": "application/json",
+    "Cache-Control": "no-store",
+    "Access-Control-Allow-Origin": "*",
+    ...extra,
+  },
   body: JSON.stringify(obj),
 });
 
+const err = (status, msg) => ({
+  statusCode: status,
+  headers: {
+    "Content-Type": "application/json",
+    "Access-Control-Allow-Origin": "*",
+  },
+  body: JSON.stringify({ error: msg }),
+});
+
 exports.handler = async (event) => {
-  try {
-    if (event.httpMethod === "OPTIONS") {
-      return { statusCode: 204, headers: CORS };
-    }
-    if (event.httpMethod !== "POST") {
-      return TEXT(405, "Method Not Allowed");
-    }
-
-    const OPENAI_API_KEY = process.env.OPENAI_API_KEY || process.env.OPENAI_API_TOKEN;
-    if (!OPENAI_API_KEY) {
-      return JSONR(500, { error: "Missing OPENAI_API_KEY" });
-    }
-
-    let body;
-    try {
-      body = JSON.parse(event.body || "{}");
-    } catch {
-      return JSONR(400, { error: "Invalid JSON" });
-    }
-
-    const { model = "gpt-5", messages, stream = true, temperature } = body || {};
-    if (!Array.isArray(messages) || messages.length === 0) {
-      return JSONR(400, { error: "Missing required: messages[]" });
-    }
-
-    // Build OpenAI request
-    const url = "https://api.openai.com/v1/chat/completions";
-    const payload = {
-      model,
-      messages,
-      stream: !!stream,
+  // CORS preflight
+  if (event.httpMethod === "OPTIONS") {
+    return {
+      statusCode: 204,
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      },
+      body: "",
     };
+  }
 
-    // gpt-5 ignores temperature; only include for others
-    if (typeof temperature === "number" && !String(model).startsWith("gpt-5")) {
-      payload.temperature = temperature;
+  if (event.httpMethod !== "POST") return err(405, "Method Not Allowed");
+  if (!process.env.OPENAI_API_KEY) return err(500, "Missing OPENAI_API_KEY");
+
+  try {
+    const input = JSON.parse(event.body || "{}");
+    const {
+      message,
+      system,
+      model = "gpt-5",
+      temperature = 0.7,
+      history = [],
+    } = input;
+
+    if (!message || typeof message !== "string") return err(400, "Missing 'message' (string)");
+
+    const messages = [];
+    if (system) messages.push({ role: "system", content: system });
+    if (Array.isArray(history)) {
+      for (const m of history) {
+        if (m && typeof m.content === "string" && ["system","user","assistant"].includes(m.role)) {
+          messages.push({ role: m.role, content: m.content });
+        }
+      }
     }
+    messages.push({ role: "user", content: message });
 
-    // Forward Authorization; prefer server key, ignore client token for OpenAI
-    // (Client token from browser may be useful to your own services.)
-    const upstream = await fetch(url, {
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({ model, messages, temperature }),
     });
 
-    if (!upstream.ok) {
-      const t = await upstream.text().catch(() => "");
-      return JSONR(upstream.status, { error: "Upstream error", detail: t });
-    }
-
-    // If client expects SSE, forward raw text.
-    if (stream) {
-      // NOTE: Netlify Functions v1 will buffer; v2/streaming will flush.
-      const text = await upstream.text();
-      return TEXT(
-        200,
-        text,
-        {
-          "Content-Type": "text/event-stream",
-          "Cache-Control": "no-cache, no-transform",
-          "Connection": "keep-alive",
-          "X-Accel-Buffering": "no",
-        }
-      );
-    }
-
-    // Non-stream JSON:
-    const data = await upstream.json();
-    // Return a simple, consistent shape for the frontend
-    const reply =
-      data?.choices?.[0]?.message?.content ??
-      data?.choices?.[0]?.delta?.content ??
-      "";
-    return JSONR(200, { reply, raw: data });
-  } catch (err) {
-    return JSONR(500, { error: String(err && err.message || err) });
+    if (!res.ok) return err(res.status, `OpenAI error: ${await res.text()}`);
+    const data = await res.json();
+    const reply = data?.choices?.[0]?.message?.content ?? "";
+    return ok({ reply });
+  } catch (e) {
+    return err(500, `chat exception: ${e.message}`);
   }
 };

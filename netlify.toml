@@ -1,32 +1,36 @@
-# netlify.toml — Keilani Brain
-
 [build]
-  command   = "npm run build || echo no-build"
-  publish   = "public"
-  functions = "netlify/functions"
+  publish = "public"
+  command = ""
 
 [functions]
   node_bundler = "esbuild"
-  external_node_modules = ["stripe", "@supabase/supabase-js"]
-  included_files = ["netlify/functions/**"]
+  external_node_modules = ["form-data", "node-fetch"] # harmless; not required by our CommonJS code but fine
 
-# Map /api/* to serverless functions
 [[redirects]]
   from = "/api/chat"
-  to   = "/.netlify/functions/chat"
+  to = "/.netlify/functions/chat"
   status = 200
 
 [[redirects]]
-  from = "/api/health"
-  to   = "/.netlify/functions/health"
+  from = "/api/stt"
+  to = "/.netlify/functions/stt"
   status = 200
 
 [[redirects]]
-  from = "/api/version"
-  to   = "/.netlify/functions/version"
+  from = "/api/tts"
+  to = "/.netlify/functions/tts"
   status = 200
 
-# --- Global security headers ---
+[[redirects]]
+  from = "/api/rtc/create-room"
+  to = "/.netlify/functions/rtc-create-room"
+  status = 200
+
+[[redirects]]
+  from = "/api/rtc/token"
+  to = "/.netlify/functions/rtc-token"
+  status = 200
+
 [[headers]]
   for = "/*"
   [headers.values]
@@ -34,63 +38,3 @@
     X-Content-Type-Options = "nosniff"
     Referrer-Policy = "strict-origin-when-cross-origin"
     Permissions-Policy = "camera=(), microphone=(), geolocation=()"
-    Strict-Transport-Security = "max-age=63072000; includeSubDomains; preload"
-    # Update connect-src as needed; includes OpenAI/Supabase/Stripe/Netlify/etc.
-    Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-inline' https://*.netlify.app; connect-src 'self' https://keilani-brain.netlify.app https://api.openai.com https://*.supabase.co https://*.netlify.app https://framer.com https://app.framerstatic.com https://api.stripe.com https://api.keilani.ai https://api.d-id.com; img-src 'self' data: blob:; media-src https://*.d-id.com https://*.amazonaws.com 'self' blob: data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'self';"
-
-# Ensure JS modules get correct MIME
-[[headers]]
-  for = "/js/*"
-  [headers.values]
-    Content-Type = "application/javascript; charset=utf-8"
-    Cache-Control = "public, max-age=300"
-
-# Cache images & icons
-[[headers]]
-  for = "/*.(png|svg|jpg|jpeg|webp|gif|ico)"
-  [headers.values]
-    Cache-Control = "public, max-age=604800, immutable"
-
-# --- Streaming (SSE) headers for serverless function ---
-# Important: prevent proxy buffering and force event-stream content type
-[[headers]]
-  for = "/.netlify/functions/stream-chat"
-  [headers.values]
-    Cache-Control = "no-cache, no-transform"
-    Content-Type  = "text/event-stream"
-    Connection    = "keep-alive"
-    X-Accel-Buffering = "no"
-
-# --- (Optional) SSE headers for the Edge stream route, if you hit it directly ---
-[[headers]]
-  for = "/api/chat-stream"
-  [headers.values]
-    Cache-Control = "no-cache, no-transform"
-    Content-Type  = "text/event-stream"
-    Connection    = "keep-alive"
-    X-Accel-Buffering = "no"
-
-[functions."purge-old"]
-  schedule = "15 4 * * *"
-
-# Edge function already defined by you
-[[edge_functions]]
-  path = "/api/chat-stream"
-  function = "chat-stream"
-
-[[headers]]
-  for = "/vendor/*.js"
-  [headers.values]
-    Content-Type = "application/javascript; charset=utf-8"
-    Cache-Control = "public, max-age=31536000, immutable"
-
-[[headers]]
-  for = "/vendor/*.css"
-  [headers.values]
-    Content-Type = "text/css; charset=utf-8"
-    Cache-Control = "public, max-age=31536000, immutable"
-
-[[redirects]]
-  from = "/api/did-speak"
-  to   = "/.netlify/functions/did-speak"
-  status = 200
