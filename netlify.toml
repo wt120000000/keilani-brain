@@ -34,21 +34,19 @@
 [[headers]]
 for = "/*"
   [headers.values]
-  # Allow our APIs and Daily
   Content-Security-Policy = '''
     default-src 'self';
     connect-src 'self' https://api.openai.com https://api.elevenlabs.io https://api.daily.co https://*.daily.co;
     img-src 'self' data: blob:;
     media-src 'self' data: blob:;
-    frame-src https://*.daily.co;
-    # allow inline scripts for dev and jsdelivr CDN (remove 'unsafe-inline' later)
-    script-src 'self' 'unsafe-inline' https://cdn.jsdelivr.net;
-    # allow inline styles for dev (e.g., style attributes)
+    font-src 'self' data:;
     style-src 'self' 'unsafe-inline';
+    script-src 'self';
+    frame-src https://*.daily.co;
   '''
-  # Allow mic/camera on our origin; Daily asks inside its own iframe
   Permissions-Policy = "camera=(self), microphone=(self), geolocation=()"
   X-Frame-Options = "SAMEORIGIN"
   X-Content-Type-Options = "nosniff"
   Referrer-Policy = "strict-origin-when-cross-origin"
+
 
