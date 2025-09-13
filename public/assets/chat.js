@@ -9,21 +9,16 @@ const state = {
   dailyUrl: null,
   meetingToken: null,
   lastReply: "",
-  voiceId: null, // selected ElevenLabs voice (persisted)
+  voiceId: null,          // ElevenLabs voice (persisted)
+  playbackQueue: [],      // [{ id, text, status: 'queued'|'speaking'|'done', hqUrl? }]
+  queueCursor: 0,
+  interrupted: false,
 };
 
-// --- add near top ---
-function speakBrowser(text) {
-  try {
-    const u = new SpeechSynthesisUtterance(text);
-    u.rate = 1.05; u.pitch = 1.0; u.volume = 1.0;
-    speechSynthesis.cancel();  // stop previous
-    speechSynthesis.speak(u);
-  } catch {}
-}
-
-// ---------------- Audio auto-play helpers ----------------
+// ---------------- Audio: unlock, play, stop (user interruption) ----------------
 let audioUnlocked = false;
+let currentAudio = null;
+
 async function unlockAudio() {
   if (audioUnlocked) return;
   try {
@@ -33,9 +28,7 @@ async function unlockAudio() {
       await ctx.resume();
       const buf = ctx.createBuffer(1, 1, 22050);
       const src = ctx.createBufferSource();
-      src.buffer = buf;
-      src.connect(ctx.destination);
-      src.start(0);
+      src.buffer = buf; src.connect(ctx.destination); src.start(0);
     }
   } catch {}
   audioUnlocked = true;
@@ -43,50 +36,32 @@ async function unlockAudio() {
 document.addEventListener("click", unlockAudio, { once: true });
 document.addEventListener("touchstart", unlockAudio, { once: true });
 
+function cancelPlayback() {
+  state.playbackQueue = [];
+  state.queueCursor = 0;
+  state.interrupted = true;
+  try { speechSynthesis.cancel(); } catch {}
+  try { if (currentAudio) { currentAudio.pause(); currentAudio.src = ""; currentAudio = null; } } catch {}
+  const p = $("ttsPlayer");
+  if (p) { try { p.pause(); p.src = ""; } catch {} }
+}
+document.addEventListener("keydown", (e) => { if (e.key === "Escape") cancelPlayback(); });
+const stopBtn = $("stopSpeak");
+if (stopBtn) stopBtn.onclick = cancelPlayback;
+
 async function playAudioUrl(url) {
+  // Try programmatic audio; fall back to visible player if blocked
   try {
     const a = new Audio();
+    currentAudio = a;
     a.src = url;
     a.autoplay = true;
     a.onended = () => URL.revokeObjectURL(url);
-    await a.play();                   // try autoplay
-    $("ttsPlayer").src = url;         // also mirror into visible player
+    await a.play();
+    $("ttsPlayer").src = url; // mirror to UI
   } catch (e) {
-    console.warn("Autoplay blocked; showing player UI.", e);
-    $("ttsPlayer").src = url;         // user can press Play
+    $("ttsPlayer").src = url;
   }
-}
-
-async function chatStream(message, onDelta) {
-  const res = await fetch("/api/chat-stream", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message }),
-  });
-  if (!res.ok || !res.body) throw new Error("stream failed");
-
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let text = "";
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    const chunk = decoder.decode(value);
-
-    // SSE frames like: data: {...}\n\n
-    for (const line of chunk.split("\n\n")) {
-      if (!line.startsWith("data:")) continue;
-      const payload = line.slice(5).trim();
-      if (!payload) continue;
-      const msg = JSON.parse(payload);
-      if (msg.type === "delta" && msg.delta) {
-        text += msg.delta;
-        onDelta(text); // update UI live
-      }
-    }
-  }
-  return text;
 }
 
 // ---------------- Buttons: busy / enabled helpers ----------------
@@ -96,16 +71,15 @@ function setBusy(btn, busy, labelIdle, labelBusy) {
   btn.textContent = busy ? labelBusy : labelIdle;
 }
 
-// ---------------- Voice selector (dynamic) ----------------
+// ---------------- Voice selector (dynamic; remembers last choice) ----------------
 (async function initVoices() {
   const sel = $("voiceSelect");
-  if (!sel) return; // page may omit the selector
+  if (!sel) return;
 
   sel.disabled = true;
   sel.innerHTML = `<option>Loading voices…</option>`;
 
-  // restore saved voiceId (if any) early so we can set selection later
-  const savedVoiceId = localStorage.getItem("voiceId") || "";
+  const saved = localStorage.getItem("voiceId") || "";
 
   try {
     const r = await fetch("/api/voices");
@@ -128,11 +102,7 @@ function setBusy(btn, busy, labelIdle, labelBusy) {
       sel.disabled = true;
       state.voiceId = null;
     } else {
-      // set from saved value if present
-      if (savedVoiceId) {
-        const match = Array.from(sel.options).find(o => o.value === savedVoiceId);
-        if (match) sel.value = savedVoiceId;
-      }
+      if (saved && [...sel.options].some(o => o.value === saved)) sel.value = saved;
       state.voiceId = sel.value || null;
       sel.disabled = false;
       sel.onchange = () => {
@@ -148,27 +118,146 @@ function setBusy(btn, busy, labelIdle, labelBusy) {
   }
 })();
 
-// ---------------- Text chat ----------------
+// ---------------- Browser TTS (instant preview) ----------------
+function speakBrowser(text) {
+  try {
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = 1.05; u.pitch = 1.0; u.volume = 1.0;
+    speechSynthesis.speak(u);
+  } catch {}
+}
+
+// ---------------- Sentence chunking & queue ----------------
+function extractNewSentences(fullText, cursor) {
+  // return { sentences: [...], nextCursor }
+  const re = /[^.!?]+[.!?]+(\s+|$)/g;
+  re.lastIndex = cursor;
+  const out = [];
+  let m;
+  while ((m = re.exec(fullText))) out.push(m[0].trim());
+  return { sentences: out, nextCursor: re.lastIndex };
+}
+
+async function enqueueSentences(text) {
+  const { sentences, nextCursor } = extractNewSentences(text, state.queueCursor);
+  if (sentences.length) {
+    sentences.forEach((s) => {
+      state.playbackQueue.push({ id: crypto.randomUUID(), text: s, status: "queued" });
+    });
+    processQueue(); // fire-and-forget
+  }
+  state.queueCursor = nextCursor;
+}
+
+async function processQueue() {
+  if (state.interrupted) return;
+  // If something is currently speaking (SpeechSynthesis queue or currentAudio), we still proceed sentence by sentence:
+  while (state.playbackQueue.length) {
+    if (state.interrupted) return;
+    const item = state.playbackQueue.shift();
+    if (!item) break;
+    item.status = "speaking";
+
+    // 1) instant fill
+    speakBrowser(item.text);
+
+    // 2) upgrade to HQ as soon as we get MP3
+    try {
+      const url = await tts(item.text);
+      if (state.interrupted) return;
+      if (url) await playAudioUrl(url);
+    } catch (e) {
+      console.warn("TTS upgrade failed:", e);
+    }
+
+    item.status = "done";
+  }
+}
+
+// ---------------- Text chat (streaming) ----------------
 $("sendText").onclick = async () => {
-  const message = $("textIn").value.trim();
-  if (!message) return;
-  const reply = await chat(message);
-  $("reply").textContent = reply;
-  state.lastReply = reply;
-  feedAvatar(reply);
+  const input = $("textIn");
+  const userText = input.value.trim();
+  if (!userText) return;
+
+  cancelPlayback();                   // allow interruption of prior speech
+  state.interrupted = false;
+  state.queueCursor = 0;
+  $("reply").textContent = "";
+  input.value = "";
+
+  try {
+    await chatStreamToTTS(userText);  // stream + speak sentence-by-sentence
+  } catch (e) {
+    console.error(e);
+    $("reply").textContent = "⚠️ " + (e.message || "stream failed");
+  }
 };
 
 $("speakReply").onclick = async () => {
   if (!state.lastReply) return;
+  cancelPlayback();
+  state.interrupted = false;
   const btn = $("speakReply");
   setBusy(btn, true, "Speak Reply", "Speaking…");
   try {
+    // speak entire last reply as-is
+    speakBrowser(state.lastReply);
     const url = await tts(state.lastReply);
     if (url) await playAudioUrl(url);
   } finally {
     setBusy(btn, false, "Speak Reply", "Speaking…");
   }
 };
+
+// stream helper: reads SSE from /api/chat-stream
+async function chatStream(message, onDelta) {
+  const res = await fetch("/api/chat-stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message }),
+  });
+  if (!res.ok || !res.body) throw new Error("stream failed");
+
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    const frames = buffer.split("\n\n");
+    buffer = frames.pop() || "";
+    for (const frame of frames) {
+      if (!frame.startsWith("data:")) continue;
+      const json = frame.slice(5).trim();
+      if (!json) continue;
+      const msg = JSON.parse(json);
+      if (msg.type === "delta" && msg.delta) onDelta(msg.delta);
+    }
+  }
+}
+
+// stream + sentence-to-TTS pipeline
+async function chatStreamToTTS(userText) {
+  let full = "";
+  await chatStream(userText, (delta) => {
+    if (state.interrupted) return;
+    full += delta;
+    $("reply").textContent = full;
+    state.lastReply = full;          // keep updated for “Speak Reply”
+    enqueueSentences(full);
+  });
+  // at stream end: flush trailing sentence if any (no punctuation)
+  const tail = full.slice(state.queueCursor).trim();
+  if (tail) {
+    state.playbackQueue.push({ id: crypto.randomUUID(), text: tail, status: "queued" });
+    processQueue();
+    state.queueCursor = full.length;
+  }
+}
 
 // ---------------- Push-to-talk (reliable recorder) ----------------
 const pttBtn = $("pttBtn");
@@ -180,27 +269,17 @@ if (pttBtn) {
 }
 
 function pickAudioMime() {
-  const candidates = [
-    "audio/webm;codecs=opus",
-    "audio/webm",
-    "audio/ogg;codecs=opus",
-  ];
+  const candidates = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"];
   for (const t of candidates) {
     if (MediaRecorder.isTypeSupported && MediaRecorder.isTypeSupported(t)) return t;
   }
-  return ""; // let browser choose
+  return "";
 }
 
 async function startRecording() {
   $("recState").textContent = "recording…";
-
   const stream = await navigator.mediaDevices.getUserMedia({
-    audio: {
-      channelCount: 1,
-      noiseSuppression: true,
-      echoCancellation: true,
-      autoGainControl: true,
-    },
+    audio: { channelCount: 1, noiseSuppression: true, echoCancellation: true, autoGainControl: true },
   });
 
   state.chunks = [];
@@ -208,29 +287,21 @@ async function startRecording() {
   state.mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType } : {});
   const startedAt = Date.now();
 
-  state.mediaRecorder.ondataavailable = (e) => {
-    if (e.data && e.data.size) state.chunks.push(e.data);
-  };
+  state.mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size) state.chunks.push(e.data); };
 
   state.mediaRecorder.onstop = async () => {
     $("recState").textContent = "processing…";
-
     const blob = new Blob(state.chunks, { type: mimeType || "audio/webm" });
     const ms = Date.now() - startedAt;
-    console.log("chunks recorded:", state.chunks.length);
-    console.log("blob size:", blob.size);
-    console.log("duration (ms):", ms);
 
-    // Guard tiny/short clips (headers-only blobs are a few hundred bytes)
-    if (ms < 800 || blob.size < 12000) {
+    if (ms < 600 || blob.size < 9000) {
       $("transcript").textContent = "Hold the button and speak for ~1–2 seconds 👍";
       $("recState").textContent = "idle";
-      try { stream.getTracks().forEach((t) => t.stop()); } catch {}
+      try { stream.getTracks().forEach(t => t.stop()); } catch {}
       return;
     }
 
     const b64 = await blobToBase64(blob);
-    console.log("base64 length:", (b64 || "").length);
 
     const sttResp = await fetch("/api/stt", {
       method: "POST",
@@ -242,7 +313,7 @@ async function startRecording() {
       console.error("STT error:", await sttResp.text());
       $("transcript").textContent = "Couldn’t transcribe. Try again.";
       $("recState").textContent = "idle";
-      try { stream.getTracks().forEach((t) => t.stop()); } catch {}
+      try { stream.getTracks().forEach(t => t.stop()); } catch {}
       return;
     }
 
@@ -250,51 +321,34 @@ async function startRecording() {
     $("transcript").textContent = stt.text || "";
 
     if (stt.text) {
-      const reply = await chat(stt.text);
-      $("reply").textContent = reply;
-      state.lastReply = reply;
-      feedAvatar(reply);
-
-      const url = await tts(reply);
-      if (url) await playAudioUrl(url);
+      cancelPlayback();
+      state.interrupted = false;
+      state.queueCursor = 0;
+      $("reply").textContent = "";
+      try {
+        await chatStreamToTTS(stt.text);
+      } catch (e) {
+        console.error(e);
+        $("reply").textContent = "⚠️ " + (e.message || "stream failed");
+      }
     }
 
     $("recState").textContent = "idle";
-    try { stream.getTracks().forEach((t) => t.stop()); } catch {}
+    try { stream.getTracks().forEach(t => t.stop()); } catch {}
   };
 
-  state.mediaRecorder.start(); // single final chunk on stop
+  state.mediaRecorder.start();
 }
 
 function stopRecording() {
-  if (state.mediaRecorder && state.mediaRecorder.state !== "inactive") {
-    state.mediaRecorder.stop();
-  }
+  if (state.mediaRecorder && state.mediaRecorder.state !== "inactive") state.mediaRecorder.stop();
 }
 
 function blobToBase64(blob) {
-  return new Promise((res) => {
-    const reader = new FileReader();
-    reader.onloadend = () => res(reader.result);
-    reader.readAsDataURL(blob);
-  });
+  return new Promise((res) => { const r = new FileReader(); r.onloadend = () => res(r.result); r.readAsDataURL(blob); });
 }
 
 // ---------------- API helpers ----------------
-async function chat(message) {
-  const r = await fetch("/api/chat", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message }),
-  });
-  if (!r.ok) {
-    console.error("chat error", await r.text());
-    return "";
-  }
-  const j = await r.json();
-  return j.reply || "";
-}
-
 async function tts(text) {
   if (!text) return "";
   const body = { text };
@@ -305,10 +359,7 @@ async function tts(text) {
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
-  if (!r.ok) {
-    console.error("TTS error", await r.text());
-    return "";
-  }
+  if (!r.ok) { console.error("TTS error", await r.text()); return ""; }
   const blob = await r.blob();
   return URL.createObjectURL(blob);
 }
@@ -318,15 +369,13 @@ $("createRoom").onclick = async () => {
   const r = await fetch("/api/rtc/create-room", { method: "POST" });
   if (!r.ok) { console.error("create room error", await r.text()); return; }
   const j = await r.json();
-  state.dailyRoom = j.room;
-  state.dailyUrl = j.url;
+  state.dailyRoom = j.room; state.dailyUrl = j.url;
   $("roomInfo").textContent = `Room: ${j.room}`;
 };
 
 let iframe;
 $("openRoom").onclick = async () => {
   if (!state.dailyRoom) await $("createRoom").onclick();
-
   const tokenRes = await fetch("/api/rtc/token", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
@@ -342,19 +391,12 @@ $("openRoom").onclick = async () => {
   if (state.meetingToken) url.searchParams.set("t", state.meetingToken);
   iframe.src = url.toString();
   iframe.allow = "camera; microphone; display-capture";
-  iframe.style.width = "100%";
-  iframe.style.height = "540px";
-  iframe.style.border = "0";
-  iframe.style.borderRadius = "12px";
+  iframe.style.width = "100%"; iframe.style.height = "540px";
+  iframe.style.border = "0"; iframe.style.borderRadius = "12px";
   mount.appendChild(iframe);
 };
 
-$("closeRoom").onclick = () => {
-  $("dailyMount").innerHTML = "";
-  iframe = null;
-};
+$("closeRoom").onclick = () => { $("dailyMount").innerHTML = ""; iframe = null; };
 
-// ---------------- Avatar feed hook ----------------
-function feedAvatar(text) {
-  $("avatarFeed").textContent = (text || "").slice(0, 1200);
-}
+// ---------------- Avatar hook (future lip-sync) ----------------
+function feedAvatar(text) { $("avatarFeed").textContent = (text || "").slice(0, 1200); }
