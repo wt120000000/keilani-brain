@@ -298,31 +298,58 @@ $("speakReply").onclick = async () => {
 
 // stream helper: reads SSE from /api/chat-stream
 async function chatStream(message, onDelta) {
-  const res = await fetch("/api/chat-stream", {
-    method: "POST",
-    headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ message }),
-  });
-  if (!res.ok || !res.body) throw new Error("stream failed");
+  try {
+    const res = await fetch("/api/chat-stream", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message }),
+    });
 
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-    buffer += decoder.decode(value, { stream: true });
-
-    const frames = buffer.split("\n\n");
-    buffer = frames.pop() || "";
-    for (const frame of frames) {
-      if (!frame.startsWith("data:")) continue;
-      const json = frame.slice(5).trim();
-      if (!json) continue;
-      const msg = JSON.parse(json);
-      if (msg.type === "delta" && msg.delta) onDelta(msg.delta);
+    if (!res.ok) {
+      const txt = await res.text().catch(() => "");
+      console.error("chat-stream HTTP error", res.status, txt);
+      throw new Error(`chat-stream HTTP ${res.status}`);
     }
+    if (!res.body) {
+      console.error("chat-stream: response has no body (stream unsupported)");
+      throw new Error("no-body");
+    }
+
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      const frames = buffer.split("\n\n");
+      buffer = frames.pop() || "";
+      for (const frame of frames) {
+        if (!frame.startsWith("data:")) continue;
+        const json = frame.slice(5).trim();
+        if (!json) continue;
+        const msg = JSON.parse(json);
+        if (msg.type === "delta" && msg.delta) onDelta(msg.delta);
+      }
+    }
+  } catch (e) {
+    console.warn("Streaming unavailable, falling back to non-stream", e?.message || e);
+
+    // ---- Fallback to non-streaming /api/chat so UX keeps working ----
+    const r = await fetch("/api/chat", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ message }),
+    });
+    if (!r.ok) {
+      const txt = await r.text().catch(() => "");
+      throw new Error(`chat fallback failed: ${r.status} ${txt}`);
+    }
+    const j = await r.json();
+    // feed the whole reply to onDelta once
+    onDelta(j.reply || "");
   }
 }
 

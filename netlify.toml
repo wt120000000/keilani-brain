@@ -21,6 +21,16 @@
   from = "/api/stt"
   to = "/.netlify/functions/stt"
   status = 200
+  
+[[redirects]]
+  from = "/api/eleven-token"
+  to   = "/.netlify/functions/eleven-token"
+  status = 200
+
+[[redirects]]
+  from = "/api/tts-stream"
+  to   = "/.netlify/functions/tts-stream"
+  status = 200
 
 [[redirects]]
   from = "/api/tts"
