@@ -10,15 +10,16 @@ const state = {
   meetingToken: null,
   lastReply: "",
   voiceId: null,          // ElevenLabs voice (persisted)
-  playbackQueue: [],      // [{ id, text, status: 'queued'|'speaking'|'done', hqUrl? }]
+  playbackQueue: [],      // [{ id, text, status: 'queued'|'speaking'|'done' }]
   queueCursor: 0,
   interrupted: false,
+  streamAbort: null,      // AbortController for streaming TTS
 };
+
+let currentAudio = null;
 
 // ---------------- Audio: unlock, play, stop (user interruption) ----------------
 let audioUnlocked = false;
-let currentAudio = null;
-
 async function unlockAudio() {
   if (audioUnlocked) return;
   try {
@@ -37,10 +38,19 @@ document.addEventListener("click", unlockAudio, { once: true });
 document.addEventListener("touchstart", unlockAudio, { once: true });
 
 function cancelPlayback() {
+  // stop queues
   state.playbackQueue = [];
   state.queueCursor = 0;
   state.interrupted = true;
+
+  // stop streaming TTS if running
+  try { if (state.streamAbort) state.streamAbort.abort(); } catch {}
+  state.streamAbort = null;
+
+  // stop browser speech
   try { speechSynthesis.cancel(); } catch {}
+
+  // stop current audio element(s)
   try { if (currentAudio) { currentAudio.pause(); currentAudio.src = ""; currentAudio = null; } } catch {}
   const p = $("ttsPlayer");
   if (p) { try { p.pause(); p.src = ""; } catch {} }
@@ -49,17 +59,17 @@ document.addEventListener("keydown", (e) => { if (e.key === "Escape") cancelPlay
 const stopBtn = $("stopSpeak");
 if (stopBtn) stopBtn.onclick = cancelPlayback;
 
+// non-stream fallback (for MP3 URLs we build client-side)
 async function playAudioUrl(url) {
-  // Try programmatic audio; fall back to visible player if blocked
   try {
     const a = new Audio();
     currentAudio = a;
     a.src = url;
     a.autoplay = true;
     a.onended = () => URL.revokeObjectURL(url);
-    await a.play();
-    $("ttsPlayer").src = url; // mirror to UI
-  } catch (e) {
+    await a.play().catch(() => {});   // browser may block; visible player will handle
+    $("ttsPlayer").src = url;         // mirror to visible control
+  } catch {
     $("ttsPlayer").src = url;
   }
 }
@@ -129,7 +139,6 @@ function speakBrowser(text) {
 
 // ---------------- Sentence chunking & queue ----------------
 function extractNewSentences(fullText, cursor) {
-  // return { sentences: [...], nextCursor }
   const re = /[^.!?]+[.!?]+(\s+|$)/g;
   re.lastIndex = cursor;
   const out = [];
@@ -149,25 +158,97 @@ async function enqueueSentences(text) {
   state.queueCursor = nextCursor;
 }
 
+// --- Streaming TTS via MediaSource (audio starts while bytes arrive) ---
+async function playTTSStreamMSE(text) {
+  if (!text) return;
+  const controller = new AbortController();
+  state.streamAbort = controller;
+
+  const mediaSource = new MediaSource();
+  const objectUrl = URL.createObjectURL(mediaSource);
+
+  const audioEl = $("ttsPlayer");
+  audioEl.src = objectUrl;
+
+  await audioEl.play().catch(() => { /* if blocked, user can press play */ });
+
+  return new Promise((resolve, reject) => {
+    mediaSource.addEventListener("sourceopen", async () => {
+      let sb;
+      try {
+        sb = mediaSource.addSourceBuffer("audio/mpeg");
+      } catch (e) {
+        reject(new Error("MediaSource unsupported for audio/mpeg"));
+        return;
+      }
+
+      const queue = [];
+      sb.addEventListener("updateend", () => {
+        if (controller.signal.aborted) {
+          try { mediaSource.endOfStream(); } catch {}
+          URL.revokeObjectURL(objectUrl);
+          resolve();
+          return;
+        }
+        if (!sb.updating && queue.length) sb.appendBuffer(queue.shift());
+      });
+
+      try {
+        const res = await fetch("/api/tts-stream", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ text, voiceId: state.voiceId || null, latency: 2 }),
+          signal: controller.signal,
+        });
+        if (!res.ok || !res.body) throw new Error(await res.text());
+
+        const reader = res.body.getReader();
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done || controller.signal.aborted) break;
+          if (!sb.updating && queue.length === 0) {
+            sb.appendBuffer(value);
+          } else {
+            queue.push(value);
+          }
+        }
+      } catch (err) {
+        reject(err);
+        return;
+      } finally {
+        if (!controller.signal.aborted) {
+          try { mediaSource.endOfStream(); } catch {}
+          URL.revokeObjectURL(objectUrl);
+          resolve();
+        }
+      }
+    }, { once: true });
+  });
+}
+
 async function processQueue() {
   if (state.interrupted) return;
-  // If something is currently speaking (SpeechSynthesis queue or currentAudio), we still proceed sentence by sentence:
   while (state.playbackQueue.length) {
     if (state.interrupted) return;
     const item = state.playbackQueue.shift();
     if (!item) break;
     item.status = "speaking";
 
-    // 1) instant fill
+    // 1) instant fill (zero-latency preview)
     speakBrowser(item.text);
 
-    // 2) upgrade to HQ as soon as we get MP3
+    // 2b) STREAMING HQ: start playing as bytes arrive; fallback to MP3 if needed
     try {
-      const url = await tts(item.text);
-      if (state.interrupted) return;
-      if (url) await playAudioUrl(url);
+      await playTTSStreamMSE(item.text);           // near-instant HQ stream
     } catch (e) {
-      console.warn("TTS upgrade failed:", e);
+      console.warn("Streaming TTS failed; falling back to MP3:", e);
+      try {
+        const url = await tts(item.text);
+        if (state.interrupted) return;
+        if (url) await playAudioUrl(url);
+      } catch (e2) {
+        console.warn("TTS MP3 fallback failed:", e2);
+      }
     }
 
     item.status = "done";
@@ -180,7 +261,7 @@ $("sendText").onclick = async () => {
   const userText = input.value.trim();
   if (!userText) return;
 
-  cancelPlayback();                   // allow interruption of prior speech
+  cancelPlayback();                   // stop any prior speech
   state.interrupted = false;
   state.queueCursor = 0;
   $("reply").textContent = "";
@@ -201,10 +282,15 @@ $("speakReply").onclick = async () => {
   const btn = $("speakReply");
   setBusy(btn, true, "Speak Reply", "Speaking…");
   try {
-    // speak entire last reply as-is
+    // speak entire last reply
     speakBrowser(state.lastReply);
-    const url = await tts(state.lastReply);
-    if (url) await playAudioUrl(url);
+    // prefer streaming even for whole reply
+    try {
+      await playTTSStreamMSE(state.lastReply);
+    } catch {
+      const url = await tts(state.lastReply);
+      if (url) await playAudioUrl(url);
+    }
   } finally {
     setBusy(btn, false, "Speak Reply", "Speaking…");
   }
@@ -250,7 +336,7 @@ async function chatStreamToTTS(userText) {
     state.lastReply = full;          // keep updated for “Speak Reply”
     enqueueSentences(full);
   });
-  // at stream end: flush trailing sentence if any (no punctuation)
+  // flush trailing fragment (no punctuation)
   const tail = full.slice(state.queueCursor).trim();
   if (tail) {
     state.playbackQueue.push({ id: crypto.randomUUID(), text: tail, status: "queued" });
@@ -348,7 +434,7 @@ function blobToBase64(blob) {
   return new Promise((res) => { const r = new FileReader(); r.onloadend = () => res(r.result); r.readAsDataURL(blob); });
 }
 
-// ---------------- API helpers ----------------
+// ---------------- API helper (non-stream fallback MP3) ----------------
 async function tts(text) {
   if (!text) return "";
   const body = { text };
