@@ -1,5 +1,5 @@
 // netlify/functions/stt.js
-// POST { audioBase64: "<base64 or data: URL>", language?: "en", verbose?: true } -> { transcript, ...optionalVerbose }
+// POST { audioBase64: "<base64 or data: URL>", language?: "en", verbose?: true } -> { transcript, ... }
 const fetch = require("node-fetch");
 const FormData = require("form-data");
 
@@ -35,19 +35,15 @@ exports.handler = async (event) => {
   }
 
   const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-  // Default to Whisper; you can override in Netlify env with OPENAI_STT_MODEL
   const MODEL = process.env.OPENAI_STT_MODEL || "whisper-1";
-
-  if (!OPENAI_API_KEY) {
-    return json(500, { error: "missing_env", detail: "Missing OPENAI_API_KEY" });
-  }
+  if (!OPENAI_API_KEY) return json(500, { error: "missing_env", detail: "Missing OPENAI_API_KEY" });
 
   let audioBase64 = "";
   let mimeHint = "audio/webm";
   let language = undefined;
   let verbose = false;
 
-  // ---- Parse body safely
+  // Parse body
   try {
     const body = JSON.parse(event.body || "{}");
     const raw = (body.audioBase64 || "").trim();
@@ -57,14 +53,11 @@ exports.handler = async (event) => {
     if (!raw) return json(400, { error: "missing_audio", detail: "Provide audioBase64 (raw base64 or data: URL)." });
 
     if (raw.startsWith("data:")) {
-      // Example: data:audio/webm;base64,AAAA...
       const comma = raw.indexOf(",");
       if (comma === -1) return json(400, { error: "bad_data_url", detail: "Malformed data: URL" });
-
       const header = raw.substring(0, comma);
       const b64 = raw.substring(comma + 1);
       audioBase64 = b64;
-
       const m = header.match(/^data:([^;]+)/);
       if (m) mimeHint = m[1];
     } else {
@@ -74,20 +67,16 @@ exports.handler = async (event) => {
     return json(400, { error: "bad_json", detail: "Invalid JSON body" });
   }
 
-  // ---- Decode + basic validation
   try {
     const buf = Buffer.from(audioBase64, "base64");
     if (!buf || buf.length < 200) {
       return json(400, { error: "audio_too_small", detail: "Audio too small or invalid base64" });
     }
-
-    // Optional: cap uploads (25 MB is generous; tweak as needed)
     const MAX_BYTES = 25 * 1024 * 1024;
     if (buf.length > MAX_BYTES) {
       return json(413, { error: "audio_too_large", detail: `Audio exceeds ${MAX_BYTES} bytes` });
     }
 
-    // Map to filename by MIME (just a hint; OpenAI sniffs content)
     const fileName =
       mimeHint.includes("wav") ? "audio.wav" :
       mimeHint.includes("mp3") ? "audio.mp3" :
@@ -98,17 +87,8 @@ exports.handler = async (event) => {
     const form = new FormData();
     form.append("file", buf, { filename: fileName, contentType: mimeHint });
     form.append("model", MODEL);
-
-    // Toggle response format
-    if (verbose) {
-      form.append("response_format", "verbose_json");
-    } else {
-      form.append("response_format", "json");
-    }
-
-    if (language) {
-      form.append("language", language);
-    }
+    form.append("response_format", verbose ? "verbose_json" : "json");
+    if (language) form.append("language", language);
 
     const resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
       method: "POST",
@@ -118,16 +98,13 @@ exports.handler = async (event) => {
 
     const text = await resp.text();
     if (!resp.ok) {
-      // Forward OpenAI error details to help debugging
       return json(resp.status, { error: "openai_stt_error", detail: text });
     }
 
-    // For response_format=json we expect { text }, for verbose_json we get a rich object.
     let data;
     try { data = JSON.parse(text); } catch { data = {}; }
 
     if (verbose) {
-      // Keep full verbose object (segments, duration, language, etc.)
       return json(200, {
         transcript: data.text || "",
         verbose: true,

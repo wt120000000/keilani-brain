@@ -1,24 +1,25 @@
 /* public/assets/chat.js
    Keilani Brain — Live (text + push-to-talk)
-   - Text input -> chat-stream (SSE) -> ElevenLabs TTS
-   - Push-to-talk (MediaRecorder) -> STT -> chat-stream -> TTS
-   - Status badge + robust logs
+   - Text input -> chat-stream (SSE) -> TTS (ElevenLabs)
+   - Press-to-talk -> MediaRecorder -> STT -> chat-stream -> TTS
+   - Firefox-safe (prefer OGG/Opus), chunk flushing, verbose logs
+   - Status chip: idle → listening → transcribing → thinking → speaking → idle
 */
 
 (() => {
-  // ---- DOM ----
+  // ---------- DOM ----------
   const $ = (sel) => document.querySelector(sel);
 
-  const inputEl     = $('#input')       || $('textarea');     // main text area
-  const sendBtn     = $('#sendBtn')     || $('#send');        // "Send"
-  const speakBtn    = $('#speakBtn')    || $('#speak');       // "Speak Reply"
-  const pttBtn      = $('#ptt')         || $('#holdToTalk');  // "Hold to talk"
-  const voiceSel    = $('#voice')       || $('#voiceSelect'); // <select>
-  const statusBadge = $('#status')      || $('.status');      // small status chip
-  const transcriptEl= $('#transcript');                       // optional place to show transcript
-  const replyEl     = $('#reply');                            // optional place to show assistant reply
+  const inputEl      = $('#input')        || $('textarea');     // main text area
+  const sendBtn      = $('#sendBtn')      || $('#send');        // "Send"
+  const speakBtn     = $('#speakBtn')     || $('#speak');       // "Speak Reply"
+  const pttBtn       = $('#ptt')          || $('#holdToTalk');  // "Hold to talk"
+  const voiceSel     = $('#voice')        || $('#voiceSelect'); // voice <select>
+  const statusBadge  = $('#status')       || $('.status');      // small status chip
+  const transcriptEl = $('#transcript');                         // optional transcript
+  const replyEl      = $('#reply');                               // optional streamed reply bucket
 
-  // Single audio element for TTS playback
+  // One audio element for TTS playback
   const speaker = (() => {
     let el = $('#speaker');
     if (!el) {
@@ -30,9 +31,9 @@
     return el;
   })();
 
-  // Unlock audio on first user gesture to avoid autoplay errors
+  // ---------- Audio unlock ----------
   let audioUnlocked = false;
-  const unlockAudioOnce = () => {
+  function unlockAudioOnce() {
     if (audioUnlocked) return;
     try {
       const AC = window.AudioContext || window.webkitAudioContext;
@@ -42,28 +43,26 @@
       }
       speaker.muted = false;
       audioUnlocked = true;
-    } catch (e) {}
-  };
+    } catch (_) {}
+  }
   document.addEventListener('pointerdown', unlockAudioOnce, { once: true });
 
-  // ---- Status helper ----
+  // ---------- UI helpers ----------
   function setStatus(s) {
     if (statusBadge) statusBadge.textContent = s;
   }
-
-  // ---- Small UI helpers ----
   function getSelectedVoice() {
     return voiceSel && voiceSel.value ? voiceSel.value : '(default)';
   }
-
-  function appendTo(el, text) {
-    if (!el) return;
-    const div = document.createElement('div');
-    div.textContent = text;
-    el.appendChild(div);
+  function clearNode(el) { if (el) el.textContent = ''; }
+  function appendText(el, text) {
+    if (!el || !text) return;
+    const span = document.createElement('span');
+    span.textContent = text;
+    el.appendChild(span);
   }
 
-  // ---- TTS: call Netlify tts function and play ----
+  // ---------- TTS ----------
   async function speak(text, voice = getSelectedVoice()) {
     if (!text || !text.trim()) return;
     const resp = await fetch('/.netlify/functions/tts', {
@@ -81,13 +80,12 @@
     try {
       await speaker.play();
     } catch (e) {
-      console.warn('[TTS] autoplay blocked, waiting for gesture', e);
+      console.warn('[TTS] autoplay blocked (will play after a gesture)', e);
     }
   }
 
-  // ---- SSE parser over fetch() POST (text/event-stream) ----
+  // ---------- chat-stream (SSE over fetch) ----------
   async function chatStreamSSE(message, voice = getSelectedVoice()) {
-    // POST to SSE endpoint (server should return text/event-stream)
     const resp = await fetch('/.netlify/functions/chat-stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -103,44 +101,43 @@
     let buffer = '';
     let finalText = '';
 
-    // Stream loop
+    clearNode(replyEl);
+
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
 
-      // Parse by lines for SSE
+      // parse SSE (line-delimited)
       let idx;
       while ((idx = buffer.indexOf('\n')) >= 0) {
         const line = buffer.slice(0, idx).trimEnd();
         buffer = buffer.slice(idx + 1);
 
-        // Standard SSE lines: "data: {...}" or "data: text"
         if (!line) continue;
-        if (line.startsWith('data:')) {
-          const data = line.slice(5).trim();
-          if (data === '[DONE]') {
-            break;
-          }
-          try {
-            // Prefer JSON payloads { delta, done, content, etc. }
-            const obj = JSON.parse(data);
-            const chunk = obj.delta || obj.content || obj.text || '';
+        if (!line.startsWith('data:')) continue;
+
+        const data = line.slice(5).trim();
+        if (!data) continue;
+        if (data === '[DONE]') break;
+
+        try {
+          const obj = JSON.parse(data);
+          const chunk = obj.delta ?? obj.content ?? obj.text ?? '';
+          if (chunk) {
             finalText += chunk;
-            if (replyEl && chunk) appendTo(replyEl, chunk);
-          } catch {
-            // Fallback: treat as raw text
-            finalText += data;
-            if (replyEl && data) appendTo(replyEl, data);
+            appendText(replyEl, chunk);
           }
+        } catch {
+          finalText += data;
+          appendText(replyEl, data);
         }
       }
     }
-
     return finalText.trim();
   }
 
-  // ---- Send a text message: UI -> chat -> TTS ----
+  // ---------- Text Send ----------
   async function handleSend() {
     try {
       unlockAudioOnce();
@@ -150,15 +147,11 @@
       setStatus('thinking');
       console.log('[SEND] → chat-stream:', userText);
 
-      // Clear streamed reply container if present
-      if (replyEl) replyEl.textContent = '';
-
       const reply = await chatStreamSSE(userText, getSelectedVoice());
       console.log('[SEND] reply:', reply);
 
       setStatus('speaking');
       await speak(reply, getSelectedVoice());
-
       setStatus('idle');
     } catch (e) {
       console.error('[SEND] error', e);
@@ -166,14 +159,14 @@
     }
   }
 
-  // ---- Speak the current reply (or the text box) again ----
+  // ---------- Speak current reply / input ----------
   async function handleSpeak() {
     try {
       unlockAudioOnce();
       let text = '';
-      if (replyEl && replyEl.textContent && replyEl.textContent.trim()) {
+      if (replyEl && replyEl.textContent?.trim()) {
         text = replyEl.textContent.trim();
-      } else if (inputEl && inputEl.value.trim()) {
+      } else if (inputEl && inputEl.value?.trim()) {
         text = inputEl.value.trim();
       }
       if (!text) return;
@@ -186,50 +179,21 @@
     }
   }
 
-  // ---- Push-to-talk (PTT): MediaRecorder -> STT -> chat -> TTS ----
+  // ---------- Push-to-talk (PTT) ----------
   let mediaStream = null;
   let mediaRecorder = null;
   let chunks = [];
 
+  function isFirefox() {
+    return /firefox/i.test(navigator.userAgent);
+  }
   function recorderMime() {
-    // Pick best supported container
-    if (MediaRecorder.isTypeSupported('audio/webm')) return 'audio/webm';
-    if (MediaRecorder.isTypeSupported('audio/ogg'))  return 'audio/ogg';
-    // Fallback — Whisper will sniff
-    return 'audio/webm';
-    // (Safari iOS records AAC in MP4 via WebM shim unpredictably; server sniff handles it)
-  }
-
-  async function startPTT() {
-    try {
-      unlockAudioOnce();
-      setStatus('listening');
-      chunks = [];
-      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mime = recorderMime();
-      mediaRecorder = new MediaRecorder(mediaStream, { mimeType: mime, audioBitsPerSecond: 128000 });
-
-      mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
-      mediaRecorder.onstop = onPTTStop;
-      mediaRecorder.start();
-      console.log('[PTT] recording… mime =', mime);
-    } catch (e) {
-      console.error('[PTT] getUserMedia error', e);
-      setStatus('idle');
+    if (isFirefox() && MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) {
+      return 'audio/ogg;codecs=opus';              // Best for Firefox
     }
-  }
-
-  async function stopPTT() {
-    try {
-      if (mediaRecorder && mediaRecorder.state === 'recording') {
-        mediaRecorder.stop();
-      }
-      if (mediaStream) {
-        mediaStream.getTracks().forEach((t) => t.stop());
-      }
-    } catch (e) {
-      console.warn('[PTT] stop error', e);
-    }
+    if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) return 'audio/webm;codecs=opus';
+    if (MediaRecorder.isTypeSupported('audio/ogg')) return 'audio/ogg';
+    return 'audio/webm'; // fallback
   }
 
   function arrayToBase64(buf) {
@@ -240,18 +204,86 @@
     return btoa(binary);
   }
 
+  async function startPTT() {
+    try {
+      unlockAudioOnce();
+      setStatus('listening');
+      chunks = [];
+
+      const streamConstraints = {
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          sampleRate: 48000
+        }
+      };
+      mediaStream = await navigator.mediaDevices.getUserMedia(streamConstraints);
+
+      const tracks = mediaStream.getAudioTracks();
+      if (tracks[0]?.muted) console.warn('[PTT] input appears muted');
+
+      const mime = recorderMime();
+      mediaRecorder = new MediaRecorder(mediaStream, { mimeType: mime, audioBitsPerSecond: 128000 });
+
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data && e.data.size) {
+          console.log('[PTT] chunk', Math.round(e.data.size / 1024), 'KB');
+          chunks.push(e.data);
+        }
+      };
+      mediaRecorder.onstop = onPTTStop;
+
+      // timeslice to ensure periodic chunking (Firefox reliability)
+      mediaRecorder.start(250);
+      console.log('[PTT] recording… mime =', mime);
+    } catch (e) {
+      console.error('[PTT] getUserMedia error', e);
+      setStatus('idle');
+    }
+  }
+
+  async function stopPTT() {
+    try {
+      if (mediaRecorder && mediaRecorder.state === 'recording') {
+        mediaRecorder.requestData?.();
+        mediaRecorder.stop();
+      }
+      if (mediaStream) mediaStream.getTracks().forEach((t) => t.stop());
+    } catch (e) {
+      console.warn('[PTT] stop error', e);
+    }
+  }
+
   async function onPTTStop() {
     try {
       setStatus('transcribing');
-      const blob = new Blob(chunks, { type: mediaRecorder?.mimeType || 'audio/webm' });
-      const mime = blob.type || 'audio/webm';
+
+      if (!chunks.length) {
+        console.warn('[PTT] no chunks captured');
+        if (transcriptEl) transcriptEl.textContent = '(no audio captured)';
+        setStatus('idle');
+        return;
+      }
+
+      const blob = new Blob(chunks, { type: mediaRecorder?.mimeType || recorderMime() });
+      const mime = blob.type || 'application/octet-stream';
       const sizeKB = Math.round(blob.size / 1024);
-      console.log('[PTT] blob', mime, sizeKB, 'KB');
+      console.log('[PTT] final blob', mime, sizeKB, 'KB');
+
+      // Tiny blobs produce empty transcripts—bail early with hint
+      if (blob.size < 2000) {
+        if (transcriptEl) transcriptEl.textContent = '(no speech)';
+        console.log('[PTT] blob too small for STT (', blob.size, 'bytes )');
+        setStatus('idle');
+        return;
+      }
 
       const ab = await blob.arrayBuffer();
       const dataUrl = `data:${mime};base64,${arrayToBase64(ab)}`;
 
-      // Call STT
+      // ---- STT
       const sttResp = await fetch('/.netlify/functions/stt', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -262,30 +294,19 @@
       try { sttJson = await sttResp.json(); } catch {}
       console.log('[PTT] STT', sttResp.status, sttJson);
 
-      if (!sttResp.ok) {
-        setStatus('idle');
-        return;
-      }
+      if (!sttResp.ok) { setStatus('idle'); return; }
 
       const transcript = (sttJson.transcript || '').trim();
-      if (transcriptEl) {
-        transcriptEl.textContent = transcript;
-      }
-      if (!transcript) {
-        console.log('[PTT] Heard silence');
-        setStatus('idle');
-        return;
-      }
+      if (transcriptEl) transcriptEl.textContent = transcript || '(no speech)';
+      if (!transcript) { setStatus('idle'); return; }
 
-      // Chain into chat + TTS
+      // ---- Chat + TTS
       setStatus('thinking');
-      if (replyEl) replyEl.textContent = '';
       const reply = await chatStreamSSE(transcript, getSelectedVoice());
       console.log('[PTT] chat reply:', reply);
 
       setStatus('speaking');
       await speak(reply, getSelectedVoice());
-
       setStatus('idle');
     } catch (e) {
       console.error('[PTT] flow error', e);
@@ -297,7 +318,7 @@
     }
   }
 
-  // ---- Wire up UI events ----
+  // ---------- Wire UI ----------
   if (sendBtn)  sendBtn.addEventListener('click', handleSend);
   if (speakBtn) speakBtn.addEventListener('click', handleSpeak);
 
@@ -309,7 +330,6 @@
     });
   }
 
-  // Enter to send (Shift+Enter for newline)
   if (inputEl) {
     inputEl.addEventListener('keydown', (e) => {
       if (e.key === 'Enter' && !e.shiftKey) {
@@ -319,7 +339,7 @@
     });
   }
 
-  // Initial state
+  // ---------- Init ----------
   setStatus('idle');
   console.log('[Keilani] chat.js loaded');
 })();
