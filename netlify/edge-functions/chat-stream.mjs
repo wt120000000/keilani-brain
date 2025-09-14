@@ -1,6 +1,4 @@
 // netlify/edge-functions/chat-stream.mjs
-// SSE proxy to OpenAI with instant return, microtask first-byte, and keepalives
-
 export default async function handler(req) {
   // --- CORS allowlist ---
   const ALLOW_ORIGINS = new Set([
@@ -27,7 +25,6 @@ export default async function handler(req) {
     "Access-Control-Allow-Origin": isAllowed ? origin : "null",
   };
 
-  // --- Preflight
   if (req.method === "OPTIONS") {
     if (!isAllowed) {
       return new Response("Forbidden", {
@@ -42,226 +39,141 @@ export default async function handler(req) {
   }
 
   if (!isAllowed) {
-    const msg = `event: error\ndata: ${JSON.stringify({
-      error: "CORS: origin not allowed",
-    })}\n\n`;
-    return new Response(msg, { status: 200, headers: sseHeaders });
+    return new Response(
+      `event: error\ndata: ${JSON.stringify({
+        error: "CORS: origin not allowed",
+      })}\n\n`,
+      { status: 200, headers: { ...sseHeaders, "Access-Control-Allow-Origin": "null" } }
+    );
   }
 
-  // ---- Observability
-  const rid =
-    req.headers.get("x-request-id") ||
-    crypto.randomUUID?.() ||
-    String(Date.now());
-  const ua = req.headers.get("user-agent") || "";
-  const ip = (req.headers.get("x-nf-client-connection-ip") ||
-    req.headers.get("x-forwarded-for") ||
-    "")
-    .split(",")[0]
-    .trim();
+  const rid = req.headers.get("x-request-id") ||
+              crypto.randomUUID?.() ||
+              String(Date.now());
 
-  // ---- Env
   const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
   const MODEL = Deno.env.get("OPENAI_MODEL") || "gpt-4o-mini";
-  const MAX_OUT = Number(
-    Deno.env.get("OPENAI_MAX_COMPLETION_TOKENS") || "512",
-  );
-  const RAW_TEMP = Deno.env.get("OPENAI_TEMPERATURE");
-  const TEMPERATURE = RAW_TEMP === undefined ? undefined : Number(RAW_TEMP);
-
-  // Prepare request body (don’t block the response return)
-  let message = "Say hi in 1 sentence.";
-  let convo = null;
-  try {
-    const body = await req.json();
-    if (Array.isArray(body?.messages)) convo = body.messages;
-    if (typeof body?.message === "string") message = body.message;
-  } catch (_) {}
+  const TEMP = Number(Deno.env.get("OPENAI_TEMPERATURE") || "0.7");
+  const MAX_COMP = Number(Deno.env.get("OPENAI_MAX_OUTPUT_TOKENS") || "512");
 
   if (!OPENAI_API_KEY) {
-    const msg = `event: error\ndata: ${JSON.stringify({
-      error: "OPENAI_API_KEY missing",
-    })}\n\n`;
-    return new Response(msg, { status: 200, headers: sseHeaders });
+    return new Response(
+      `event: error\ndata: ${JSON.stringify({ error: "OPENAI_API_KEY missing" })}\n\n`,
+      { status: 200, headers: sseHeaders }
+    );
   }
+
+  // Read body (allow {message} or {messages})
+  let msg = "Say hi in one sentence.";
+  let messages = null;
+  try {
+    const b = await req.json();
+    if (Array.isArray(b?.messages)) messages = b.messages;
+    if (typeof b?.message === "string") msg = b.message;
+  } catch {}
 
   const payload = {
     model: MODEL,
     stream: true,
-    max_completion_tokens: MAX_OUT, // correct param for newer models
+    temperature: TEMP,
+    // NOTE: current OpenAI param for output length:
+    max_completion_tokens: MAX_COMP,
     messages:
-      convo ??
+      messages ??
       [
-        { role: "system", content: "You are Keilani: concise, fun, helpful." },
-        { role: "user", content: message },
+        { role: "system", content: "You are Keilani: concise, flirty-fun, helpful." },
+        { role: "user", content: msg },
       ],
   };
-  if (TEMPERATURE !== undefined) payload.temperature = TEMPERATURE;
 
-  const approxSize = new TextEncoder().encode(JSON.stringify(payload)).length;
-  if (approxSize > 200_000) {
-    const msg = `event: error\ndata: ${JSON.stringify({
-      error: "Prompt too large. Try shortening your message.",
-    })}\n\n`;
-    return new Response(msg, { status: 200, headers: sseHeaders });
-  }
-
-  console.log("[edge/chat-stream] start", {
-    rid,
-    ip,
-    ua,
-    model: MODEL,
-    sz: approxSize,
-  });
-
-  // Create stream and return IMMEDIATELY – do NOT await any writes before return
+  // Create a transform stream to write our own SSE
   const { readable, writable } = new TransformStream();
   const writer = writable.getWriter();
-  const enc = new TextEncoder();
+  const textEncoder = new TextEncoder();
 
-  // Schedule work on microtask queue so the function returns first
-  queueMicrotask(async () => {
-    let pingInterval;
-    try {
-      // send an "open" frame ASAP (but after return)
-      try {
-        await writer.write(
-          enc.encode(`event: open\ndata: {"rid":"${rid}"}\n\n`),
-        );
-      } catch (e) {
-        console.error("[edge/chat-stream] open write fail", rid, String(e));
-        try { await writer.close(); } catch {}
-        return;
-      }
+  // small helper to send events
+  const send = async (event, data = "") => {
+    const body = data ? `event: ${event}\ndata: ${data}\n\n` : `event: ${event}\n\n`;
+    await writer.write(textEncoder.encode(body));
+  };
 
-      // start keepalives
-      pingInterval = setInterval(async () => {
-        try {
-          await writer.write(enc.encode(`event: ping\ndata: 1\n\n`));
-        } catch {
-          clearInterval(pingInterval);
-        }
-      }, 15000);
+  // Keep-alive ping
+  const ping = setInterval(() => {
+    writer.write(textEncoder.encode("event: ping\n\n")).catch(() => {});
+  }, 15000);
 
-      // upstream fetch with abort watchdog
-      const ac = new AbortController();
-      const watchdog = setTimeout(() => ac.abort("watchdog"), 120000); // 120s ceiling
+  try {
+    const upstream = await fetch("https://api.openai.com/v1/chat/completions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+        Accept: "text/event-stream",
+      },
+      body: JSON.stringify(payload),
+    });
 
-      let upstream;
-      try {
-        upstream = await fetch(
-          "https://api.openai.com/v1/chat/completions",
-          {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${OPENAI_API_KEY}`,
-              "Content-Type": "application/json",
-              Accept: "text/event-stream",
-            },
-            body: JSON.stringify(payload),
-            signal: ac.signal,
-          },
-        );
-      } catch (err) {
-        console.error("[edge/chat-stream] upstream fetch fail", rid, String(err));
-        try {
-          await writer.write(
-            enc.encode(
-              `event: error\ndata: ${JSON.stringify({
-                error: "Upstream fetch failed",
-              })}\n\n`,
-            ),
-          );
-        } catch {}
-        clearInterval(pingInterval);
-        clearTimeout(watchdog);
-        try { await writer.close(); } catch {}
-        return;
-      }
-
-      if (!upstream.ok || !upstream.body) {
-        const text = await upstream.text().catch(() => "");
-        console.error("[edge/chat-stream] upstream_error", {
-          rid,
-          status: upstream.status,
-          text: text?.slice(0, 300),
-        });
-        try {
-          await writer.write(
-            enc.encode(
-              `event: error\ndata: ${JSON.stringify({
-                status: upstream.status,
-                text,
-              })}\n\n`,
-            ),
-          );
-        } catch {}
-        clearInterval(pingInterval);
-        clearTimeout(watchdog);
-        try { await writer.close(); } catch {}
-        return;
-      }
-
-      // pump bytes from OpenAI to client
-      const reader = upstream.body.getReader();
-      const dec = new TextDecoder();
-
-      async function pump() {
-        const { value, done } = await reader.read();
-        if (done) {
-          clearInterval(pingInterval);
-          clearTimeout(watchdog);
-          try {
-            await writer.write(enc.encode(`event: done\ndata: {}\n\n`));
-          } catch {}
-          try { await writer.close(); } catch {}
-          console.log("[edge/chat-stream] done", { rid });
-          return;
-        }
-        const chunk = dec.decode(value);
-        try {
-          await writer.write(enc.encode(chunk));
-        } catch (err) {
-          console.error("[edge/chat-stream] client write error", rid, String(err));
-          clearInterval(pingInterval);
-          clearTimeout(watchdog);
-          try { await writer.close(); } catch {}
-          return;
-        }
-        return pump();
-      }
-
-      pump().catch(async (err) => {
-        console.error("[edge/chat-stream] pump_error", rid, String(err));
-        clearInterval(pingInterval);
-        clearTimeout(watchdog);
-        try {
-          await writer.write(
-            enc.encode(
-              `event: error\ndata: ${JSON.stringify({
-                error: "Stream aborted",
-              })}\n\n`,
-            ),
-          );
-        } catch {}
-        try { await writer.close(); } catch {}
-      });
-    } catch (err) {
-      console.error("[edge/chat-stream] fatal-scheduled", rid, String(err));
-      try {
-        await writer.write(
-          enc.encode(
-            `event: error\ndata: ${JSON.stringify({
-              error: "Unexpected error",
-            })}\n\n`,
-          ),
-        );
-      } catch {}
-      try { await writer.close(); } catch {}
-      clearInterval(pingInterval);
+    if (!upstream.ok || !upstream.body) {
+      const text = await upstream.text().catch(() => "");
+      await send("error", JSON.stringify({ status: upstream.status, text }));
+      await writer.close();
+      clearInterval(ping);
+      return new Response(readable, { headers: sseHeaders, status: 200 });
     }
-  });
 
-  // IMPORTANT: return NOW, before any await’ed writes
-  return new Response(readable, { status: 200, headers: sseHeaders });
+    // Parse OpenAI SSE and re-emit {text}
+    const reader = upstream.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    // Notify open
+    await send("open");
+
+    for (;;) {
+      const { value, done } = await reader.read();
+      if (done) break;
+
+      buffer += decoder.decode(value, { stream: true });
+
+      let idx;
+      while ((idx = buffer.indexOf("\n\n")) >= 0) {
+        const chunk = buffer.slice(0, idx);
+        buffer = buffer.slice(idx + 2);
+
+        // OpenAI chunks are lines like "data: {...}" or "data: [DONE]"
+        const lines = chunk.split("\n").map((l) => l.trim());
+        for (const line of lines) {
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
+
+          if (payload === "[DONE]") {
+            await send("done");
+            await writer.close();
+            clearInterval(ping);
+            return new Response(readable, { headers: sseHeaders, status: 200 });
+          }
+
+          try {
+            const j = JSON.parse(payload);
+            const delta = j?.choices?.[0]?.delta?.content || "";
+            if (delta) await send("delta", JSON.stringify({ text: delta }));
+          } catch (e) {
+            // If parsing fails, forward as error but keep stream alive
+            await send("error", JSON.stringify({ error: "upstream_parse_error" }));
+          }
+        }
+      }
+    }
+
+    // fallback close
+    await send("done");
+    await writer.close();
+    clearInterval(ping);
+    return new Response(readable, { headers: sseHeaders, status: 200 });
+  } catch (err) {
+    await send("error", JSON.stringify({ error: String(err) }));
+    await writer.close();
+    clearInterval(ping);
+    return new Response(readable, { headers: sseHeaders, status: 200 });
+  }
 }
