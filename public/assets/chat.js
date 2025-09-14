@@ -1,32 +1,31 @@
 // public/assets/chat.js
-// Single-voice streaming chat with ElevenLabs TTS (fallback to browser TTS optional)
+// Streaming chat + ElevenLabs TTS with SINGLE serialized playback loop.
 
 (function () {
   "use strict";
 
-  /* ==========================================================================
-     DOM UTIL
-  ========================================================================== */
+  /* -------------------------------------------------------
+   * Helpers
+   * ----------------------------------------------------- */
   function $(id) { return document.getElementById(id); }
+  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-  /* ==========================================================================
-     CONFIG
-  ========================================================================== */
-  // Turn this on ONLY if you want local (browser) TTS as a fallback.
-  var PREVIEW_BROWSER_TTS = false;
+  /* -------------------------------------------------------
+   * Config
+   * ----------------------------------------------------- */
+  var PREVIEW_BROWSER_TTS = false; // optional fallback (off by default)
+  var MIN_RECORD_MS = 700;
+  var STT_MIN_BYTES = 9500;
 
-  var MIN_RECORD_MS = 700;   // min ptt hold
-  var STT_MIN_BYTES = 9500;  // ignore tiny blobs
-
-  /* ==========================================================================
-     STATE
-  ========================================================================== */
+  /* -------------------------------------------------------
+   * State
+   * ----------------------------------------------------- */
   var state = {
     lastReply: "",
     queueCursor: 0,
-    playbackQueue: [],      // [{id, text, status}]
+    playbackQueue: [],    // [{ id, text }]
     interrupted: false,
-    streamAbort: null,      // AbortController for SSE
+    streamAbort: null,
     mediaRecorder: null,
     chunks: [],
     dailyRoom: null,
@@ -34,13 +33,13 @@
     meetingToken: null,
     voiceId: null
   };
-
   var currentAudio = null;
   var audioUnlocked = false;
+  var isProcessingQueue = false;   // <—— single runner guard
 
-  /* ==========================================================================
-     AUDIO UNLOCK
-  ========================================================================== */
+  /* -------------------------------------------------------
+   * Audio unlock (mobile)
+   * ----------------------------------------------------- */
   function unlockAudio() {
     if (audioUnlocked) return;
     try {
@@ -54,38 +53,36 @@
         src.connect(ctx.destination);
         src.start(0);
       }
-    } catch (e) {}
+    } catch(e) {}
     audioUnlocked = true;
   }
   document.addEventListener("click", unlockAudio, { once: true });
   document.addEventListener("touchstart", unlockAudio, { once: true });
 
-  /* ==========================================================================
-     BROWSER TTS (optional) + CANCEL
-  ========================================================================== */
+  /* -------------------------------------------------------
+   * Browser TTS (fallback only)
+   * ----------------------------------------------------- */
   function speakBrowser(text) {
     if (!PREVIEW_BROWSER_TTS) return;
     try {
       var u = new SpeechSynthesisUtterance(text);
-      u.rate = 1.05;
-      u.pitch = 1.0;
-      u.volume = 1.0;
+      u.rate = 1.05; u.pitch = 1.0; u.volume = 1.0;
       window.speechSynthesis.speak(u);
-    } catch (e) {}
+    } catch(e) {}
   }
   function cancelBrowserTTS() {
-    try { window.speechSynthesis.cancel(); } catch (e) {}
+    try { window.speechSynthesis.cancel(); } catch(e) {}
   }
 
-  /* ==========================================================================
-     HARD STOP / INTERRUPT
-  ========================================================================== */
+  /* -------------------------------------------------------
+   * Hard stop / interrupt
+   * ----------------------------------------------------- */
   function cancelPlayback() {
-    state.playbackQueue = [];
-    state.queueCursor = 0;
     state.interrupted = true;
+    state.playbackQueue.length = 0;
+    state.queueCursor = 0;
 
-    try { if (state.streamAbort) state.streamAbort.abort(); } catch (e) {}
+    try { if (state.streamAbort) state.streamAbort.abort(); } catch(e) {}
     state.streamAbort = null;
 
     cancelBrowserTTS();
@@ -97,31 +94,27 @@
         currentAudio.load && currentAudio.load();
         currentAudio = null;
       }
-    } catch (e) {}
+    } catch(e) {}
 
     var p = $("ttsPlayer");
-    if (p) {
-      try { p.pause(); p.src = ""; p.load && p.load(); } catch (e) {}
-    }
+    if (p) { try { p.pause(); p.src = ""; p.load && p.load(); } catch(e) {} }
   }
-  document.addEventListener("keydown", function (e) {
-    if (e.key === "Escape") cancelPlayback();
-  });
+  document.addEventListener("keydown", function (e) { if (e.key === "Escape") cancelPlayback(); });
   var stopBtn = $("stopSpeak");
   if (stopBtn) stopBtn.addEventListener("click", cancelPlayback);
 
-  /* ==========================================================================
-     UI HELPERS
-  ========================================================================== */
+  /* -------------------------------------------------------
+   * UI helper
+   * ----------------------------------------------------- */
   function setBusy(btn, busy, idleText, busyText) {
     if (!btn) return;
     btn.disabled = !!busy;
     btn.textContent = busy ? busyText : idleText;
   }
 
-  /* ==========================================================================
-     ELEVENLABS VOICES
-  ========================================================================== */
+  /* -------------------------------------------------------
+   * ElevenLabs voices dropdown
+   * ----------------------------------------------------- */
   (function initVoices() {
     var sel = $("voiceSelect");
     if (!sel) return;
@@ -131,27 +124,23 @@
     var saved = localStorage.getItem("voiceId") || "";
 
     fetch("/api/voices")
-      .then(function (r) {
-        if (!r.ok) throw new Error("voices http " + r.status);
-        return r.json();
-      })
-      .then(function (j) {
-        var voices = j && j.voices ? j.voices : [];
+      .then(r => r.ok ? r.json() : Promise.reject(new Error("voices http " + r.status)))
+      .then(j => {
+        var voices = (j && j.voices) ? j.voices : [];
         sel.innerHTML = "";
-        voices.slice(0, 5).forEach(function (v) {
+        voices.slice(0, 5).forEach(v => {
           var opt = document.createElement("option");
           opt.value = v.voice_id;
-          opt.textContent = v.name + " (" + v.voice_id.slice(0, 6) + "…)";
+          opt.textContent = v.name + " (" + v.voice_id.slice(0,6) + "…)";
           sel.appendChild(opt);
         });
-
         if (!sel.options.length) {
           sel.innerHTML = '<option value="">(no voices)</option>';
           sel.disabled = true;
           state.voiceId = null;
         } else {
           if (saved) {
-            for (var i = 0; i < sel.options.length; i++) {
+            for (var i=0;i<sel.options.length;i++) {
               if (sel.options[i].value === saved) sel.selectedIndex = i;
             }
           }
@@ -163,41 +152,38 @@
           };
         }
       })
-      .catch(function () {
+      .catch(() => {
         sel.innerHTML = '<option value="">(voices unavailable)</option>';
         sel.disabled = true;
         state.voiceId = null;
       });
   })();
 
-  /* ==========================================================================
-     SENTENCE CHUNKING
-  ========================================================================== */
+  /* -------------------------------------------------------
+   * Sentence chunking
+   * ----------------------------------------------------- */
   function extractNewSentences(fullText, cursor) {
     var re = /[^.!?]+[.!?]+(\s+|$)/g;
     re.lastIndex = cursor;
-    var out = [];
-    var m;
+    var out = [], m;
     while ((m = re.exec(fullText))) out.push(m[0].trim());
     return { sentences: out, nextCursor: re.lastIndex };
   }
-
   function enqueueSentences(text) {
     var res = extractNewSentences(text, state.queueCursor);
     var sentences = res.sentences;
     state.queueCursor = res.nextCursor;
 
-    if (sentences.length) {
-      for (var i = 0; i < sentences.length; i++) {
-        state.playbackQueue.push({ id: String(Math.random()), text: sentences[i], status: "queued" });
-      }
-      processQueue();
+    if (!sentences.length) return;
+    for (var i=0;i<sentences.length;i++) {
+      state.playbackQueue.push({ id: String(Math.random()), text: sentences[i] });
     }
+    processQueue();  // safe — guarded by isProcessingQueue
   }
 
-  /* ==========================================================================
-     TTS HELPERS (ElevenLabs)
-  ========================================================================== */
+  /* -------------------------------------------------------
+   * TTS helpers (ElevenLabs)
+   * ----------------------------------------------------- */
   function ttsUrl(text) {
     var body = { text: text };
     if (state.voiceId) body.voiceId = state.voiceId;
@@ -207,22 +193,18 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify(body)
     })
-      .then(function (r) {
-        if (!r.ok) return Promise.reject(new Error("tts http " + r.status));
+      .then(r => {
+        if (!r.ok) return r.text().then(t => Promise.reject(new Error("tts " + r.status + " " + t.slice(0,120))));
         var ct = r.headers.get("content-type") || "";
         if (ct.indexOf("audio") === -1) return Promise.reject(new Error("tts bad content-type " + ct));
         return r.blob();
       })
-      .then(function (blob) {
-        return URL.createObjectURL(blob);
-      })
-      .catch(function () {
-        return "";
-      });
+      .then(blob => URL.createObjectURL(blob))
+      .catch(() => "");
   }
 
   function playAudioUrl(url) {
-    return new Promise(function (resolve) {
+    return new Promise(resolve => {
       cancelBrowserTTS();
 
       var visible = $("ttsPlayer");
@@ -232,7 +214,7 @@
       a.preload = "auto";
 
       function cleanup() {
-        try { URL.revokeObjectURL(url); } catch (e) {}
+        try { URL.revokeObjectURL(url); } catch(e) {}
         resolve();
       }
       a.onended = cleanup;
@@ -240,46 +222,49 @@
 
       if (visible) visible.src = url;
 
-      a.play().catch(function () {
-        try { if (visible && visible.play) visible.play(); } catch (e) {}
+      a.play().catch(() => {
+        try { visible && visible.play && visible.play(); } catch(e) {}
       });
     });
   }
 
-  function processQueue() {
-    if (state.interrupted) return;
+  /* -------------------------------------------------------
+   * SINGLE Queue runner
+   * ----------------------------------------------------- */
+  async function processQueue() {
+    if (isProcessingQueue) return;           // <—— guard
+    isProcessingQueue = true;
 
-    (function next() {
-      if (state.interrupted) return;
-      if (!state.playbackQueue.length) return;
+    try {
+      while (!state.interrupted && state.playbackQueue.length) {
+        var item = state.playbackQueue.shift();
+        if (!item) break;
 
-      var item = state.playbackQueue.shift();
-      if (!item) return;
+        var url = "";
+        try { url = await ttsUrl(item.text); } catch(e) { url = ""; }
 
-      // ElevenLabs first
-      ttsUrl(item.text)
-        .then(function (url) {
-          if (state.interrupted) return;
-          if (url) {
-            cancelBrowserTTS();
-            return playAudioUrl(url);
-          } else {
-            // optional fallback
-            speakBrowser(item.text);
-          }
-        })
-        .then(function () {
-          if (!state.interrupted) next();
-        })
-        .catch(function () {
-          if (!state.interrupted) next();
-        });
-    })();
+        if (state.interrupted) break;
+
+        if (url) {
+          cancelBrowserTTS();
+          await playAudioUrl(url);           // serialize by awaiting
+        } else {
+          // fallback to browser TTS (optional)
+          speakBrowser(item.text);
+          await sleep(Math.min(1500, item.text.length * 40));
+        }
+
+        // small pacing delay to avoid hammering TTS API in bursts
+        await sleep(80);
+      }
+    } finally {
+      isProcessingQueue = false;
+    }
   }
 
-  /* ==========================================================================
-     STREAMING CHAT (SSE)
-  ========================================================================== */
+  /* -------------------------------------------------------
+   * SSE streaming
+   * ----------------------------------------------------- */
   function chatStream(message, onDelta) {
     var ac = new AbortController();
     state.streamAbort = ac;
@@ -289,30 +274,29 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ message: message }),
       signal: ac.signal
-    }).then(function (res) {
-      if (!res.ok) return res.text().then(function (t) { throw new Error("chat-stream " + res.status + " " + t); });
+    }).then(res => {
+      if (!res.ok) return res.text().then(t => Promise.reject(new Error("chat-stream " + res.status + " " + t.slice(0,120))));
       if (!res.body) throw new Error("no stream body");
-
       var reader = res.body.getReader();
       var dec = new TextDecoder();
       var buf = "";
 
       function pump() {
-        return reader.read().then(function (chunk) {
-          if (chunk.done) return;
-          buf += dec.decode(chunk.value, { stream: true });
+        return reader.read().then(({value, done}) => {
+          if (done) return;
+          buf += dec.decode(value, { stream: true });
 
           var frames = buf.split("\n\n");
           buf = frames.pop() || "";
 
-          for (var i = 0; i < frames.length; i++) {
+          for (var i=0;i<frames.length;i++) {
             var line = frames[i].trim();
             if (line.indexOf("data:") !== 0) continue;
             var raw = line.slice(5).trim();
             if (!raw) continue;
 
             var json;
-            try { json = JSON.parse(raw); } catch (e) { continue; }
+            try { json = JSON.parse(raw); } catch(e) { continue; }
 
             var text =
               (json && json.choices && json.choices[0] && json.choices[0].delta && json.choices[0].delta.content) ||
@@ -320,7 +304,6 @@
 
             if (typeof text === "string" && text.length) onDelta(text);
           }
-
           return pump();
         });
       }
@@ -329,31 +312,31 @@
     });
   }
 
-  function chatStreamToTTS(userText) {
+  async function chatStreamToTTS(userText) {
     var full = "";
-
-    return chatStream(userText, function (delta) {
-      if (state.interrupted) return;
-      full += delta;
-      var r = $("reply");
-      if (r) r.textContent = full;
-      state.lastReply = full;
-      enqueueSentences(full);
-    }).finally(function () {
-      // flush tail
+    try {
+      await chatStream(userText, function (delta) {
+        if (state.interrupted) return;
+        full += delta;
+        var r = $("reply"); if (r) r.textContent = full;
+        state.lastReply = full;
+        enqueueSentences(full);
+      });
+    } finally {
+      // flush last tail (no punctuation)
       var tail = (full.slice(state.queueCursor) || "").trim();
       if (tail) {
-        state.playbackQueue.push({ id: String(Math.random()), text: tail, status: "queued" });
+        state.playbackQueue.push({ id: String(Math.random()), text: tail });
         processQueue();
         state.queueCursor = full.length;
       }
       state.streamAbort = null;
-    });
+    }
   }
 
-  /* ==========================================================================
-     SEND (text)
-  ========================================================================== */
+  /* -------------------------------------------------------
+   * Send text
+   * ----------------------------------------------------- */
   var sendBtn = $("sendText");
   if (sendBtn) {
     sendBtn.addEventListener("click", function () {
@@ -365,21 +348,19 @@
       cancelBrowserTTS();
       state.interrupted = false;
       state.queueCursor = 0;
-      var r = $("reply");
-      if (r) r.textContent = "";
+      var r = $("reply"); if (r) r.textContent = "";
       if (input) input.value = "";
 
-      chatStreamToTTS(text)
-        .catch(function (e) {
-          var rr = $("reply");
-          if (rr) rr.textContent = "⚠️ " + (e.message || "stream failed");
-        });
+      chatStreamToTTS(text).catch(e => {
+        var rr = $("reply");
+        if (rr) rr.textContent = "⚠️ " + (e.message || "stream failed");
+      });
     });
   }
 
-  /* ==========================================================================
-     SPEAK REPLY
-  ========================================================================== */
+  /* -------------------------------------------------------
+   * Speak reply (re-synthesize full)
+   * ----------------------------------------------------- */
   var speakBtn = $("speakReply");
   if (speakBtn) {
     speakBtn.addEventListener("click", function () {
@@ -392,26 +373,17 @@
 
       setBusy(speakBtn, true, "Speak Reply", "Speaking…");
       ttsUrl(text)
-        .then(function (url) {
-          if (url) {
-            cancelBrowserTTS();
-            return playAudioUrl(url);
-          } else {
-            speakBrowser(text);
-          }
-        })
-        .finally(function () {
-          setBusy(speakBtn, false, "Speak Reply", "Speaking…");
-        });
+        .then(url => { if (url) return playAudioUrl(url); else speakBrowser(text); })
+        .finally(() => setBusy(speakBtn, false, "Speak Reply", "Speaking…"));
     });
   }
 
-  /* ==========================================================================
-     PUSH-TO-TALK
-  ========================================================================== */
+  /* -------------------------------------------------------
+   * Push-to-talk
+   * ----------------------------------------------------- */
   function pickAudioMime() {
     var list = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"];
-    for (var i = 0; i < list.length; i++) {
+    for (var i=0;i<list.length;i++) {
       if (window.MediaRecorder && window.MediaRecorder.isTypeSupported && window.MediaRecorder.isTypeSupported(list[i])) {
         return list[i];
       }
@@ -435,16 +407,11 @@
     }).then(function (stream) {
       state.chunks = [];
       var mimeType = pickAudioMime();
-      try {
-        state.mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType: mimeType } : {});
-      } catch (e) {
-        state.mediaRecorder = new MediaRecorder(stream);
-      }
+      try { state.mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType: mimeType } : {}); }
+      catch(e) { state.mediaRecorder = new MediaRecorder(stream); }
       var startedAt = Date.now();
 
-      state.mediaRecorder.ondataavailable = function (e) {
-        if (e.data && e.data.size) state.chunks.push(e.data);
-      };
+      state.mediaRecorder.ondataavailable = function (e) { if (e.data && e.data.size) state.chunks.push(e.data); };
 
       state.mediaRecorder.onstop = function () {
         var s2 = $("recState"); if (s2) s2.textContent = "processing…";
@@ -452,10 +419,9 @@
           var blob = new Blob(state.chunks, { type: mimeType || "audio/webm" });
           var ms = Date.now() - startedAt;
           if (ms < MIN_RECORD_MS || blob.size < STT_MIN_BYTES) {
-            var t = $("transcript");
-            if (t) t.textContent = "Hold to talk for ~1–2 seconds 👍";
+            var t = $("transcript"); if (t) t.textContent = "Hold to talk for ~1–2 seconds 👍";
             var s3 = $("recState"); if (s3) s3.textContent = "idle";
-            try { stream.getTracks().forEach(function (tr) { tr.stop(); }); } catch (e) {}
+            try { stream.getTracks().forEach(tr => tr.stop()); } catch(e) {}
             return;
           }
 
@@ -467,11 +433,8 @@
               headers: { "Content-Type": "application/json" },
               body: JSON.stringify({ audioBase64: b64 })
             })
-              .then(function (r) {
-                if (!r.ok) return r.text().then(function (txt) { throw new Error(txt); });
-                return r.json();
-              })
-              .then(function (stt) {
+              .then(r => r.ok ? r.json() : r.text().then(t => Promise.reject(new Error(t))))
+              .then(stt => {
                 var trEl = $("transcript"); if (trEl) trEl.textContent = stt.text || "";
                 if ((stt.text || "").trim()) {
                   cancelPlayback();
@@ -482,60 +445,53 @@
                   return chatStreamToTTS(stt.text);
                 }
               })
-              .catch(function (e) {
+              .catch(e => {
                 var trEl = $("transcript"); if (trEl) trEl.textContent = "Couldn’t transcribe. Try again.";
                 console.error("STT error:", e);
               })
-              .finally(function () {
+              .finally(() => {
                 var s4 = $("recState"); if (s4) s4.textContent = "idle";
-                try { stream.getTracks().forEach(function (tr) { tr.stop(); }); } catch (e) {}
+                try { stream.getTracks().forEach(tr => tr.stop()); } catch(e) {}
               });
           };
           fr.readAsDataURL(blob);
-        } catch (err) {
+        } catch(err) {
           var s5 = $("recState"); if (s5) s5.textContent = "idle";
           console.error("PTT stop error:", err);
-          try { stream.getTracks().forEach(function (tr) { tr.stop(); }); } catch (e) {}
+          try { stream.getTracks().forEach(tr => tr.stop()); } catch(e) {}
         }
       };
 
       state.mediaRecorder.start();
-    }).catch(function (e) {
+    }).catch(e => {
       var s6 = $("recState"); if (s6) s6.textContent = "idle";
       console.error("getUserMedia error:", e);
     });
   }
-
   function stopRecording() {
     if (state.mediaRecorder && state.mediaRecorder.state !== "inactive") {
-      try { state.mediaRecorder.stop(); } catch (e) {}
+      try { state.mediaRecorder.stop(); } catch(e) {}
     }
   }
 
-  /* ==========================================================================
-     DAILY (RTC) – simple hooks
-  ========================================================================== */
+  /* -------------------------------------------------------
+   * Daily (RTC) – simple hooks
+   * ----------------------------------------------------- */
   var createRoomBtn = $("createRoom");
   if (createRoomBtn) {
     createRoomBtn.addEventListener("click", function () {
       fetch("/api/rtc/create-room", { method: "POST" })
-        .then(function (r) {
-          if (!r.ok) return r.text().then(function (t) { throw new Error(t); });
-          return r.json();
-        })
-        .then(function (j) {
+        .then(r => r.ok ? r.json() : r.text().then(t => Promise.reject(new Error(t))))
+        .then(j => {
           state.dailyRoom = j.room;
           state.dailyUrl = j.url;
           var info = $("roomInfo"); if (info) info.textContent = "Room: " + j.room;
         })
-        .catch(function (e) {
-          console.error("create room error", e);
-        });
+        .catch(e => console.error("create room error", e));
     });
   }
 
   var iframe = null;
-
   var openRoomBtn = $("openRoom");
   if (openRoomBtn) {
     openRoomBtn.addEventListener("click", function () {
@@ -545,10 +501,9 @@
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ room: state.dailyRoom, userName: "Guest" })
         })
-          .then(function (r) { return r.ok ? r.json() : {}; })
-          .then(function (tok) {
+          .then(r => r.ok ? r.json() : {})
+          .then(tok => {
             state.meetingToken = tok && tok.token ? tok.token : null;
-
             var mount = $("dailyMount");
             if (!mount) return;
             mount.innerHTML = "";
@@ -556,7 +511,6 @@
             iframe = document.createElement("iframe");
             var url = new URL(state.dailyUrl);
             if (state.meetingToken) url.searchParams.set("t", state.meetingToken);
-
             iframe.src = url.toString();
             iframe.allow = "camera; microphone; display-capture";
             iframe.style.width = "100%";
@@ -565,20 +519,19 @@
             iframe.style.borderRadius = "12px";
             mount.appendChild(iframe);
           })
-          .catch(function (e) { console.error("token/open error", e); });
+          .catch(e => console.error("token/open error", e));
       }
 
       if (!state.dailyRoom) {
-        // create first then open
         fetch("/api/rtc/create-room", { method: "POST" })
-          .then(function (r) { if (!r.ok) throw new Error("create failed"); return r.json(); })
-          .then(function (j) {
+          .then(r => r.ok ? r.json() : Promise.reject(new Error("create failed")))
+          .then(j => {
             state.dailyRoom = j.room;
             state.dailyUrl = j.url;
             var info = $("roomInfo"); if (info) info.textContent = "Room: " + j.room;
             actuallyOpen();
           })
-          .catch(function (e) { console.error(e); });
+          .catch(e => console.error(e));
       } else {
         actuallyOpen();
       }
@@ -594,9 +547,9 @@
     });
   }
 
-  /* ==========================================================================
-     AVATAR HOOK (optional)
-  ========================================================================== */
+  /* -------------------------------------------------------
+   * Avatar hook (optional)
+   * ----------------------------------------------------- */
   function feedAvatar(text) {
     var el = $("avatarFeed");
     if (el) el.textContent = (text || "").slice(0, 1200);
