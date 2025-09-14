@@ -15,6 +15,9 @@ const state = {
   chunks: []
 };
 
+// Turn this OFF to avoid mixed voices. If ElevenLabs fails, we still fall back to browser TTS.
+const PREVIEW_BROWSER_TTS = false;
+
 let currentAudio = null;
 let audioUnlocked = false;
 
@@ -195,19 +198,28 @@ async function processQueue() {
     if (!item) break;
     item.status = "speaking";
 
-    // 1) zero-latency preview (browser voice)
-    speakBrowser(item.text);
-
-    // 2) ElevenLabs preferred: REST MP3 (auto if endpoint live)
+    // Try ElevenLabs first (streaming not wired yet, so REST MP3)
+    let url = "";
     try {
-      // Try MSE streaming first if implemented; we intentionally throw above
-      await playTTSStreamMSE(item.text);
-    } catch {
-      const url = await ttsUrl(item.text);
-      if (state.interrupted) return;
-      if (url) await playAudioUrl(url);
-      // If url = "", we already spoke via browser fallback.
+      // If/when MSE streaming is implemented, call it here first.
+      // await playTTSStreamMSE(item.text);
+      url = await ttsUrl(item.text);
+    } catch (e) {
+      console.warn("TTS attempt failed:", e);
+      url = "";
     }
+
+    if (state.interrupted) return;
+
+    if (url) {
+      // We got ElevenLabs audio -> make sure browser TTS is not also speaking
+      try { window.speechSynthesis.cancel(); } catch {}
+      await playAudioUrl(url);
+    } else {
+      // ElevenLabs not available; optionally fall back to browser TTS
+      if (PREVIEW_BROWSER_TTS) speakBrowser(item.text);
+    }
+
     item.status = "done";
   }
 }
@@ -292,7 +304,6 @@ $("sendText").onclick = async () => {
   catch (e) { console.error(e); $("reply").textContent = "⚠️ " + (e.message || "stream failed"); }
 };
 
-/* ------------------------------- Speak Reply ------------------------------- */
 $("speakReply").onclick = async () => {
   const text = state.lastReply.trim();
   if (!text) return;
@@ -301,9 +312,20 @@ $("speakReply").onclick = async () => {
   const btn = $("speakReply");
   setBusy(btn, true, "Speak Reply", "Speaking…");
   try {
-    speakBrowser(text);
-    const url = await ttsUrl(text);
-    if (url) await playAudioUrl(url);
+    let url = "";
+    try {
+      url = await ttsUrl(text);
+    } catch (e) {
+      console.warn("TTS (speakReply) failed:", e);
+      url = "";
+    }
+
+    if (url) {
+      try { window.speechSynthesis.cancel(); } catch {}
+      await playAudioUrl(url);
+    } else if (PREVIEW_BROWSER_TTS) {
+      speakBrowser(text);
+    }
   } finally {
     setBusy(btn, false, "Speak Reply", "Speaking…");
   }
