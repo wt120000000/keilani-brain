@@ -1,558 +1,360 @@
-// public/assets/chat.js
-// Streaming chat + ElevenLabs TTS with SINGLE serialized playback loop.
+/* public/assets/chat.js
+ * Keilani Brain — Live
+ * - Push-to-talk → /api/stt
+ * - Chat streaming (SSE) → /api/chat-stream
+ * - ElevenLabs TTS → /api/tts
+ * - Single audio element, bounded queue, de-dupe, and user interruption
+ */
 
-(function () {
-  "use strict";
+/* ------------------------------ DOM helpers ------------------------------ */
+const $ = (id) => document.getElementById(id);
 
-  /* -------------------------------------------------------
-   * Helpers
-   * ----------------------------------------------------- */
-  function $(id) { return document.getElementById(id); }
-  function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+/* Required elements in index.html:
+  <textarea id="textIn"></textarea>
+  <button   id="sendBtn"></button>
+  <button   id="speakBtn"></button>
+  <select   id="voiceSelect"></select>
+  <div      id="reply"></div>
+  <button   id="recBtn"></button>
+  <span     id="recState"></span>
+  <div      id="transcript"></div>
+  <audio    id="ttsPlayer" controls></audio>
+  <div      id="avatarFeed"></div>   (optional)
+*/
 
-  /* -------------------------------------------------------
-   * Config
-   * ----------------------------------------------------- */
-  var PREVIEW_BROWSER_TTS = false; // optional fallback (off by default)
-  var MIN_RECORD_MS = 700;
-  var STT_MIN_BYTES = 9500;
+/* --------------------------- Global conversation ------------------------- */
+let currentAbort = null;           // Active SSE stream abort
+let micStream = null;              // MediaStream
+let mediaRecorder = null;          // MediaRecorder
+let mediaChunks = [];              // Collected audio chunks
+let isRecording = false;
 
-  /* -------------------------------------------------------
-   * State
-   * ----------------------------------------------------- */
-  var state = {
-    lastReply: "",
-    queueCursor: 0,
-    playbackQueue: [],    // [{ id, text }]
-    interrupted: false,
-    streamAbort: null,
-    mediaRecorder: null,
-    chunks: [],
-    dailyRoom: null,
-    dailyUrl: null,
-    meetingToken: null,
-    voiceId: null
+/* ----------------------------- TTS Controller ---------------------------- */
+const audioEl = $("ttsPlayer");
+if (audioEl) audioEl.loop = false;
+
+const TTS_MAX_QUEUE = 6;
+let ttsQueue = [];
+let speaking = false;
+let ttsAbort = null;
+const spokenSet = new Set(); // de-dupe short-term
+
+function hash(str) {
+  let h = 2166136261 >>> 0;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 16777619);
+  }
+  return (h >>> 0).toString(36);
+}
+function resetSpoken() { if (spokenSet.size > 200) spokenSet.clear(); }
+
+function clearTTS(reason = "user") {
+  try { if (ttsAbort) ttsAbort.abort(); } catch {}
+  ttsAbort = null;
+  speaking = false;
+  ttsQueue = [];
+  if (audioEl) {
+    try {
+      audioEl.pause();
+      audioEl.currentTime = 0;
+      if (audioEl.src) URL.revokeObjectURL(audioEl.src);
+      audioEl.removeAttribute("src");
+      audioEl.load();
+    } catch {}
+  }
+  // console.debug("[tts] cleared:", reason);
+}
+
+async function playNext() {
+  if (speaking || ttsQueue.length === 0) return;
+  speaking = true;
+
+  const { text, voiceId } = ttsQueue.shift();
+  ttsAbort = new AbortController();
+
+  try {
+    const res = await fetch("/api/tts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ text, voiceId }),
+      signal: ttsAbort.signal,
+    });
+    if (!res.ok) throw new Error(`tts http ${res.status}`);
+
+    const blob = await res.blob(); // audio/mpeg
+    const url = URL.createObjectURL(blob);
+
+    audioEl.onended = () => {
+      try { URL.revokeObjectURL(url); } catch {}
+      speaking = false;
+      ttsAbort = null;
+      resetSpoken();
+      playNext();
+    };
+    audioEl.onerror = () => {
+      try { URL.revokeObjectURL(url); } catch {}
+      speaking = false;
+      ttsAbort = null;
+      playNext();
+    };
+
+    audioEl.src = url;
+    await audioEl.play().catch(() => {
+      // user gesture not granted; leave loaded
+    });
+  } catch (err) {
+    // console.warn("[tts] play failed:", err);
+    speaking = false;
+    ttsAbort = null;
+    playNext();
+  }
+}
+
+function enqueueTTS(text, voiceId) {
+  const sentence = (text || "").trim();
+  if (!sentence) return;
+  const key = hash(sentence);
+  if (spokenSet.has(key)) return;        // de-dupe
+  spokenSet.add(key);
+
+  if (ttsQueue.length >= TTS_MAX_QUEUE) ttsQueue.shift();
+  ttsQueue.push({ text: sentence, voiceId });
+  playNext();
+}
+function cancelSpeech() { clearTTS("interrupt"); }
+
+/* ------------------------------ Avatar hook ------------------------------ */
+function feedAvatar(text) {
+  $("avatarFeed")?.textContent = (text || "").slice(0, 1200);
+}
+
+/* ----------------------------- Chat streaming ---------------------------- */
+
+const SENTENCE_BOUNDARY = /[.!?]\s$/;
+
+// Parse SSE lines from fetch streaming response
+async function streamSSE(url, body, { onOpen, onError, onPartial, onDone }) {
+  currentAbort?.abort();
+  currentAbort = new AbortController();
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(body || {}),
+    signal: currentAbort.signal,
+  });
+
+  if (!res.ok || !res.body) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`chat-stream http ${res.status}: ${text?.slice(0, 200)}`);
+  }
+
+  // Consume text/event-stream manually
+  const reader = res.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = "";
+
+  onOpen?.();
+
+  for (;;) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    // Split by event frames (double newline separates events)
+    let idx;
+    while ((idx = buffer.indexOf("\n\n")) >= 0) {
+      const raw = buffer.slice(0, idx);
+      buffer = buffer.slice(idx + 2);
+
+      // Extract event + data lines
+      const lines = raw.split("\n");
+      let event = "message";
+      let data = "";
+      for (const ln of lines) {
+        if (ln.startsWith("event:")) event = ln.slice(6).trim();
+        else if (ln.startsWith("data:")) data += ln.slice(5).trim();
+      }
+
+      if (event === "error") {
+        try { onError?.(JSON.parse(data)); } catch { onError?.({ error: data }); }
+        continue;
+      }
+      if (event === "done") { onDone?.(); continue; }
+      if (event === "open" || event === "ping") { /* keep-alive */ continue; }
+
+      // OpenAI chunks: {choices:[{delta:{content:"..."}}]}
+      try {
+        const j = JSON.parse(data);
+        const chunk = j?.choices?.[0]?.delta?.content ?? "";
+        if (chunk) onPartial?.(chunk);
+      } catch {
+        // ignore parse errors
+      }
+    }
+  }
+}
+
+/* Send a message, render partials, and speak sentence-by-sentence */
+async function chatStream(userText) {
+  cancelSpeech();            // stop any playing speech
+  feedAvatar("");            // reset avatar feed
+  $("reply").textContent = ""; // wipe UI
+  let live = "";             // assembled text
+
+  const voiceId = getSelectedVoiceId();
+
+  function handlePartial(delta) {
+    live += delta;
+    $("reply").textContent = live;
+    feedAvatar(live);
+
+    // speak when we hit a boundary (de-duped by TTS controller)
+    if (SENTENCE_BOUNDARY.test(live)) {
+      enqueueTTS(live.trim(), voiceId);
+      live = ""; // reset buffer for next sentence
+    }
+  }
+
+  function handleDone() {
+    // If we ended mid-sentence, speak the remainder once
+    const tail = live.trim();
+    if (tail) enqueueTTS(tail, voiceId);
+  }
+
+  function handleError(e) {
+    const msg = e?.error || e?.text || "stream error";
+    $("reply").textContent = `⚠ ${msg}`;
+  }
+
+  try {
+    await streamSSE("/api/chat-stream", { message: userText }, {
+      onOpen() { /* UI could show "streaming…" */ },
+      onPartial: handlePartial,
+      onDone: handleDone,
+      onError: handleError,
+    });
+  } catch (err) {
+    $("reply").textContent = `⚠ ${String(err).slice(0, 240)}`;
+  } finally {
+    currentAbort = null;
+  }
+}
+
+/* ------------------------------ STT (mic) -------------------------------- */
+
+async function startRecording() {
+  cancelSpeech(); // user is talking → stop playback
+  if (isRecording) return;
+
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch (e) {
+    $("recState").textContent = "mic denied";
+    return;
+  }
+
+  $("recState").textContent = "recording…";
+  mediaChunks = [];
+  mediaRecorder = new MediaRecorder(micStream, { mimeType: "audio/webm" });
+  isRecording = true;
+
+  mediaRecorder.ondataavailable = (e) => {
+    if (e.data && e.data.size > 0) mediaChunks.push(e.data);
   };
-  var currentAudio = null;
-  var audioUnlocked = false;
-  var isProcessingQueue = false;   // <—— single runner guard
 
-  /* -------------------------------------------------------
-   * Audio unlock (mobile)
-   * ----------------------------------------------------- */
-  function unlockAudio() {
-    if (audioUnlocked) return;
+  mediaRecorder.onstop = async () => {
+    isRecording = false;
+    $("recState").textContent = "processing…";
     try {
-      var Ctx = window.AudioContext || window.webkitAudioContext;
-      if (Ctx) {
-        var ctx = new Ctx();
-        ctx.resume && ctx.resume();
-        var buf = ctx.createBuffer(1, 1, 22050);
-        var src = ctx.createBufferSource();
-        src.buffer = buf;
-        src.connect(ctx.destination);
-        src.start(0);
-      }
-    } catch(e) {}
-    audioUnlocked = true;
-  }
-  document.addEventListener("click", unlockAudio, { once: true });
-  document.addEventListener("touchstart", unlockAudio, { once: true });
+      const blob = new Blob(mediaChunks, { type: "audio/webm" });
+      const b64 = await blobToBase64(blob);
 
-  /* -------------------------------------------------------
-   * Browser TTS (fallback only)
-   * ----------------------------------------------------- */
-  function speakBrowser(text) {
-    if (!PREVIEW_BROWSER_TTS) return;
-    try {
-      var u = new SpeechSynthesisUtterance(text);
-      u.rate = 1.05; u.pitch = 1.0; u.volume = 1.0;
-      window.speechSynthesis.speak(u);
-    } catch(e) {}
-  }
-  function cancelBrowserTTS() {
-    try { window.speechSynthesis.cancel(); } catch(e) {}
-  }
-
-  /* -------------------------------------------------------
-   * Hard stop / interrupt
-   * ----------------------------------------------------- */
-  function cancelPlayback() {
-    state.interrupted = true;
-    state.playbackQueue.length = 0;
-    state.queueCursor = 0;
-
-    try { if (state.streamAbort) state.streamAbort.abort(); } catch(e) {}
-    state.streamAbort = null;
-
-    cancelBrowserTTS();
-
-    try {
-      if (currentAudio) {
-        currentAudio.pause();
-        currentAudio.src = "";
-        currentAudio.load && currentAudio.load();
-        currentAudio = null;
-      }
-    } catch(e) {}
-
-    var p = $("ttsPlayer");
-    if (p) { try { p.pause(); p.src = ""; p.load && p.load(); } catch(e) {} }
-  }
-  document.addEventListener("keydown", function (e) { if (e.key === "Escape") cancelPlayback(); });
-  var stopBtn = $("stopSpeak");
-  if (stopBtn) stopBtn.addEventListener("click", cancelPlayback);
-
-  /* -------------------------------------------------------
-   * UI helper
-   * ----------------------------------------------------- */
-  function setBusy(btn, busy, idleText, busyText) {
-    if (!btn) return;
-    btn.disabled = !!busy;
-    btn.textContent = busy ? busyText : idleText;
-  }
-
-  /* -------------------------------------------------------
-   * ElevenLabs voices dropdown
-   * ----------------------------------------------------- */
-  (function initVoices() {
-    var sel = $("voiceSelect");
-    if (!sel) return;
-
-    sel.disabled = true;
-    sel.innerHTML = "<option>Loading voices…</option>";
-    var saved = localStorage.getItem("voiceId") || "";
-
-    fetch("/api/voices")
-      .then(r => r.ok ? r.json() : Promise.reject(new Error("voices http " + r.status)))
-      .then(j => {
-        var voices = (j && j.voices) ? j.voices : [];
-        sel.innerHTML = "";
-        voices.slice(0, 5).forEach(v => {
-          var opt = document.createElement("option");
-          opt.value = v.voice_id;
-          opt.textContent = v.name + " (" + v.voice_id.slice(0,6) + "…)";
-          sel.appendChild(opt);
-        });
-        if (!sel.options.length) {
-          sel.innerHTML = '<option value="">(no voices)</option>';
-          sel.disabled = true;
-          state.voiceId = null;
-        } else {
-          if (saved) {
-            for (var i=0;i<sel.options.length;i++) {
-              if (sel.options[i].value === saved) sel.selectedIndex = i;
-            }
-          }
-          state.voiceId = sel.value || null;
-          sel.disabled = false;
-          sel.onchange = function () {
-            state.voiceId = sel.value || null;
-            localStorage.setItem("voiceId", state.voiceId || "");
-          };
-        }
-      })
-      .catch(() => {
-        sel.innerHTML = '<option value="">(voices unavailable)</option>';
-        sel.disabled = true;
-        state.voiceId = null;
+      const sttRes = await fetch("/api/stt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ audioBase64: b64 }),
       });
-  })();
 
-  /* -------------------------------------------------------
-   * Sentence chunking
-   * ----------------------------------------------------- */
-  function extractNewSentences(fullText, cursor) {
-    var re = /[^.!?]+[.!?]+(\s+|$)/g;
-    re.lastIndex = cursor;
-    var out = [], m;
-    while ((m = re.exec(fullText))) out.push(m[0].trim());
-    return { sentences: out, nextCursor: re.lastIndex };
-  }
-  function enqueueSentences(text) {
-    var res = extractNewSentences(text, state.queueCursor);
-    var sentences = res.sentences;
-    state.queueCursor = res.nextCursor;
+      if (!sttRes.ok) throw new Error(await sttRes.text());
+      const j = await sttRes.json();
+      const text = (j.transcript || "").trim();
+      $("transcript").textContent = text || "(no speech)";
 
-    if (!sentences.length) return;
-    for (var i=0;i<sentences.length;i++) {
-      state.playbackQueue.push({ id: String(Math.random()), text: sentences[i] });
-    }
-    processQueue();  // safe — guarded by isProcessingQueue
-  }
-
-  /* -------------------------------------------------------
-   * TTS helpers (ElevenLabs)
-   * ----------------------------------------------------- */
-  function ttsUrl(text) {
-    var body = { text: text };
-    if (state.voiceId) body.voiceId = state.voiceId;
-
-    return fetch("/api/tts", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
-    })
-      .then(r => {
-        if (!r.ok) return r.text().then(t => Promise.reject(new Error("tts " + r.status + " " + t.slice(0,120))));
-        var ct = r.headers.get("content-type") || "";
-        if (ct.indexOf("audio") === -1) return Promise.reject(new Error("tts bad content-type " + ct));
-        return r.blob();
-      })
-      .then(blob => URL.createObjectURL(blob))
-      .catch(() => "");
-  }
-
-  function playAudioUrl(url) {
-    return new Promise(resolve => {
-      cancelBrowserTTS();
-
-      var visible = $("ttsPlayer");
-      var a = new Audio();
-      currentAudio = a;
-      a.src = url;
-      a.preload = "auto";
-
-      function cleanup() {
-        try { URL.revokeObjectURL(url); } catch(e) {}
-        resolve();
-      }
-      a.onended = cleanup;
-      a.onerror = cleanup;
-
-      if (visible) visible.src = url;
-
-      a.play().catch(() => {
-        try { visible && visible.play && visible.play(); } catch(e) {}
-      });
-    });
-  }
-
-  /* -------------------------------------------------------
-   * SINGLE Queue runner
-   * ----------------------------------------------------- */
-  async function processQueue() {
-    if (isProcessingQueue) return;           // <—— guard
-    isProcessingQueue = true;
-
-    try {
-      while (!state.interrupted && state.playbackQueue.length) {
-        var item = state.playbackQueue.shift();
-        if (!item) break;
-
-        var url = "";
-        try { url = await ttsUrl(item.text); } catch(e) { url = ""; }
-
-        if (state.interrupted) break;
-
-        if (url) {
-          cancelBrowserTTS();
-          await playAudioUrl(url);           // serialize by awaiting
-        } else {
-          // fallback to browser TTS (optional)
-          speakBrowser(item.text);
-          await sleep(Math.min(1500, item.text.length * 40));
-        }
-
-        // small pacing delay to avoid hammering TTS API in bursts
-        await sleep(80);
-      }
+      if (text) await chatStream(text);
+      else $("recState").textContent = "idle";
+    } catch (err) {
+      $("transcript").textContent = "";
+      $("reply").textContent = "Couldn’t transcribe. Try again.";
+      $("recState").textContent = "idle";
     } finally {
-      isProcessingQueue = false;
+      try { micStream.getTracks().forEach(t => t.stop()); } catch {}
+      micStream = null;
+      mediaRecorder = null;
+      mediaChunks = [];
     }
+  };
+
+  mediaRecorder.start(150); // small timeslice improves onstop availability
+}
+
+function stopRecording() {
+  if (mediaRecorder && isRecording) {
+    try { mediaRecorder.stop(); } catch {}
   }
+  $("recState").textContent = "idle";
+}
 
-  /* -------------------------------------------------------
-   * SSE streaming
-   * ----------------------------------------------------- */
-  function chatStream(message, onDelta) {
-    var ac = new AbortController();
-    state.streamAbort = ac;
+function blobToBase64(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const res = reader.result || "";
+      resolve(String(res).split(",")[1] || "");
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
 
-    return fetch("/api/chat-stream", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message: message }),
-      signal: ac.signal
-    }).then(res => {
-      if (!res.ok) return res.text().then(t => Promise.reject(new Error("chat-stream " + res.status + " " + t.slice(0,120))));
-      if (!res.body) throw new Error("no stream body");
-      var reader = res.body.getReader();
-      var dec = new TextDecoder();
-      var buf = "";
+/* ------------------------------- UI wiring ------------------------------- */
 
-      function pump() {
-        return reader.read().then(({value, done}) => {
-          if (done) return;
-          buf += dec.decode(value, { stream: true });
+function getSelectedVoiceId() {
+  return $("voiceSelect")?.value || "";
+}
 
-          var frames = buf.split("\n\n");
-          buf = frames.pop() || "";
+$("sendBtn")?.addEventListener("click", async () => {
+  cancelSpeech();
+  const text = ($("textIn")?.value || "").trim();
+  if (!text) return;
+  $("textIn").value = "";
+  await chatStream(text);
+});
 
-          for (var i=0;i<frames.length;i++) {
-            var line = frames[i].trim();
-            if (line.indexOf("data:") !== 0) continue;
-            var raw = line.slice(5).trim();
-            if (!raw) continue;
-
-            var json;
-            try { json = JSON.parse(raw); } catch(e) { continue; }
-
-            var text =
-              (json && json.choices && json.choices[0] && json.choices[0].delta && json.choices[0].delta.content) ||
-              json.delta || json.text || "";
-
-            if (typeof text === "string" && text.length) onDelta(text);
-          }
-          return pump();
-        });
-      }
-
-      return pump();
-    });
+$("speakBtn")?.addEventListener("click", () => {
+  const text = ($("reply")?.textContent || "").trim();
+  if (text) {
+    cancelSpeech();
+    enqueueTTS(text, getSelectedVoiceId());
   }
+});
 
-  async function chatStreamToTTS(userText) {
-    var full = "";
-    try {
-      await chatStream(userText, function (delta) {
-        if (state.interrupted) return;
-        full += delta;
-        var r = $("reply"); if (r) r.textContent = full;
-        state.lastReply = full;
-        enqueueSentences(full);
-      });
-    } finally {
-      // flush last tail (no punctuation)
-      var tail = (full.slice(state.queueCursor) || "").trim();
-      if (tail) {
-        state.playbackQueue.push({ id: String(Math.random()), text: tail });
-        processQueue();
-        state.queueCursor = full.length;
-      }
-      state.streamAbort = null;
-    }
-  }
+// PTT: hold to talk
+$("recBtn")?.addEventListener("mousedown", startRecording);
+$("recBtn")?.addEventListener("touchstart", (e) => { e.preventDefault(); startRecording(); }, { passive: false });
+$("recBtn")?.addEventListener("mouseup", stopRecording);
+$("recBtn")?.addEventListener("mouseleave", stopRecording);
+$("recBtn")?.addEventListener("touchend", (e) => { e.preventDefault(); stopRecording(); }, { passive: false });
 
-  /* -------------------------------------------------------
-   * Send text
-   * ----------------------------------------------------- */
-  var sendBtn = $("sendText");
-  if (sendBtn) {
-    sendBtn.addEventListener("click", function () {
-      var input = $("textIn");
-      var text = input && input.value ? String(input.value).trim() : "";
-      if (!text) return;
+// Interrupt speech whenever user types or focuses the input
+$("textIn")?.addEventListener("focus", cancelSpeech);
+$("textIn")?.addEventListener("input", () => {
+  if (($("textIn").value || "").trim().length > 0) cancelSpeech();
+});
 
-      cancelPlayback();
-      cancelBrowserTTS();
-      state.interrupted = false;
-      state.queueCursor = 0;
-      var r = $("reply"); if (r) r.textContent = "";
-      if (input) input.value = "";
-
-      chatStreamToTTS(text).catch(e => {
-        var rr = $("reply");
-        if (rr) rr.textContent = "⚠️ " + (e.message || "stream failed");
-      });
-    });
-  }
-
-  /* -------------------------------------------------------
-   * Speak reply (re-synthesize full)
-   * ----------------------------------------------------- */
-  var speakBtn = $("speakReply");
-  if (speakBtn) {
-    speakBtn.addEventListener("click", function () {
-      var text = (state.lastReply || "").trim();
-      if (!text) return;
-
-      cancelPlayback();
-      cancelBrowserTTS();
-      state.interrupted = false;
-
-      setBusy(speakBtn, true, "Speak Reply", "Speaking…");
-      ttsUrl(text)
-        .then(url => { if (url) return playAudioUrl(url); else speakBrowser(text); })
-        .finally(() => setBusy(speakBtn, false, "Speak Reply", "Speaking…"));
-    });
-  }
-
-  /* -------------------------------------------------------
-   * Push-to-talk
-   * ----------------------------------------------------- */
-  function pickAudioMime() {
-    var list = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"];
-    for (var i=0;i<list.length;i++) {
-      if (window.MediaRecorder && window.MediaRecorder.isTypeSupported && window.MediaRecorder.isTypeSupported(list[i])) {
-        return list[i];
-      }
-    }
-    return "";
-  }
-
-  var pttBtn = $("pttBtn");
-  if (pttBtn) {
-    pttBtn.onmousedown = startRecording;
-    pttBtn.onmouseup   = stopRecording;
-    pttBtn.ontouchstart = function (e) { e.preventDefault(); startRecording(); };
-    pttBtn.ontouchend   = function (e) { e.preventDefault(); stopRecording(); };
-  }
-
-  function startRecording() {
-    var s = $("recState"); if (s) s.textContent = "recording…";
-
-    navigator.mediaDevices.getUserMedia({
-      audio: { channelCount: 1, noiseSuppression: true, echoCancellation: true, autoGainControl: true }
-    }).then(function (stream) {
-      state.chunks = [];
-      var mimeType = pickAudioMime();
-      try { state.mediaRecorder = new MediaRecorder(stream, mimeType ? { mimeType: mimeType } : {}); }
-      catch(e) { state.mediaRecorder = new MediaRecorder(stream); }
-      var startedAt = Date.now();
-
-      state.mediaRecorder.ondataavailable = function (e) { if (e.data && e.data.size) state.chunks.push(e.data); };
-
-      state.mediaRecorder.onstop = function () {
-        var s2 = $("recState"); if (s2) s2.textContent = "processing…";
-        try {
-          var blob = new Blob(state.chunks, { type: mimeType || "audio/webm" });
-          var ms = Date.now() - startedAt;
-          if (ms < MIN_RECORD_MS || blob.size < STT_MIN_BYTES) {
-            var t = $("transcript"); if (t) t.textContent = "Hold to talk for ~1–2 seconds 👍";
-            var s3 = $("recState"); if (s3) s3.textContent = "idle";
-            try { stream.getTracks().forEach(tr => tr.stop()); } catch(e) {}
-            return;
-          }
-
-          var fr = new FileReader();
-          fr.onloadend = function () {
-            var b64 = fr.result || "";
-            fetch("/api/stt", {
-              method: "POST",
-              headers: { "Content-Type": "application/json" },
-              body: JSON.stringify({ audioBase64: b64 })
-            })
-              .then(r => r.ok ? r.json() : r.text().then(t => Promise.reject(new Error(t))))
-              .then(stt => {
-                var trEl = $("transcript"); if (trEl) trEl.textContent = stt.text || "";
-                if ((stt.text || "").trim()) {
-                  cancelPlayback();
-                  cancelBrowserTTS();
-                  state.interrupted = false;
-                  state.queueCursor = 0;
-                  var rr = $("reply"); if (rr) rr.textContent = "";
-                  return chatStreamToTTS(stt.text);
-                }
-              })
-              .catch(e => {
-                var trEl = $("transcript"); if (trEl) trEl.textContent = "Couldn’t transcribe. Try again.";
-                console.error("STT error:", e);
-              })
-              .finally(() => {
-                var s4 = $("recState"); if (s4) s4.textContent = "idle";
-                try { stream.getTracks().forEach(tr => tr.stop()); } catch(e) {}
-              });
-          };
-          fr.readAsDataURL(blob);
-        } catch(err) {
-          var s5 = $("recState"); if (s5) s5.textContent = "idle";
-          console.error("PTT stop error:", err);
-          try { stream.getTracks().forEach(tr => tr.stop()); } catch(e) {}
-        }
-      };
-
-      state.mediaRecorder.start();
-    }).catch(e => {
-      var s6 = $("recState"); if (s6) s6.textContent = "idle";
-      console.error("getUserMedia error:", e);
-    });
-  }
-  function stopRecording() {
-    if (state.mediaRecorder && state.mediaRecorder.state !== "inactive") {
-      try { state.mediaRecorder.stop(); } catch(e) {}
-    }
-  }
-
-  /* -------------------------------------------------------
-   * Daily (RTC) – simple hooks
-   * ----------------------------------------------------- */
-  var createRoomBtn = $("createRoom");
-  if (createRoomBtn) {
-    createRoomBtn.addEventListener("click", function () {
-      fetch("/api/rtc/create-room", { method: "POST" })
-        .then(r => r.ok ? r.json() : r.text().then(t => Promise.reject(new Error(t))))
-        .then(j => {
-          state.dailyRoom = j.room;
-          state.dailyUrl = j.url;
-          var info = $("roomInfo"); if (info) info.textContent = "Room: " + j.room;
-        })
-        .catch(e => console.error("create room error", e));
-    });
-  }
-
-  var iframe = null;
-  var openRoomBtn = $("openRoom");
-  if (openRoomBtn) {
-    openRoomBtn.addEventListener("click", function () {
-      function actuallyOpen() {
-        fetch("/api/rtc/token", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ room: state.dailyRoom, userName: "Guest" })
-        })
-          .then(r => r.ok ? r.json() : {})
-          .then(tok => {
-            state.meetingToken = tok && tok.token ? tok.token : null;
-            var mount = $("dailyMount");
-            if (!mount) return;
-            mount.innerHTML = "";
-
-            iframe = document.createElement("iframe");
-            var url = new URL(state.dailyUrl);
-            if (state.meetingToken) url.searchParams.set("t", state.meetingToken);
-            iframe.src = url.toString();
-            iframe.allow = "camera; microphone; display-capture";
-            iframe.style.width = "100%";
-            iframe.style.height = "540px";
-            iframe.style.border = "0";
-            iframe.style.borderRadius = "12px";
-            mount.appendChild(iframe);
-          })
-          .catch(e => console.error("token/open error", e));
-      }
-
-      if (!state.dailyRoom) {
-        fetch("/api/rtc/create-room", { method: "POST" })
-          .then(r => r.ok ? r.json() : Promise.reject(new Error("create failed")))
-          .then(j => {
-            state.dailyRoom = j.room;
-            state.dailyUrl = j.url;
-            var info = $("roomInfo"); if (info) info.textContent = "Room: " + j.room;
-            actuallyOpen();
-          })
-          .catch(e => console.error(e));
-      } else {
-        actuallyOpen();
-      }
-    });
-  }
-
-  var closeRoomBtn = $("closeRoom");
-  if (closeRoomBtn) {
-    closeRoomBtn.addEventListener("click", function () {
-      var mount = $("dailyMount");
-      if (mount) mount.innerHTML = "";
-      iframe = null;
-    });
-  }
-
-  /* -------------------------------------------------------
-   * Avatar hook (optional)
-   * ----------------------------------------------------- */
-  function feedAvatar(text) {
-    var el = $("avatarFeed");
-    if (el) el.textContent = (text || "").slice(0, 1200);
-  }
-
-})();
+// Cancel any active stream when navigating away
+window.addEventListener("beforeunload", () => {
+  try { currentAbort?.abort(); } catch {}
+  clearTTS("unload");
+});
