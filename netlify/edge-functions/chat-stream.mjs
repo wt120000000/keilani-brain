@@ -1,8 +1,18 @@
 // netlify/edge-functions/chat-stream.mjs
 // Streams OpenAI Chat Completions to the browser via SSE.
-// - Uses max_completion_tokens (compatible with newer models)
+// - Uses max_completion_tokens (newer models)
 // - Returns NON-200 on upstream errors so the client can fall back
 // - CORS allowlist for your domains
+// - Temperature: defaults to 1 (many “mini” models only allow 1). We only
+//   include the parameter when it’s safe (OPENAI_INCLUDE_TEMPERATURE="1").
+//
+// ENV:
+//   OPENAI_API_KEY                 (required)
+//   OPENAI_MODEL                   (default: gpt-4o-mini)
+//   OPENAI_MAX_OUTPUT_TOKENS       (default: 512)
+//   OPENAI_TEMPERATURE             (default: "1")
+//   OPENAI_INCLUDE_TEMPERATURE     (default: "1")  -> include temperature field
+//                                                (set to "0" to omit entirely)
 
 export default async function handler(req) {
   // --- CORS allowlist ---
@@ -45,10 +55,17 @@ export default async function handler(req) {
 
   // Env & defaults
   const MODEL = Deno.env.get("OPENAI_MODEL") || "gpt-4o-mini";
-  const MAX_OUTPUT = Number(
-    Deno.env.get("OPENAI_MAX_OUTPUT_TOKENS") || "512"
+  const MAX_OUTPUT = Number(Deno.env.get("OPENAI_MAX_OUTPUT_TOKENS") || "512");
+
+  // IMPORTANT: many “mini” models only accept temperature=1.
+  // Default to 1, and only include the field if OPENAI_INCLUDE_TEMPERATURE = "1".
+  const TEMPERATURE_RAW = Deno.env.get("OPENAI_TEMPERATURE");
+  const TEMPERATURE = Number(
+    TEMPERATURE_RAW == null || TEMPERATURE_RAW === "" ? "1" : TEMPERATURE_RAW
   );
-  const TEMPERATURE = Number(Deno.env.get("OPENAI_TEMPERATURE") || "0.7");
+  const INCLUDE_TEMPERATURE =
+    (Deno.env.get("OPENAI_INCLUDE_TEMPERATURE") || "1") === "1";
+
   const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
 
   // --- Preflight ---
@@ -63,7 +80,7 @@ export default async function handler(req) {
   }
 
   if (!isAllowed) {
-    // Return a real error (non-200) so client fallback can engage
+    // Return a real error (non-200) so the client fallback can engage
     return new Response(
       JSON.stringify({ error: "CORS: origin not allowed", origin }),
       {
@@ -78,17 +95,14 @@ export default async function handler(req) {
   }
 
   if (!OPENAI_API_KEY) {
-    return new Response(
-      JSON.stringify({ error: "OPENAI_API_KEY missing" }),
-      {
-        status: 500,
-        headers: {
-          "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": origin,
-          Vary: "Origin",
-        },
-      }
-    );
+    return new Response(JSON.stringify({ error: "OPENAI_API_KEY missing" }), {
+      status: 500,
+      headers: {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": origin,
+        Vary: "Origin",
+      },
+    });
   }
 
   // Parse body (accept {messages:[...]} or {message:"..."})
@@ -106,9 +120,7 @@ export default async function handler(req) {
   const payload = {
     model: MODEL,
     stream: true,
-    temperature: TEMPERATURE,
-    // IMPORTANT: newer models want max_completion_tokens instead of max_tokens
-    max_completion_tokens: MAX_OUTPUT,
+    max_completion_tokens: MAX_OUTPUT, // newer models prefer this
     messages:
       messages ??
       [
@@ -116,6 +128,12 @@ export default async function handler(req) {
         { role: "user", content: userMessage },
       ],
   };
+
+  // Include temperature iff allowed (to avoid “only default (1) supported” errors)
+  if (INCLUDE_TEMPERATURE) {
+    // If a model only supports 1, sending 1 is fine; some models ignore it.
+    payload.temperature = TEMPERATURE;
+  }
 
   // Safety cap on request size
   const approxSize = new TextEncoder().encode(JSON.stringify(payload)).length;
@@ -141,6 +159,8 @@ export default async function handler(req) {
       origin,
       model: MODEL,
       size: approxSize,
+      include_temperature: INCLUDE_TEMPERATURE,
+      temperature: TEMPERATURE,
     });
 
     const upstream = await fetch(
@@ -187,16 +207,13 @@ export default async function handler(req) {
     });
   } catch (err) {
     console.error("[chat-stream] fatal", { rid, err: String(err) });
-    return new Response(
-      JSON.stringify({ error: "Unexpected error" }),
-      {
-        status: 500,
-        headers: {
-          "Content-Type": "application/json",
-          "Access-Control-Allow-Origin": origin,
-          Vary: "Origin",
-        },
-      }
-    );
+    return new Response(JSON.stringify({ error: "Unexpected error" }), {
+      status: 500,
+      headers: {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": origin,
+        Vary: "Origin",
+      },
+    });
   }
 }
