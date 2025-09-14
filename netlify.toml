@@ -4,6 +4,10 @@
 
 [functions]
   node_bundler = "esbuild"
+  
+[[edge_functions]]
+  path = "/api/chat-stream"
+  function = "chat-stream"
 
 # Serve static assets directly
 [[redirects]]
@@ -36,10 +40,6 @@
   from = "/api/tts"
   to = "/.netlify/functions/tts"
   status = 200
-  
-[[edge_functions]]
-  path = "/api/chat-stream"
-  function = "chat-stream"
 
 [[redirects]]
   from = "/api/rtc/create-room"

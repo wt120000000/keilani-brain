@@ -237,7 +237,7 @@ async function processQueue() {
     // 1) instant fill (zero-latency preview)
     speakBrowser(item.text);
 
-    // 2b) STREAMING HQ: start playing as bytes arrive; fallback to MP3 if needed
+    // 2) STREAMING HQ: start playing as bytes arrive; fallback to MP3 if needed
     try {
       await playTTSStreamMSE(item.text);           // near-instant HQ stream
     } catch (e) {
@@ -255,7 +255,7 @@ async function processQueue() {
   }
 }
 
-// ---------------- Text chat (streaming) ----------------
+// ---------------- Text chat (streaming with graceful fallback) ----------------
 $("sendText").onclick = async () => {
   const input = $("textIn");
   const userText = input.value.trim();
@@ -296,7 +296,7 @@ $("speakReply").onclick = async () => {
   }
 };
 
-// stream helper: reads SSE from /api/chat-stream
+// stream helper: reads SSE from /api/chat-stream; falls back to /api/chat on error
 async function chatStream(message, onDelta) {
   try {
     const res = await fetch("/api/chat-stream", {
