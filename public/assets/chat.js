@@ -1,363 +1,325 @@
-// public/assets/chat.js
-// Keilani Brain — chat + PTT with WAV fallback for STT
+/* public/assets/chat.js
+   Keilani Brain — Live (text + push-to-talk)
+   - Text input -> chat-stream (SSE) -> ElevenLabs TTS
+   - Push-to-talk (MediaRecorder) -> STT -> chat-stream -> TTS
+   - Status badge + robust logs
+*/
 
-// ----------------------------
-// tiny helpers & UI bindings
-const $ = (id) => document.getElementById(id);
-const ui = {
-  textIn: $('textIn'),
-  reply: $('reply'),
-  transcriptBox: $('transcriptBox'),
-  voicePick: $('voicePick'),
-  sendBtn: $('sendBtn'),
-  speakBtn: $('speakBtn'),
-  pttBtn: $('pttBtn'),
-  statePill: $('statePill'),
-  ttsPlayer: $('ttsPlayer'),
-};
-const setState = (s) => (ui.statePill.textContent = s);
+(() => {
+  // ---- DOM ----
+  const $ = (sel) => document.querySelector(sel);
 
-// central logger for quick triage
-function log(...args) { console.log('[keilani]', ...args); }
+  const inputEl     = $('#input')       || $('textarea');     // main text area
+  const sendBtn     = $('#sendBtn')     || $('#send');        // "Send"
+  const speakBtn    = $('#speakBtn')    || $('#speak');       // "Speak Reply"
+  const pttBtn      = $('#ptt')         || $('#holdToTalk');  // "Hold to talk"
+  const voiceSel    = $('#voice')       || $('#voiceSelect'); // <select>
+  const statusBadge = $('#status')      || $('.status');      // small status chip
+  const transcriptEl= $('#transcript');                       // optional place to show transcript
+  const replyEl     = $('#reply');                            // optional place to show assistant reply
 
-// ----------------------------
-// chat streaming (SSE) → /api/chat-stream
-async function chatStream(message, onPartial) {
-  const res = await fetch('/api/chat-stream', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message }),
-  });
-  if (!res.ok || !res.body) throw new Error(`chat-stream HTTP ${res.status}`);
-
-  const reader = res.body.getReader();
-  const dec = new TextDecoder();
-  let assembled = '';
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) break;
-
-    const chunk = dec.decode(value, { stream: true });
-    for (const frame of chunk.split('\n\n')) {
-      const dataLine = frame.split('\n').find((l) => l.startsWith('data:'));
-      if (!dataLine) continue;
-      const payload = dataLine.slice(5).trim();
-      if (!payload || payload === '[DONE]' || payload === '{}') continue;
-      try {
-        const j = JSON.parse(payload);
-        const delta = j?.choices?.[0]?.delta?.content || '';
-        if (delta) {
-          assembled += delta;
-          onPartial?.(assembled);
-        }
-      } catch {}
+  // Single audio element for TTS playback
+  const speaker = (() => {
+    let el = $('#speaker');
+    if (!el) {
+      el = document.createElement('audio');
+      el.id = 'speaker';
+      el.preload = 'none';
+      document.body.appendChild(el);
     }
+    return el;
+  })();
+
+  // Unlock audio on first user gesture to avoid autoplay errors
+  let audioUnlocked = false;
+  const unlockAudioOnce = () => {
+    if (audioUnlocked) return;
+    try {
+      const AC = window.AudioContext || window.webkitAudioContext;
+      if (AC) {
+        const ac = new AC();
+        if (ac.state === 'suspended') ac.resume();
+      }
+      speaker.muted = false;
+      audioUnlocked = true;
+    } catch (e) {}
+  };
+  document.addEventListener('pointerdown', unlockAudioOnce, { once: true });
+
+  // ---- Status helper ----
+  function setStatus(s) {
+    if (statusBadge) statusBadge.textContent = s;
   }
-  return assembled;
-}
 
-// ----------------------------
-// single-voice ElevenLabs TTS via /api/tts
-let speakLock = false;
-let currentTTSAbort = null;
+  // ---- Small UI helpers ----
+  function getSelectedVoice() {
+    return voiceSel && voiceSel.value ? voiceSel.value : '(default)';
+  }
 
-function cancelPlayback() {
-  try {
-    ui.ttsPlayer.pause();
-    if (ui.ttsPlayer.src && ui.ttsPlayer.src.startsWith('blob:')) {
-      URL.revokeObjectURL(ui.ttsPlayer.src);
-    }
-    ui.ttsPlayer.src = '';
-  } catch {}
-}
+  function appendTo(el, text) {
+    if (!el) return;
+    const div = document.createElement('div');
+    div.textContent = text;
+    el.appendChild(div);
+  }
 
-async function speak(text) {
-  const voiceId = ui.voicePick?.value?.trim();
-  if (!voiceId) return;
-  if (currentTTSAbort) currentTTSAbort.abort();
-  currentTTSAbort = new AbortController();
-  if (speakLock) return;
-  speakLock = true;
-  try {
-    cancelPlayback();
-    const r = await fetch('/api/tts', {
+  // ---- TTS: call Netlify tts function and play ----
+  async function speak(text, voice = getSelectedVoice()) {
+    if (!text || !text.trim()) return;
+    const resp = await fetch('/.netlify/functions/tts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      signal: currentTTSAbort.signal,
-      body: JSON.stringify({ text, voiceId }),
+      body: JSON.stringify({ text, voice }),
     });
-    if (!r.ok) {
-      log('TTS error', r.status, await r.text().catch(() => ''));
-      return;
+    if (!resp.ok) {
+      console.error('[TTS] HTTP', resp.status);
+      throw new Error('tts_failed');
     }
-    const buf = await r.arrayBuffer();
-    const blob = new Blob([buf], { type: 'audio/mpeg' });
-    const url = URL.createObjectURL(blob);
-    ui.ttsPlayer.src = url;
-    ui.ttsPlayer.currentTime = 0;
-    await ui.ttsPlayer.play().catch((e) =>
-      log('Autoplay blocked; click Speak Reply', e?.message || e)
-    );
-  } finally {
-    speakLock = false;
-  }
-}
-ui.ttsPlayer?.addEventListener('ended', cancelPlayback);
-
-// ----------------------------
-// PTT recording with WAV fallback
-let rec = { stream: null, recorder: null, chunks: [], startedAt: 0 };
-let recording = false;
-
-function pickMime() {
-  const CANDIDATES = [
-    'audio/webm;codecs=opus',
-    'audio/ogg;codecs=opus',
-    'audio/webm',
-    'audio/ogg',
-  ];
-  for (const m of CANDIDATES) {
-    try { if (MediaRecorder.isTypeSupported(m)) return m; } catch {}
-  }
-  return ''; // let browser choose
-}
-
-function blobToBase64(blob) {
-  return new Promise((resolve, reject) => {
-    const fr = new FileReader();
-    fr.onload = () => {
-      const s = String(fr.result || '');
-      resolve(s.includes(',') ? s.split(',')[1] : s);
-    };
-    fr.onerror = reject;
-    fr.readAsDataURL(blob);
-  });
-}
-
-// ---- WAV encoder helpers
-function floatTo16BitPCM(output, offset, input) {
-  for (let i = 0; i < input.length; i++, offset += 2) {
-    let s = Math.max(-1, Math.min(1, input[i]));
-    s = s < 0 ? s * 0x8000 : s * 0x7FFF;
-    output.setInt16(offset, s, true);
-  }
-}
-function writeWavHeader(view, sampleRate, numSamples) {
-  const numChannels = 1;
-  const bitsPerSample = 16;
-  const byteRate = (sampleRate * numChannels * bitsPerSample) / 8;
-  const blockAlign = (numChannels * bitsPerSample) / 8;
-  const dataSize = numSamples * numChannels * (bitsPerSample / 8);
-
-  // RIFF identifier
-  writeString(view, 0, 'RIFF');
-  view.setUint32(4, 36 + dataSize, true);
-  writeString(view, 8, 'WAVE');
-  writeString(view, 12, 'fmt ');
-  view.setUint32(16, 16, true); // subchunk1Size
-  view.setUint16(20, 1, true);  // PCM
-  view.setUint16(22, numChannels, true);
-  view.setUint32(24, sampleRate, true);
-  view.setUint32(28, byteRate, true);
-  view.setUint16(32, blockAlign, true);
-  view.setUint16(34, bitsPerSample, true);
-  writeString(view, 36, 'data');
-  view.setUint32(40, dataSize, true);
-}
-function writeString(view, offset, string) {
-  for (let i = 0; i < string.length; i++) {
-    view.setUint8(offset + i, string.charCodeAt(i));
-  }
-}
-
-async function blobToWav16kMono(blob) {
-  // decode → downmix mono → resample to 16000 → PCM16 WAV
-  const ab = await blob.arrayBuffer();
-  const ac = new (window.AudioContext || window.webkitAudioContext)();
-  const audioBuf = await ac.decodeAudioData(ab);
-
-  // downmix to mono
-  const length = audioBuf.length;
-  const ch0 = audioBuf.getChannelData(0);
-  let mono = new Float32Array(length);
-  if (audioBuf.numberOfChannels === 1) {
-    mono = ch0;
-  } else {
-    // average channels
-    for (let i = 0; i < length; i++) {
-      let sum = 0;
-      for (let ch = 0; ch < audioBuf.numberOfChannels; ch++) {
-        sum += audioBuf.getChannelData(ch)[i];
-      }
-      mono[i] = sum / audioBuf.numberOfChannels;
+    const ab = await resp.arrayBuffer();
+    const url = URL.createObjectURL(new Blob([ab], { type: 'audio/mpeg' }));
+    speaker.src = url;
+    try {
+      await speaker.play();
+    } catch (e) {
+      console.warn('[TTS] autoplay blocked, waiting for gesture', e);
     }
   }
 
-  // resample to 16k
-  const srcRate = audioBuf.sampleRate;
-  const targetRate = 16000;
-  const ratio = srcRate / targetRate;
-  const newLen = Math.round(mono.length / ratio);
-  const resampled = new Float32Array(newLen);
-  for (let i = 0; i < newLen; i++) {
-    resampled[i] = mono[Math.floor(i * ratio)] || 0;
+  // ---- SSE parser over fetch() POST (text/event-stream) ----
+  async function chatStreamSSE(message, voice = getSelectedVoice()) {
+    // POST to SSE endpoint (server should return text/event-stream)
+    const resp = await fetch('/.netlify/functions/chat-stream', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message, voice }),
+    });
+    if (!resp.ok || !resp.body) {
+      console.error('[chat-stream] HTTP', resp.status);
+      throw new Error('chat_stream_failed');
+    }
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder('utf-8');
+    let buffer = '';
+    let finalText = '';
+
+    // Stream loop
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // Parse by lines for SSE
+      let idx;
+      while ((idx = buffer.indexOf('\n')) >= 0) {
+        const line = buffer.slice(0, idx).trimEnd();
+        buffer = buffer.slice(idx + 1);
+
+        // Standard SSE lines: "data: {...}" or "data: text"
+        if (!line) continue;
+        if (line.startsWith('data:')) {
+          const data = line.slice(5).trim();
+          if (data === '[DONE]') {
+            break;
+          }
+          try {
+            // Prefer JSON payloads { delta, done, content, etc. }
+            const obj = JSON.parse(data);
+            const chunk = obj.delta || obj.content || obj.text || '';
+            finalText += chunk;
+            if (replyEl && chunk) appendTo(replyEl, chunk);
+          } catch {
+            // Fallback: treat as raw text
+            finalText += data;
+            if (replyEl && data) appendTo(replyEl, data);
+          }
+        }
+      }
+    }
+
+    return finalText.trim();
   }
 
-  // encode WAV
-  const buffer = new ArrayBuffer(44 + resampled.length * 2);
-  const view = new DataView(buffer);
-  writeWavHeader(view, targetRate, resampled.length);
-  floatTo16BitPCM(view, 44, resampled);
+  // ---- Send a text message: UI -> chat -> TTS ----
+  async function handleSend() {
+    try {
+      unlockAudioOnce();
+      const userText = (inputEl?.value || '').trim();
+      if (!userText) return;
 
-  await ac.close().catch(() => {});
-  return new Blob([view], { type: 'audio/wav' });
-}
+      setStatus('thinking');
+      console.log('[SEND] → chat-stream:', userText);
 
-// ---- STT call with WAV fallback
-async function sendToSTT(blob, meta) {
-  // try original
-  const base64 = await blobToBase64(blob);
-  const payloadA = { audioBase64: base64, mime: blob.type || 'audio/webm', ...meta };
-  log('STT attempt A', { mime: payloadA.mime, size: blob.size, ...meta });
+      // Clear streamed reply container if present
+      if (replyEl) replyEl.textContent = '';
 
-  let r = await fetch('/api/stt', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payloadA),
-  });
+      const reply = await chatStreamSSE(userText, getSelectedVoice());
+      console.log('[SEND] reply:', reply);
 
-  let text = '';
-  if (r.ok) {
-    const j = await r.json().catch(() => ({}));
-    text = (j?.text || '').trim();
-  } else {
-    log('STT A HTTP', r.status, await r.text().catch(() => ''));
+      setStatus('speaking');
+      await speak(reply, getSelectedVoice());
+
+      setStatus('idle');
+    } catch (e) {
+      console.error('[SEND] error', e);
+      setStatus('idle');
+    }
   }
 
-  if (text) return text;
-
-  // fallback to WAV16k mono
-  const wav = await blobToWav16kMono(blob);
-  const b64wav = await blobToBase64(wav);
-  const payloadB = { audioBase64: b64wav, mime: 'audio/wav', ...meta };
-  log('STT attempt B (wav16k)', { mime: payloadB.mime, size: wav.size, ...meta });
-
-  r = await fetch('/api/stt', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(payloadB),
-  });
-
-  if (!r.ok) {
-    log('STT B HTTP', r.status, await r.text().catch(() => ''));
-    return '';
+  // ---- Speak the current reply (or the text box) again ----
+  async function handleSpeak() {
+    try {
+      unlockAudioOnce();
+      let text = '';
+      if (replyEl && replyEl.textContent && replyEl.textContent.trim()) {
+        text = replyEl.textContent.trim();
+      } else if (inputEl && inputEl.value.trim()) {
+        text = inputEl.value.trim();
+      }
+      if (!text) return;
+      setStatus('speaking');
+      await speak(text, getSelectedVoice());
+      setStatus('idle');
+    } catch (e) {
+      console.error('[SPEAK] error', e);
+      setStatus('idle');
+    }
   }
-  const j2 = await r.json().catch(() => ({}));
-  return (j2?.text || '').trim();
-}
 
-// ---- Recording control
-function pickTimeslice() { return 100; } // ms
+  // ---- Push-to-talk (PTT): MediaRecorder -> STT -> chat -> TTS ----
+  let mediaStream = null;
+  let mediaRecorder = null;
+  let chunks = [];
 
-function cleanupRecording() {
-  try { rec.stream?.getTracks()?.forEach(t => t.stop()); } catch {}
-  rec.stream = null; rec.recorder = null; rec.chunks = []; rec.startedAt = 0;
-}
+  function recorderMime() {
+    // Pick best supported container
+    if (MediaRecorder.isTypeSupported('audio/webm')) return 'audio/webm';
+    if (MediaRecorder.isTypeSupported('audio/ogg'))  return 'audio/ogg';
+    // Fallback — Whisper will sniff
+    return 'audio/webm';
+    // (Safari iOS records AAC in MP4 via WebM shim unpredictably; server sniff handles it)
+  }
 
-async function startRecording() {
-  if (recording) return;
-  recording = true;
-  setState('recording…');
+  async function startPTT() {
+    try {
+      unlockAudioOnce();
+      setStatus('listening');
+      chunks = [];
+      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      const mime = recorderMime();
+      mediaRecorder = new MediaRecorder(mediaStream, { mimeType: mime, audioBitsPerSecond: 128000 });
 
-  try {
-    rec.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-    const mime = pickMime();
-    rec.recorder = mime ? new MediaRecorder(rec.stream, { mimeType: mime }) : new MediaRecorder(rec.stream);
-    rec.chunks = []; rec.startedAt = performance.now();
+      mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+      mediaRecorder.onstop = onPTTStop;
+      mediaRecorder.start();
+      console.log('[PTT] recording… mime =', mime);
+    } catch (e) {
+      console.error('[PTT] getUserMedia error', e);
+      setStatus('idle');
+    }
+  }
 
-    rec.recorder.ondataavailable = (e) => {
-      if (e.data && e.data.size > 0) rec.chunks.push(e.data);
-    };
+  async function stopPTT() {
+    try {
+      if (mediaRecorder && mediaRecorder.state === 'recording') {
+        mediaRecorder.stop();
+      }
+      if (mediaStream) {
+        mediaStream.getTracks().forEach((t) => t.stop());
+      }
+    } catch (e) {
+      console.warn('[PTT] stop error', e);
+    }
+  }
 
-    rec.recorder.onstop = async () => {
-      try { rec.recorder.requestData?.(); } catch {}
-      const durMs = performance.now() - rec.startedAt;
-      const type = rec.recorder?.mimeType || 'unknown';
-      const size = rec.chunks.reduce((n, b) => n + b.size, 0);
-      log('recording stopped', { type, durMs: Math.round(durMs), parts: rec.chunks.length, size });
+  function arrayToBase64(buf) {
+    let binary = '';
+    const bytes = new Uint8Array(buf);
+    const len = bytes.byteLength;
+    for (let i = 0; i < len; i++) binary += String.fromCharCode(bytes[i]);
+    return btoa(binary);
+  }
 
-      if (!rec.chunks.length || durMs < 250) {
-        ui.transcriptBox.textContent = '(no speech)';
-        setState('idle'); cleanupRecording(); return;
+  async function onPTTStop() {
+    try {
+      setStatus('transcribing');
+      const blob = new Blob(chunks, { type: mediaRecorder?.mimeType || 'audio/webm' });
+      const mime = blob.type || 'audio/webm';
+      const sizeKB = Math.round(blob.size / 1024);
+      console.log('[PTT] blob', mime, sizeKB, 'KB');
+
+      const ab = await blob.arrayBuffer();
+      const dataUrl = `data:${mime};base64,${arrayToBase64(ab)}`;
+
+      // Call STT
+      const sttResp = await fetch('/.netlify/functions/stt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ audioBase64: dataUrl, language: 'en', verbose: false }),
+      });
+
+      let sttJson = {};
+      try { sttJson = await sttResp.json(); } catch {}
+      console.log('[PTT] STT', sttResp.status, sttJson);
+
+      if (!sttResp.ok) {
+        setStatus('idle');
+        return;
       }
 
-      const blob = new Blob(rec.chunks, { type });
-      rec.chunks = [];
-
-      const text = await sendToSTT(blob, { durMs: Math.round(durMs) });
-      ui.transcriptBox.textContent = text || '(no speech)';
-
-      if (text) {
-        await runChat(text);
-      } else {
-        setState('idle');
+      const transcript = (sttJson.transcript || '').trim();
+      if (transcriptEl) {
+        transcriptEl.textContent = transcript;
       }
-    };
+      if (!transcript) {
+        console.log('[PTT] Heard silence');
+        setStatus('idle');
+        return;
+      }
 
-    rec.recorder.start(pickTimeslice());
-  } catch (e) {
-    log('mic error', e);
-    setState('idle'); recording = false;
-  }
-}
+      // Chain into chat + TTS
+      setStatus('thinking');
+      if (replyEl) replyEl.textContent = '';
+      const reply = await chatStreamSSE(transcript, getSelectedVoice());
+      console.log('[PTT] chat reply:', reply);
 
-function stopRecording() {
-  if (!recording) return;
-  recording = false;
-  try {
-    if (rec.recorder && rec.recorder.state !== 'inactive') rec.recorder.stop();
-  } catch {}
-  cleanupRecording();
-}
+      setStatus('speaking');
+      await speak(reply, getSelectedVoice());
 
-// ----------------------------
-// chat trigger
-async function runChat(userText) {
-  const text = (userText ?? ui.textIn.value || '').toString().trim();
-  if (!text) return;
-  setState('thinking…');
-  ui.reply.textContent = '';
-
-  let final = '';
-  try {
-    final = await chatStream(text, (partial) => { ui.reply.textContent = partial; });
-  } catch (e) {
-    ui.reply.textContent = `Error: ${e.message}`;
-    setState('idle');
-    return;
+      setStatus('idle');
+    } catch (e) {
+      console.error('[PTT] flow error', e);
+      setStatus('idle');
+    } finally {
+      chunks = [];
+      mediaRecorder = null;
+      mediaStream = null;
+    }
   }
 
-  if (final && ui.voicePick?.value) { await speak(final); }
-  setState('idle');
-}
+  // ---- Wire up UI events ----
+  if (sendBtn)  sendBtn.addEventListener('click', handleSend);
+  if (speakBtn) speakBtn.addEventListener('click', handleSpeak);
 
-// ----------------------------
-// UI wiring
-ui.sendBtn?.addEventListener('click', () => runChat());
-ui.speakBtn?.addEventListener('click', () => {
-  const text = ui.reply.textContent.trim();
-  if (text) speak(text);
-});
+  if (pttBtn) {
+    pttBtn.addEventListener('pointerdown', startPTT);
+    pttBtn.addEventListener('pointerup', stopPTT);
+    pttBtn.addEventListener('pointerleave', () => {
+      if (mediaRecorder && mediaRecorder.state === 'recording') stopPTT();
+    });
+  }
 
-ui.pttBtn?.addEventListener('pointerdown', (e) => {
-  e.preventDefault();
-  ui.pttBtn.setPointerCapture?.(e.pointerId);
-  startRecording();
-});
-ui.pttBtn?.addEventListener('pointerup', (e) => { e.preventDefault(); stopRecording(); });
-ui.pttBtn?.addEventListener('pointercancel', stopRecording);
-ui.pttBtn?.addEventListener('lostpointercapture', stopRecording);
+  // Enter to send (Shift+Enter for newline)
+  if (inputEl) {
+    inputEl.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' && !e.shiftKey) {
+        e.preventDefault();
+        handleSend();
+      }
+    });
+  }
 
-setState('idle');
-log('chat.js ready');
+  // Initial state
+  setStatus('idle');
+  console.log('[Keilani] chat.js loaded');
+})();
