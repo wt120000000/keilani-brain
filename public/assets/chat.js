@@ -1,279 +1,265 @@
-/* public/assets/chat.js */
-
+// --- tiny helpers -----------------------------------------------------------
 const $ = (id) => document.getElementById(id);
+const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-// --- DOM ---
-const elTextIn     = $("textIn");
-const elSendBtn    = $("sendBtn");
-const elSpeakBtn   = $("speakBtn");
-const elVoiceSel   = $("voiceSelect");
-const elReply      = $("reply");
-const elRecBtn     = $("recBtn");
-const elRecState   = $("recState");
-const elTranscript = $("transcript");
-const elAudio      = $("ttsPlayer");
-
-// ========= TTS queue & helpers =========
-let speaking = false;
-let ttsQueue = [];
-let ttsAbort = null;
-const spokenSet = new Set();
-const SENTENCE_BOUNDARY = /[.!?]\s$/;
-
-const hash = (s)=>{
-  let h=2166136261>>>0; for(let i=0;i<s.length;i++){h^=s.charCodeAt(i); h=Math.imul(h,16777619);} return (h>>>0).toString(36);
+const ui = {
+  textIn: $('textIn'),
+  reply: $('reply'),
+  transcriptBox: $('transcriptBox'),
+  voicePick: $('voicePick'),
+  sendBtn: $('sendBtn'),
+  speakBtn: $('speakBtn'),
+  pttBtn: $('pttBtn'),
+  statePill: $('statePill'),
+  ttsPlayer: $('ttsPlayer'),
 };
 
-function getSelectedVoiceId(){ return elVoiceSel?.value || ""; }
+// --- global state/locks -----------------------------------------------------
+let media = { stream: null, recorder: null, chunks: [] };
+let isRecording = false;
 
-function clearTTS(){
-  try{ ttsAbort?.abort(); }catch{}
-  ttsAbort=null; speaking=false; ttsQueue=[];
-  if(elAudio){
-    try{
-      elAudio.pause();
-      elAudio.currentTime=0;
-      if(elAudio.src) URL.revokeObjectURL(elAudio.src);
-      elAudio.removeAttribute("src");
-      elAudio.load();
-    }catch{}
-  }
+// single-flight guards so we never overlap
+let speakLock = false;          // blocks TTS overlap
+let currentTTSAbort = null;     // abort current TTS fetch/play
+
+// --- UI state ---------------------------------------------------------------
+function setState(text) {
+  ui.statePill.textContent = text;
 }
 
-async function playNext(){
-  if(speaking || ttsQueue.length===0) return;
-  speaking = true;
-  const { text, voiceId } = ttsQueue.shift();
-  ttsAbort = new AbortController();
-
-  try{
-    const res = await fetch("/api/tts", {
-      method:"POST",
-      headers:{ "Content-Type": "application/json" },
-      body: JSON.stringify({ text, voiceId }),
-      signal: ttsAbort.signal
-    });
-    if(!res.ok) throw new Error(`tts ${res.status}`);
-    const blob = await res.blob();
-    const url = URL.createObjectURL(blob);
-
-    elAudio.onended = () => { try{ URL.revokeObjectURL(url); }catch{} speaking=false; ttsAbort=null; playNext(); };
-    elAudio.onerror = () => { try{ URL.revokeObjectURL(url); }catch{} speaking=false; ttsAbort=null; playNext(); };
-
-    elAudio.src = url;
-    await elAudio.play().catch(()=>{});
-  }catch{
-    speaking=false; ttsAbort=null;
-  }finally{
-    playNext();
-  }
-}
-
-function enqueueTTS(text, voiceId){
-  const t=(text||"").trim(); if(!t) return;
-  const sig = hash(t);
-  if(spokenSet.has(sig)) return; // de-dupe
-  spokenSet.add(sig);
-  if(spokenSet.size>200) spokenSet.clear();
-  if(ttsQueue.length>6) ttsQueue.shift();
-  ttsQueue.push({ text:t, voiceId });
-  playNext();
-}
-
-function cancelSpeech(){ clearTTS(); }
-
-// ========= SSE chat streaming =========
-let currentAbort = null;
-
-async function streamSSE(url, body, handlers){
-  if(currentAbort){ try{currentAbort.abort();}catch{} }
-  currentAbort = new AbortController();
-
-  const res = await fetch(url, {
-    method:"POST",
-    headers:{ "Content-Type":"application/json" },
-    body: JSON.stringify(body||{}),
-    signal: currentAbort.signal,
+// --- chat streaming (SSE over fetch) ---------------------------------------
+async function chatStream(message, onPartial) {
+  // POST to /api/chat-stream (edge) with SSE body
+  const res = await fetch('/api/chat-stream', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ message })
   });
 
-  if(!res.ok || !res.body){
-    const text = await res.text().catch(()=> "");
-    throw new Error(`chat-stream ${res.status}: ${text.slice(0,200)}`);
+  if (!res.ok || !res.body) {
+    throw new Error(`chat-stream HTTP ${res.status}`);
   }
-
-  handlers.onOpen?.();
 
   const reader = res.body.getReader();
   const dec = new TextDecoder();
-  let buf = "";
+  let assembled = '';
 
-  for(;;){
+  while (true) {
     const { value, done } = await reader.read();
-    if(done) break;
+    if (done) break;
 
-    buf += dec.decode(value, { stream:true });
+    const chunk = dec.decode(value, { stream: true });
 
-    let idx;
-    while((idx = buf.indexOf("\n\n")) >= 0){
-      const frame = buf.slice(0, idx);
-      buf = buf.slice(idx + 2);
+    // Parse SSE frames and pull "data:" JSON lines
+    const frames = chunk.split('\n\n');
+    for (const f of frames) {
+      const line = f.split('\n').find(l => l.startsWith('data:'));
+      if (!line) continue;
 
-      let event="message", data="";
-      for(const line of frame.split("\n")){
-        if(line.startsWith("event:")) event=line.slice(6).trim();
-        else if(line.startsWith("data:")) data += line.slice(5).trim();
+      const payload = line.slice(5).trim();
+      if (!payload || payload === '[DONE]' || payload === '{}') continue;
+
+      // the edge function forwards OpenAI’s event chunks (JSON)
+      try {
+        const j = JSON.parse(payload);
+        const delta = j?.choices?.[0]?.delta?.content || '';
+        if (delta) {
+          assembled += delta;
+          onPartial?.(assembled);
+        }
+      } catch {
+        // ignore non-JSON keepalives (e.g., "event: open")
       }
-
-      if(event==="ping" || event==="open") continue;
-      if(event==="done"){ handlers.onDone?.(); continue; }
-      if(event==="error"){ try{ handlers.onError?.(JSON.parse(data)); }catch{ handlers.onError?.({error:data}); } continue; }
-
-      if(event==="delta"){ // normalized
-        try{
-          const j=JSON.parse(data);
-          if(j?.text) handlers.onPartial?.(j.text);
-        }catch{}
-        continue;
-      }
-
-      // fallback: raw OpenAI chunk
-      try{
-        const j=JSON.parse(data);
-        const delta=j?.choices?.[0]?.delta?.content ?? "";
-        if(delta) handlers.onPartial?.(delta);
-      }catch{}
     }
+  }
+  return assembled;
+}
+
+// --- TTS (ElevenLabs only via /api/tts) ------------------------------------
+async function speak(text) {
+  // if no voice selected -> do nothing (silent)
+  const voiceId = ui.voicePick.value.trim();
+  if (!voiceId) return;
+
+  // ensure previous request is cancelled
+  if (currentTTSAbort) currentTTSAbort.abort();
+  currentTTSAbort = new AbortController();
+
+  // single-flight guard
+  if (speakLock) return;
+  speakLock = true;
+
+  try {
+    // stop any current playback first
+    cancelPlayback();
+
+    const r = await fetch('/api/tts', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      signal: currentTTSAbort.signal,
+      body: JSON.stringify({ text, voiceId })
+    });
+
+    if (!r.ok) {
+      const errTxt = await r.text().catch(() => '');
+      console.error('TTS error', r.status, errTxt.slice(0, 200));
+      return;
+    }
+
+    const buf = await r.arrayBuffer();
+    const blob = new Blob([buf], { type: 'audio/mpeg' });
+    const url = URL.createObjectURL(blob);
+
+    ui.ttsPlayer.src = url;
+    ui.ttsPlayer.currentTime = 0;
+
+    await ui.ttsPlayer.play().catch((e) => {
+      console.warn('Autoplay blocked, user gesture needed:', e?.message);
+    });
+  } finally {
+    speakLock = false;
   }
 }
 
-async function chatStream(userText){
-  cancelSpeech();
-  if(elReply) elReply.textContent = "";
-
-  const voiceId = getSelectedVoiceId();
-  let live = "";
-
-  const onPartial = (piece)=>{
-    live += piece;
-    if(elReply) elReply.textContent = live;
-
-    // Early speech on sentence boundary
-    if(SENTENCE_BOUNDARY.test(live)){
-      enqueueTTS(live.trim(), voiceId);
-      live = "";
+// ensure we don’t overlap playback or leak URLs
+function cancelPlayback() {
+  try {
+    ui.ttsPlayer.pause();
+    if (ui.ttsPlayer.src && ui.ttsPlayer.src.startsWith('blob:')) {
+      URL.revokeObjectURL(ui.ttsPlayer.src);
     }
-  };
+    ui.ttsPlayer.src = '';
+  } catch {}
+}
 
-  const onDone = ()=>{
-    const tail = live.trim();
-    if(tail) enqueueTTS(tail, voiceId);
-  };
+// --- STT (capture mic, push wav to /api/stt, stream reply) ------------------
+async function startRecording() {
+  if (isRecording) return;
+  isRecording = true;
+  setState('recording…');
 
-  const onError = (e)=>{
-    if(elReply) elReply.textContent = `⚠ ${e?.error||e?.text||"stream error"}`;
-  };
+  try {
+    // get mic
+    media.stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+    media.recorder = new MediaRecorder(media.stream, { mimeType: 'audio/webm' });
+    media.chunks = [];
 
-  try{
-    await streamSSE("/api/chat-stream", { message: userText }, { onPartial, onDone, onError });
-  }catch(err){
-    if(elReply) elReply.textContent = `⚠ ${String(err).slice(0,240)}`;
-  }finally{
-    currentAbort = null;
+    media.recorder.ondataavailable = (e) => {
+      if (e.data?.size > 0) media.chunks.push(e.data);
+    };
+
+    media.recorder.onstop = async () => {
+      try {
+        setState('processing…');
+
+        // combine chunks -> webm blob
+        const blob = new Blob(media.chunks, { type: 'audio/webm' });
+        media.chunks = [];
+
+        // turn into base64 for /api/stt
+        const arrbuf = await blob.arrayBuffer();
+        const base64 = btoa(String.fromCharCode(...new Uint8Array(arrbuf)));
+
+        // send to STT
+        const sttRes = await fetch('/api/stt', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ audioBase64: base64 })
+        });
+
+        if (!sttRes.ok) {
+          const t = await sttRes.text().catch(() => '');
+          throw new Error(`STT HTTP ${sttRes.status}: ${t.slice(0, 120)}`);
+        }
+
+        const j = await sttRes.json();
+        const text = (j?.text || '').trim() || '(no speech)';
+        ui.transcriptBox.textContent = text;
+
+        // stream the answer
+        await runChat(text);
+      } catch (err) {
+        console.error('STT error:', err);
+        ui.transcriptBox.textContent = "Couldn't transcribe. Try again.";
+        setState('idle');
+      }
+    };
+
+    media.recorder.start(100);
+  } catch (e) {
+    console.error('mic error', e);
+    setState('idle');
+    isRecording = false;
   }
 }
 
-// ========= STT (push-to-talk) =========
-let micStream=null, mediaRecorder=null, mediaChunks=[], recording=false, stoppedOnce=false;
+async function stopRecording() {
+  if (!isRecording) return;
+  isRecording = false;
 
-const setRecState = (s)=>{ if(elRecState) elRecState.textContent = s; };
-
-function blobToBase64(blob){
-  return new Promise((resolve,reject)=>{
-    const r=new FileReader();
-    r.onloadend=()=> resolve(String(r.result||"").split(",")[1]||"");
-    r.onerror=reject; r.readAsDataURL(blob);
-  });
+  try {
+    if (media.recorder && media.recorder.state !== 'inactive') {
+      media.recorder.stop();
+    }
+  } finally {
+    // stop tracks
+    try {
+      media.stream?.getTracks()?.forEach(t => t.stop());
+    } catch {}
+    media.stream = null;
+    media.recorder = null;
+  }
 }
 
-async function startRecording(){
-  cancelSpeech();
-  if(recording) return;
-  try{
-    micStream = await navigator.mediaDevices.getUserMedia({ audio:true });
-  }catch{
-    setRecState("mic denied");
+// --- main chat runner (from text area or STT) -------------------------------
+async function runChat(userText) {
+  const text = (userText ?? ui.textIn.value || '').toString().trim();
+  if (!text) return;
+
+  setState('thinking…');
+
+  // clear UI
+  ui.reply.textContent = '';
+
+  // stream tokens to the reply box
+  let final = '';
+  try {
+    final = await chatStream(text, (partial) => {
+      ui.reply.textContent = partial;
+    });
+  } catch (e) {
+    console.error('chat-stream error:', e);
+    ui.reply.textContent = `Error: ${e.message}`;
+    setState('idle');
     return;
   }
-  setRecState("recording…"); recording=true; stoppedOnce=false; mediaChunks=[];
-  mediaRecorder = new MediaRecorder(micStream, { mimeType:"audio/webm" });
 
-  mediaRecorder.ondataavailable = (e)=>{ if(e.data && e.data.size>0) mediaChunks.push(e.data); };
-  mediaRecorder.onstop = async ()=>{
-    if(stoppedOnce) return; stoppedOnce=true; recording=false;
+  // speak once (only if a voice is picked)
+  if (final && ui.voicePick.value) {
+    await speak(final);
+  }
 
-    try{
-      setRecState("processing…");
-      if(!mediaChunks.length) throw new Error("no audio");
-      const blob = new Blob(mediaChunks, { type:"audio/webm" });
-      const b64  = await blobToBase64(blob);
-
-      const r = await fetch("/api/stt", {
-        method:"POST",
-        headers:{ "Content-Type":"application/json" },
-        body: JSON.stringify({ audioBase64: `data:audio/webm;base64,${b64}` })
-      });
-      const t = await r.text();
-      if(!r.ok) throw new Error(t);
-      let j={}; try{ j=JSON.parse(t); }catch{}
-      const transcript = (j.transcript||"").trim();
-      if(elTranscript) elTranscript.textContent = transcript || "(no speech)";
-      if(transcript) await chatStream(transcript);
-    }catch{
-      if(elReply) elReply.textContent = "Couldn’t transcribe. Try again.";
-    }finally{
-      setRecState("idle");
-      try{ micStream?.getTracks()?.forEach(t=>t.stop()); }catch{}
-      micStream=null; mediaRecorder=null; mediaChunks=[];
-    }
-  };
-
-  mediaRecorder.start(150);
+  setState('idle');
 }
 
-function stopRecording(){ if(!recording) return; try{ mediaRecorder?.stop(); }catch{} setRecState("idle"); }
-
-// ========= UI wiring =========
-elSendBtn?.addEventListener("click", async ()=>{
-  const t=(elTextIn?.value||"").trim(); if(!t) return;
-  elTextIn.value=""; await chatStream(t);
+// --- wire up buttons --------------------------------------------------------
+ui.sendBtn?.addEventListener('click', () => runChat());
+ui.speakBtn?.addEventListener('click', () => {
+  const text = ui.reply.textContent.trim();
+  if (text) speak(text);
 });
 
-elSpeakBtn?.addEventListener("click", ()=>{
-  const t=(elReply?.textContent||"").trim();
-  if(t){ cancelSpeech(); enqueueTTS(t, getSelectedVoiceId()); }
-});
+// push-to-talk: press = record, release = stop
+ui.pttBtn?.addEventListener('mousedown', startRecording);
+ui.pttBtn?.addEventListener('touchstart', (e) => { e.preventDefault(); startRecording(); }, { passive: false });
 
-if(elRecBtn){
-  elRecBtn.addEventListener("mousedown", startRecording);
-  elRecBtn.addEventListener("mouseup", stopRecording);
-  elRecBtn.addEventListener("mouseleave", stopRecording);
-  elRecBtn.addEventListener("touchstart", (e)=>{ e.preventDefault(); startRecording(); }, { passive:false });
-  elRecBtn.addEventListener("touchend",   (e)=>{ e.preventDefault(); stopRecording(); }, { passive:false });
-}
+const endPress = () => stopRecording();
+ui.pttBtn?.addEventListener('mouseup', endPress);
+ui.pttBtn?.addEventListener('mouseleave', endPress);
+ui.pttBtn?.addEventListener('touchend', (e) => { e.preventDefault(); endPress(); }, { passive: false });
 
-elTextIn?.addEventListener("focus", cancelSpeech);
-elTextIn?.addEventListener("input", ()=>{ if((elTextIn.value||"").trim()) cancelSpeech(); });
+// clean up audio when it ends (no loops / overlapping)
+ui.ttsPlayer?.addEventListener('ended', () => cancelPlayback());
 
-window.addEventListener("beforeunload", ()=>{ try{currentAbort?.abort();}catch{} cancelSpeech(); });
-
-// ====== (Optional) Populate voices dropdown from your backend list ======
-// If you already have /api/voices, uncomment:
-//
-// fetch("/api/voices").then(r=>r.json()).then(list=>{
-//   if(!Array.isArray(list)) return;
-//   for(const v of list){
-//     const opt=document.createElement("option");
-//     opt.value=v.id; opt.textContent=v.name||v.id;
-//     elVoiceSel?.appendChild(opt);
-//   }
-// }).catch(()=>{});
+// initial state
+setState('idle');

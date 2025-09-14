@@ -2,118 +2,154 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Keilani Brain — Live</title>
     <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Keilani Brain — Live</title>
     <link rel="icon" href="/favicon.ico" />
     <style>
-      html,
-      body {
-        background: #0b0f14;
-        color: #e7edf3;
-        font-family:
-          Inter,
-          system-ui,
-          Segoe UI,
-          Arial,
-          sans-serif;
+      :root {
+        color-scheme: dark light;
       }
-      .box {
-        max-width: 960px;
-        margin: 32px auto;
-        padding: 16px;
-        border: 1px solid #22303c;
-        border-radius: 12px;
-        background: #111823;
+      body {
+        margin: 0;
+        background: #0b0e12;
+        color: #e6e6e6;
+        font:
+          16px/1.4 system-ui,
+          Segoe UI,
+          Roboto,
+          Helvetica,
+          Arial;
+      }
+      .wrap {
+        max-width: 1100px;
+        margin: 40px auto;
+        padding: 0 16px;
+      }
+      h1 {
+        font-weight: 700;
+        letter-spacing: 0.2px;
+      }
+      .card {
+        background: #12161c;
+        border: 1px solid #232a35;
+        border-radius: 14px;
+        padding: 16px 16px;
+      }
+      .row {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        flex-wrap: wrap;
       }
       textarea {
         width: 100%;
         min-height: 160px;
-        background: #0e1520;
-        border: 1px solid #22303c;
-        color: #e7edf3;
-        border-radius: 10px;
-        padding: 12px;
         resize: vertical;
-      }
-      .row {
-        display: flex;
-        gap: 12px;
-        align-items: center;
-        margin-top: 12px;
-        flex-wrap: wrap;
-      }
-      button {
-        background: #2563eb;
-        color: #fff;
-        border: 0;
         border-radius: 10px;
-        padding: 10px 16px;
-        cursor: pointer;
+        border: 1px solid #273142;
+        background: #0f1319;
+        color: inherit;
+        padding: 12px;
+        font: inherit;
       }
-      button.secondary {
-        background: #334155;
-      }
-      select {
-        background: #0e1520;
-        border: 1px solid #22303c;
-        color: #e7edf3;
+      select,
+      button,
+      input[type="range"] {
         border-radius: 10px;
-        padding: 8px;
+        border: 1px solid #273142;
+        background: #0f1319;
+        color: inherit;
+        font: inherit;
+        padding: 10px 12px;
+      }
+      button.primary {
+        background: #1260ff;
+        border-color: #1260ff;
+      }
+      button:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
       }
       .pill {
-        font-size: 12px;
-        padding: 4px 8px;
+        padding: 4px 10px;
         border-radius: 999px;
-        background: #0e1520;
-        border: 1px solid #22303c;
+        border: 1px solid #273142;
+        background: #0f1319;
+        font-size: 12px;
+        opacity: 0.9;
       }
-      .panel {
-        padding: 12px;
-        background: #0e1520;
-        border: 1px solid #22303c;
-        border-radius: 10px;
-        min-height: 80px;
+      .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
       }
       .muted {
-        opacity: 0.75;
+        opacity: 0.7;
+      }
+      .split {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 16px;
+      }
+      @media (min-width: 980px) {
+        .split {
+          grid-template-columns: 1fr 1fr;
+        }
+      }
+      .reply {
+        min-height: 140px;
+        white-space: pre-wrap;
+        background: #0f1319;
+        border: 1px solid #273142;
+        border-radius: 10px;
+        padding: 12px;
+      }
+      .row audio {
+        width: 100%;
       }
     </style>
   </head>
   <body>
-    <div class="box">
-      <div class="row" style="justify-content: space-between">
-        <h2 style="margin: 0">Keilani Brain — Live</h2>
-        <span id="recState" class="pill">idle</span>
+    <div class="wrap">
+      <h1>
+        Keilani Brain — Live <span id="statePill" class="pill muted">idle</span>
+      </h1>
+
+      <div class="card">
+        <div class="split">
+          <div>
+            <label class="muted">Message to Keilani</label>
+            <textarea id="textIn" placeholder="Say hi…"></textarea>
+
+            <div class="row" style="margin-top: 10px">
+              <label for="voicePick" class="muted">Voice</label>
+              <select id="voicePick">
+                <option value="">(default / no TTS)</option>
+                <!-- your ElevenLabs voice ids (value) + display names go here -->
+                <!-- e.g. <option value="21m00Tcm4TlvDq8ikWAM">Rachel (21m00T…)</option> -->
+              </select>
+
+              <button id="sendBtn" class="primary">Send</button>
+              <button id="speakBtn">Speak Reply</button>
+              <button id="pttBtn">Hold to talk</button>
+            </div>
+          </div>
+
+          <div>
+            <label class="muted">Last transcript</label>
+            <div id="transcriptBox" class="reply mono muted">(no speech)</div>
+
+            <div class="row" style="margin-top: 10px">
+              <audio id="ttsPlayer" preload="none" controls></audio>
+            </div>
+          </div>
+        </div>
+
+        <div style="margin-top: 16px">
+          <label class="muted">Reply</label>
+          <div id="reply" class="reply"></div>
+        </div>
       </div>
-
-      <textarea id="textIn" placeholder="Say hi…"></textarea>
-
-      <div class="row">
-        <label
-          >Voice
-          <select id="voiceSelect">
-            <option value="">(default)</option>
-          </select>
-        </label>
-
-        <button id="sendBtn">Send</button>
-        <button id="speakBtn" class="secondary">Speak Reply</button>
-        <button id="recBtn" class="secondary">Hold to talk</button>
-      </div>
-
-      <h4 style="margin: 16px 0 8px">Last transcript</h4>
-      <div id="transcript" class="panel muted"></div>
-
-      <h4 style="margin: 16px 0 8px">Reply</h4>
-      <div id="reply" class="panel"></div>
-
-      <audio
-        id="ttsPlayer"
-        controls
-        style="width: 100%; margin-top: 12px"
-      ></audio>
     </div>
 
-    <script src="/assets/chat.js" defer></script>
+    <script defer src="/assets/chat.js"></script>
   </body>
 </html>
