@@ -2,170 +2,118 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta
-      name="viewport"
-      content="width=device-width,initial-scale=1,viewport-fit=cover"
-    />
     <title>Keilani Brain — Live</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <link rel="icon" href="/favicon.ico" />
     <style>
-      :root {
-        color-scheme: dark;
-      }
+      html,
       body {
-        margin: 0;
+        background: #0b0f14;
+        color: #e7edf3;
         font-family:
+          Inter,
           system-ui,
-          -apple-system,
           Segoe UI,
-          Roboto,
-          Helvetica,
           Arial,
-          "Apple Color Emoji",
-          "Segoe UI Emoji";
-        background: #0b0d10;
-        color: #e7e9ee;
+          sans-serif;
       }
-      .wrap {
-        max-width: 1100px;
+      .box {
+        max-width: 960px;
         margin: 32px auto;
-        padding: 0 16px;
+        padding: 16px;
+        border: 1px solid #22303c;
+        border-radius: 12px;
+        background: #111823;
       }
-      h1 {
-        font-size: 28px;
-        margin: 0 0 20px;
-      }
-      .card {
-        background: #12151a;
-        border: 1px solid #202531;
-        border-radius: 14px;
-        padding: 18px;
-        margin: 14px 0;
+      textarea {
+        width: 100%;
+        min-height: 160px;
+        background: #0e1520;
+        border: 1px solid #22303c;
+        color: #e7edf3;
+        border-radius: 10px;
+        padding: 12px;
+        resize: vertical;
       }
       .row {
         display: flex;
         gap: 12px;
         align-items: center;
+        margin-top: 12px;
         flex-wrap: wrap;
       }
-      textarea {
-        width: 100%;
-        min-height: 140px;
-        resize: vertical;
-        background: #0f1217;
-        color: #e7e9ee;
-        border: 1px solid #222935;
-        border-radius: 10px;
-        padding: 12px;
-        font-size: 15px;
-      }
-      select,
-      button,
-      input[type="range"] {
-        background: #151a22;
-        color: #e7e9ee;
-        border: 1px solid #263046;
-        border-radius: 10px;
-        padding: 10px 12px;
-        font-size: 14px;
-      }
-      button.primary {
-        background: #1e8fff;
-        border-color: #1e8fff;
+      button {
+        background: #2563eb;
         color: #fff;
+        border: 0;
+        border-radius: 10px;
+        padding: 10px 16px;
+        cursor: pointer;
       }
-      button.green {
-        background: #1f8f5b;
-        border-color: #1f8f5b;
-        color: #fff;
+      button.secondary {
+        background: #334155;
       }
-      button:disabled {
-        opacity: 0.6;
-        cursor: not-allowed;
+      select {
+        background: #0e1520;
+        border: 1px solid #22303c;
+        color: #e7edf3;
+        border-radius: 10px;
+        padding: 8px;
       }
       .pill {
-        padding: 4px 10px;
-        border-radius: 999px;
-        background: #0f1217;
-        border: 1px solid #222935;
-      }
-      .label {
-        opacity: 0.75;
         font-size: 12px;
+        padding: 4px 8px;
+        border-radius: 999px;
+        background: #0e1520;
+        border: 1px solid #22303c;
       }
-      .reply {
-        min-height: 110px;
-        white-space: pre-wrap;
-        line-height: 1.45;
-        font-size: 15px;
-        background: #0f1217;
-        border: 1px solid #222935;
-        border-radius: 10px;
+      .panel {
         padding: 12px;
-      }
-      audio {
-        width: 100%;
-        margin-top: 8px;
+        background: #0e1520;
+        border: 1px solid #22303c;
+        border-radius: 10px;
+        min-height: 80px;
       }
       .muted {
         opacity: 0.75;
-        font-size: 13px;
       }
     </style>
   </head>
   <body>
-    <div class="wrap">
-      <h1>Keilani Brain — Live</h1>
+    <div class="box">
+      <div class="row" style="justify-content: space-between">
+        <h2 style="margin: 0">Keilani Brain — Live</h2>
+        <span id="recState" class="pill">idle</span>
+      </div>
 
-      <!-- Message composer -->
-      <div class="card">
-        <div class="row" style="justify-content: space-between">
-          <div class="label">Message to Keilani</div>
-          <div class="pill"><span id="recState">idle</span></div>
-        </div>
-        <textarea id="textIn" placeholder="Say hi…"></textarea>
+      <textarea id="textIn" placeholder="Say hi…"></textarea>
 
-        <div class="row" style="margin-top: 12px">
-          <label class="label" for="voiceSelect">Voice</label>
-          <select id="voiceSelect" title="ElevenLabs voice id">
-            <!-- keep default empty; page can populate dynamically if you want -->
+      <div class="row">
+        <label
+          >Voice
+          <select id="voiceSelect">
             <option value="">(default)</option>
           </select>
+        </label>
 
-          <button id="sendBtn" class="primary">Send</button>
-          <button id="speakBtn">Speak Reply</button>
-
-          <!-- Push-to-talk (hold) -->
-          <button id="recBtn" class="green" title="Hold to talk">
-            Hold to talk
-          </button>
-        </div>
+        <button id="sendBtn">Send</button>
+        <button id="speakBtn" class="secondary">Speak Reply</button>
+        <button id="recBtn" class="secondary">Hold to talk</button>
       </div>
 
-      <!-- Last transcript -->
-      <div class="card">
-        <div class="label">Last transcript</div>
-        <div id="transcript" class="reply" aria-live="polite"></div>
-      </div>
+      <h4 style="margin: 16px 0 8px">Last transcript</h4>
+      <div id="transcript" class="panel muted"></div>
 
-      <!-- Assistant reply -->
-      <div class="card">
-        <div class="label">Reply</div>
-        <div id="reply" class="reply" aria-live="polite"></div>
+      <h4 style="margin: 16px 0 8px">Reply</h4>
+      <div id="reply" class="panel"></div>
 
-        <audio id="ttsPlayer" controls></audio>
-        <div class="muted">
-          Tip: adjust your system output if you don’t hear anything.
-        </div>
-      </div>
-
-      <!-- Optional: avatar feed for lipsync / captions -->
-      <div class="card">
-        <div class="label">Avatar feed (optional)</div>
-        <div id="avatarFeed" class="reply" style="min-height: 60px"></div>
-      </div>
+      <audio
+        id="ttsPlayer"
+        controls
+        style="width: 100%; margin-top: 12px"
+      ></audio>
     </div>
 
-    <!-- Load behavior -->
     <script src="/assets/chat.js" defer></script>
   </body>
 </html>

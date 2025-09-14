@@ -62,6 +62,14 @@ for = "/assets/*.js"
   [headers.values]
   Content-Type = "application/javascript"
 
+[[headers]]
+  for = "/api/chat-stream"
+  [headers.values]
+  Cache-Control = "no-cache, no-transform"
+  Access-Control-Allow-Origin = "https://api.keilani.ai"
+  Access-Control-Allow-Methods = "POST, OPTIONS"
+  Access-Control-Allow-Headers = "Content-Type, Authorization, X-Requested-With"
+  
 # Global headers
 [[headers]]
 for = "/*"
