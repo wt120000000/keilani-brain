@@ -2,12 +2,11 @@
 
 const $ = (id) => document.getElementById(id);
 
-// Map to older IDs if present (backward compat)
-function bind(id, fallbackIds = []) {
-  return $(id) || fallbackIds.map($).find(Boolean) || null;
+// Back-compat: look for old IDs if new ones aren’t present
+function bind(id, fallbacks = []) {
+  return $(id) || fallbacks.map($).find(Boolean) || null;
 }
 
-// --- Elements (new IDs, with fallbacks to your earlier page) ---
 const elTextIn     = bind("textIn",     ["textIn", "message"]);
 const elSendBtn    = bind("sendBtn",    ["sendText"]);
 const elSpeakBtn   = bind("speakBtn",   ["speakReply"]);
@@ -19,33 +18,24 @@ const elTranscript = bind("transcript", ["transcript"]);
 const elAudio      = bind("ttsPlayer",  ["ttsPlayer"]);
 const elAvatar     = bind("avatarFeed", ["avatarFeed"]);
 
-// ----------------------------- Globals -----------------------------
-let currentAbort = null;
-let micStream = null;
-let mediaRecorder = null;
-let mediaChunks = [];
-let isRecording = false;
-
 if (elAudio) elAudio.loop = false;
 
-const TTS_MAX_QUEUE = 6;
-let ttsQueue = [];
+// --------------- TTS queue (ElevenLabs) ---------------
 let speaking = false;
+let ttsQueue = [];
 let ttsAbort = null;
 const spokenSet = new Set();
+const TTS_MAX_QUEUE = 6;
 
-function hash(str) {
+function hash(s) {
   let h = 2166136261 >>> 0;
-  for (let i = 0; i < str.length; i++) {
-    h ^= str.charCodeAt(i);
-    h = Math.imul(h, 16777619);
-  }
+  for (let i = 0; i < s.length; i++) { h ^= s.charCodeAt(i); h = Math.imul(h, 16777619); }
   return (h >>> 0).toString(36);
 }
 function resetSpoken() { if (spokenSet.size > 200) spokenSet.clear(); }
 
-function clearTTS(reason = "user") {
-  try { if (ttsAbort) ttsAbort.abort(); } catch {}
+function clearTTS() {
+  try { ttsAbort?.abort(); } catch {}
   ttsAbort = null;
   speaking = false;
   ttsQueue = [];
@@ -58,6 +48,10 @@ function clearTTS(reason = "user") {
       elAudio.load();
     } catch {}
   }
+}
+
+function getSelectedVoiceId() {
+  return elVoiceSel?.value || ""; // empty -> default voice on server
 }
 
 async function playNext() {
@@ -74,8 +68,8 @@ async function playNext() {
       body: JSON.stringify({ text, voiceId }),
       signal: ttsAbort.signal,
     });
-    if (!res.ok) throw new Error(`tts http ${res.status}`);
 
+    if (!res.ok) throw new Error(`tts http ${res.status}`);
     const blob = await res.blob();
     const url = URL.createObjectURL(blob);
 
@@ -95,7 +89,7 @@ async function playNext() {
 
     elAudio.src = url;
     await elAudio.play().catch(() => {});
-  } catch {
+  } catch (e) {
     speaking = false;
     ttsAbort = null;
     playNext();
@@ -103,26 +97,25 @@ async function playNext() {
 }
 
 function enqueueTTS(text, voiceId) {
-  const sentence = (text || "").trim();
-  if (!sentence) return;
-  const key = hash(sentence);
-  if (spokenSet.has(key)) return;
-  spokenSet.add(key);
+  const trimmed = (text || "").trim();
+  if (!trimmed) return;
+  const sig = hash(trimmed);
+  if (spokenSet.has(sig)) return; // avoid echo/loop
+  spokenSet.add(sig);
 
   if (ttsQueue.length >= TTS_MAX_QUEUE) ttsQueue.shift();
-  ttsQueue.push({ text: sentence, voiceId });
+  ttsQueue.push({ text: trimmed, voiceId });
   playNext();
 }
-function cancelSpeech() { clearTTS("interrupt"); }
 
-function feedAvatar(text) {
-  if (elAvatar) elAvatar.textContent = (text || "").slice(0, 1200);
-}
+function cancelSpeech() { clearTTS(); }
+function feedAvatar(text) { if (elAvatar) elAvatar.textContent = (text || "").slice(0, 1200); }
 
-// --------------------------- Chat Streaming ---------------------------
+// --------------- Chat streaming (SSE) ---------------
 const SENTENCE_BOUNDARY = /[.!?]\s$/;
+let currentAbort = null;
 
-async function streamSSE(url, body, { onOpen, onError, onPartial, onDone }) {
+async function streamSSE(url, body, { onOpen, onPartial, onDone, onError }) {
   if (currentAbort) { try { currentAbort.abort(); } catch {} }
   currentAbort = new AbortController();
 
@@ -132,33 +125,32 @@ async function streamSSE(url, body, { onOpen, onError, onPartial, onDone }) {
     body: JSON.stringify(body || {}),
     signal: currentAbort.signal,
   });
-
   if (!res.ok || !res.body) {
     const text = await res.text().catch(() => "");
     throw new Error(`chat-stream http ${res.status}: ${text?.slice(0, 200)}`);
   }
 
-  const reader = res.body.getReader();
-  const decoder = new TextDecoder();
-  let buffer = "";
   onOpen?.();
+
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
 
   for (;;) {
     const { value, done } = await reader.read();
     if (done) break;
-    buffer += decoder.decode(value, { stream: true });
+    buf += dec.decode(value, { stream: true });
 
     let idx;
-    while ((idx = buffer.indexOf("\n\n")) >= 0) {
-      const raw = buffer.slice(0, idx);
-      buffer = buffer.slice(idx + 2);
+    while ((idx = buf.indexOf("\n\n")) >= 0) {
+      const raw = buf.slice(0, idx);
+      buf = buf.slice(idx + 2);
 
-      const lines = raw.split("\n");
       let event = "message";
       let data = "";
-      for (const ln of lines) {
-        if (ln.startsWith("event:")) event = ln.slice(6).trim();
-        else if (ln.startsWith("data:")) data += ln.slice(5).trim();
+      for (const line of raw.split("\n")) {
+        if (line.startsWith("event:")) event = line.slice(6).trim();
+        else if (line.startsWith("data:")) data += line.slice(5).trim();
       }
 
       if (event === "error") {
@@ -170,8 +162,8 @@ async function streamSSE(url, body, { onOpen, onError, onPartial, onDone }) {
 
       try {
         const j = JSON.parse(data);
-        const chunk = j?.choices?.[0]?.delta?.content ?? "";
-        if (chunk) onPartial?.(chunk);
+        const delta = j?.choices?.[0]?.delta?.content ?? "";
+        if (delta) onPartial?.(delta);
       } catch {}
     }
   }
@@ -181,12 +173,12 @@ async function chatStream(userText) {
   cancelSpeech();
   feedAvatar("");
   if (elReply) elReply.textContent = "";
-  let live = "";
 
   const voiceId = getSelectedVoiceId();
+  let live = "";
 
-  function handlePartial(delta) {
-    live += delta;
+  const onPartial = (d) => {
+    live += d;
     if (elReply) elReply.textContent = live;
     feedAvatar(live);
 
@@ -194,23 +186,17 @@ async function chatStream(userText) {
       enqueueTTS(live.trim(), voiceId);
       live = "";
     }
-  }
-  function handleDone() {
+  };
+  const onDone = () => {
     const tail = live.trim();
     if (tail) enqueueTTS(tail, voiceId);
-  }
-  function handleError(e) {
-    const msg = e?.error || e?.text || "stream error";
-    if (elReply) elReply.textContent = `⚠ ${msg}`;
-  }
+  };
+  const onError = (e) => {
+    if (elReply) elReply.textContent = `⚠ ${e?.error || e?.text || "stream error"}`;
+  };
 
   try {
-    await streamSSE("/api/chat-stream", { message: userText }, {
-      onOpen() {},
-      onPartial: handlePartial,
-      onDone: handleDone,
-      onError: handleError,
-    });
+    await streamSSE("/api/chat-stream", { message: userText }, { onPartial, onDone, onError });
   } catch (err) {
     if (elReply) elReply.textContent = `⚠ ${String(err).slice(0, 240)}`;
   } finally {
@@ -218,67 +204,15 @@ async function chatStream(userText) {
   }
 }
 
-// ------------------------------- STT --------------------------------
-async function startRecording() {
-  cancelSpeech();
-  if (isRecording) return;
+// --------------- STT (push-to-talk) ---------------
+let micStream = null;
+let mediaRecorder = null;
+let mediaChunks = [];
+let recording = false;
+let stoppedOnce = false;
 
-  try {
-    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  } catch {
-    if (elRecState) elRecState.textContent = "mic denied";
-    return;
-  }
+function setRecState(s) { if (elRecState) elRecState.textContent = s; }
 
-  if (elRecState) elRecState.textContent = "recording…";
-  mediaChunks = [];
-  mediaRecorder = new MediaRecorder(micStream, { mimeType: "audio/webm" });
-  isRecording = true;
-
-  mediaRecorder.ondataavailable = (e) => {
-    if (e.data && e.data.size > 0) mediaChunks.push(e.data);
-  };
-
-  mediaRecorder.onstop = async () => {
-    isRecording = false;
-    if (elRecState) elRecState.textContent = "processing…";
-    try {
-      const blob = new Blob(mediaChunks, { type: "audio/webm" });
-      const b64 = await blobToBase64(blob);
-
-      const sttRes = await fetch("/api/stt", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ audioBase64: b64 }),
-      });
-
-      if (!sttRes.ok) throw new Error(await sttRes.text());
-      const j = await sttRes.json();
-      const text = (j.transcript || "").trim();
-      if (elTranscript) elTranscript.textContent = text || "(no speech)";
-
-      if (text) await chatStream(text);
-      else if (elRecState) elRecState.textContent = "idle";
-    } catch {
-      if (elTranscript) elTranscript.textContent = "";
-      if (elReply) elReply.textContent = "Couldn’t transcribe. Try again.";
-      if (elRecState) elRecState.textContent = "idle";
-    } finally {
-      try { micStream.getTracks().forEach(t => t.stop()); } catch {}
-      micStream = null;
-      mediaRecorder = null;
-      mediaChunks = [];
-    }
-  };
-
-  mediaRecorder.start(150);
-}
-function stopRecording() {
-  if (mediaRecorder && isRecording) {
-    try { mediaRecorder.stop(); } catch {}
-  }
-  if (elRecState) elRecState.textContent = "idle";
-}
 function blobToBase64(blob) {
   return new Promise((resolve, reject) => {
     const r = new FileReader();
@@ -288,23 +222,86 @@ function blobToBase64(blob) {
   });
 }
 
-// ----------------------------- UI bindings -----------------------------
-function getSelectedVoiceId() { return elVoiceSel?.value || ""; }
-
-elSendBtn && elSendBtn.addEventListener("click", async () => {
+async function startRecording() {
   cancelSpeech();
+  if (recording) return;
+
+  try {
+    micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  } catch {
+    setRecState("mic denied");
+    return;
+  }
+
+  setRecState("recording…");
+  recording = true;
+  stoppedOnce = false;
+  mediaChunks = [];
+
+  // webm/opus works well with Whisper v1
+  mediaRecorder = new MediaRecorder(micStream, { mimeType: "audio/webm" });
+
+  mediaRecorder.ondataavailable = (e) => {
+    if (e.data && e.data.size > 0) mediaChunks.push(e.data);
+  };
+
+  mediaRecorder.onstop = async () => {
+    if (stoppedOnce) return; // guard against double-fires
+    stoppedOnce = true;
+    recording = false;
+
+    try {
+      setRecState("processing…");
+
+      if (!mediaChunks.length) throw new Error("no audio captured");
+      const blob = new Blob(mediaChunks, { type: "audio/webm" });
+      const b64 = await blobToBase64(blob); // dataURL -> we strip header in function
+
+      const r = await fetch("/api/stt", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ audioBase64: `data:audio/webm;base64,${b64}` }),
+      });
+
+      const text = await r.text();
+      if (!r.ok) throw new Error(text);
+      let j = {};
+      try { j = JSON.parse(text); } catch {}
+      const transcript = (j.transcript || "").trim();
+      if (elTranscript) elTranscript.textContent = transcript || "(no speech)";
+
+      if (transcript) await chatStream(transcript);
+    } catch (e) {
+      if (elReply) elReply.textContent = "Couldn’t transcribe. Try again.";
+    } finally {
+      setRecState("idle");
+      try { micStream?.getTracks()?.forEach(t => t.stop()); } catch {}
+      micStream = null;
+      mediaRecorder = null;
+      mediaChunks = [];
+    }
+  };
+
+  mediaRecorder.start(150);
+}
+
+function stopRecording() {
+  if (!recording) return;
+  try { mediaRecorder?.stop(); } catch {}
+  setRecState("idle");
+}
+
+// --------------- UI wiring ---------------
+elSendBtn?.addEventListener("click", async () => {
   const text = (elTextIn?.value || "").trim();
   if (!text) return;
   elTextIn.value = "";
   await chatStream(text);
 });
 
-elSpeakBtn && elSpeakBtn.addEventListener("click", () => {
+elSpeakBtn?.addEventListener("click", () => {
   const text = (elReply?.textContent || "").trim();
-  if (text) {
-    cancelSpeech();
-    enqueueTTS(text, getSelectedVoiceId());
-  }
+  if (text) { cancelSpeech(); enqueueTTS(text, getSelectedVoiceId()); }
 });
 
 if (elRecBtn) {
@@ -315,12 +312,12 @@ if (elRecBtn) {
   elRecBtn.addEventListener("touchend", (e) => { e.preventDefault(); stopRecording(); }, { passive: false });
 }
 
-elTextIn && elTextIn.addEventListener("focus", cancelSpeech);
-elTextIn && elTextIn.addEventListener("input", () => {
-  if ((elTextIn.value || "").trim().length > 0) cancelSpeech();
+elTextIn?.addEventListener("focus", cancelSpeech);
+elTextIn?.addEventListener("input", () => {
+  if ((elTextIn.value || "").trim()) cancelSpeech();
 });
 
 window.addEventListener("beforeunload", () => {
   try { currentAbort?.abort(); } catch {}
-  clearTTS("unload");
+  cancelSpeech();
 });
