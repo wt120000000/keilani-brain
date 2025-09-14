@@ -9,7 +9,7 @@
 /* ------------------------------ DOM helpers ------------------------------ */
 const $ = (id) => document.getElementById(id);
 
-/* Required elements in index.html:
+/* Expected elements in index.html:
   <textarea id="textIn"></textarea>
   <button   id="sendBtn"></button>
   <button   id="speakBtn"></button>
@@ -126,7 +126,9 @@ function cancelSpeech() { clearTTS("interrupt"); }
 
 /* ------------------------------ Avatar hook ------------------------------ */
 function feedAvatar(text) {
-  $("avatarFeed")?.textContent = (text || "").slice(0, 1200);
+  // Optional chaining can't be used on assignment. Do a safe lookup first.
+  const el = $("avatarFeed");
+  if (el) el.textContent = (text || "").slice(0, 1200);
 }
 
 /* ----------------------------- Chat streaming ---------------------------- */
