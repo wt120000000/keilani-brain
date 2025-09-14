@@ -1,27 +1,38 @@
 // public/assets/chat.js
-// Stream text replies via SSE and speak them with ElevenLabs (fallback to browser TTS).
+// Single-voice streaming chat with ElevenLabs TTS (fallback to browser TTS optional)
 
-/* ----------------------- DOM shortcuts & shared state ---------------------- */
 const $ = (id) => document.getElementById(id);
 
+/* ============================================================================
+   CONFIG
+============================================================================ */
+const PREVIEW_BROWSER_TTS = false; // set true only if you want local preview TTS
+const MIN_RECORD_MS = 700;         // minimum push-to-talk duration before STT
+const STT_MIN_BYTES = 9500;        // tiny blobs are usually noise
+
+/* ============================================================================
+   GLOBAL STATE
+============================================================================ */
 const state = {
   lastReply: "",
-  voiceId: null,
   queueCursor: 0,
-  playbackQueue: [],         // [{id, text, status}]
+  playbackQueue: [],      // [{id, text, status}]
   interrupted: false,
-  streamAbort: null,
+  streamAbort: null,      // AbortController for SSE fetch
   mediaRecorder: null,
-  chunks: []
+  chunks: [],
+  dailyRoom: null,
+  dailyUrl: null,
+  meetingToken: null,
+  voiceId: null,
 };
-
-// Turn this OFF to avoid mixed voices. If ElevenLabs fails, we still fall back to browser TTS.
-const PREVIEW_BROWSER_TTS = false;
 
 let currentAudio = null;
 let audioUnlocked = false;
 
-/* ------------------------------ Audio unlock ------------------------------- */
+/* ============================================================================
+   AUDIO UNLOCK (mobile / autoplay)
+============================================================================ */
 async function unlockAudio() {
   if (audioUnlocked) return;
   try {
@@ -31,7 +42,9 @@ async function unlockAudio() {
       await ctx.resume();
       const buf = ctx.createBuffer(1, 1, 22050);
       const src = ctx.createBufferSource();
-      src.buffer = buf; src.connect(ctx.destination); src.start(0);
+      src.buffer = buf;
+      src.connect(ctx.destination);
+      src.start(0);
     }
   } catch {}
   audioUnlocked = true;
@@ -39,19 +52,39 @@ async function unlockAudio() {
 document.addEventListener("click", unlockAudio, { once: true });
 document.addEventListener("touchstart", unlockAudio, { once: true });
 
-/* --------------------------- Interrupt / Stop all -------------------------- */
+/* ============================================================================
+   BROWSER TTS (optional fallback) + CANCELLATION
+============================================================================ */
+function speakBrowser(text) {
+  if (!PREVIEW_BROWSER_TTS) return; // hard-off by default
+  try {
+    const u = new SpeechSynthesisUtterance(text);
+    u.rate = 1.05;
+    u.pitch = 1.0;
+    u.volume = 1.0;
+    speechSynthesis.speak(u);
+  } catch {}
+}
+function cancelBrowserTTS() {
+  try { window.speechSynthesis.cancel(); } catch {}
+}
+
+/* ============================================================================
+   HARD STOP / INTERRUPT
+============================================================================ */
 function cancelPlayback() {
-  // Stop queue & streaming TTS
+  // stop queue & SSE
   state.playbackQueue = [];
   state.queueCursor = 0;
   state.interrupted = true;
+
   try { if (state.streamAbort) state.streamAbort.abort(); } catch {}
   state.streamAbort = null;
 
-  // Stop Web Speech
-  try { window.speechSynthesis.cancel(); } catch {}
+  // stop browser TTS
+  cancelBrowserTTS();
 
-  // Stop <audio>
+  // stop audio tags
   try {
     if (currentAudio) {
       currentAudio.pause();
@@ -64,38 +97,46 @@ function cancelPlayback() {
   if (p) { try { p.pause(); p.src = ""; p.load?.(); } catch {} }
 }
 document.addEventListener("keydown", (e) => { if (e.key === "Escape") cancelPlayback(); });
-const stopBtn = $("stopSpeak"); if (stopBtn) stopBtn.onclick = cancelPlayback;
+$("stopSpeak")?.addEventListener("click", cancelPlayback);
 
-/* --------------------------- Small UI conveniences ------------------------- */
+/* ============================================================================
+   UI HELPERS
+============================================================================ */
 function setBusy(btn, busy, idleText, busyText) {
   if (!btn) return;
   btn.disabled = !!busy;
   btn.textContent = busy ? busyText : idleText;
 }
 
-/* --------------------------- Voice select (top 5) -------------------------- */
+/* ============================================================================
+   ELEVENLABS VOICES DROPDOWN
+============================================================================ */
 (async function initVoices() {
   const sel = $("voiceSelect");
   if (!sel) return;
-  sel.disabled = true; sel.innerHTML = `<option>Loading voices…</option>`;
+  sel.disabled = true;
+  sel.innerHTML = `<option>Loading voices…</option>`;
   const saved = localStorage.getItem("voiceId") || "";
 
   try {
     const r = await fetch("/api/voices");
     if (!r.ok) throw new Error(await r.text());
     const { voices } = await r.json();
+
     sel.innerHTML = "";
-    (voices || []).slice(0,5).forEach(v => {
+    (voices || []).slice(0, 5).forEach((v) => {
       const opt = document.createElement("option");
       opt.value = v.voice_id;
-      opt.textContent = `${v.name} (${v.voice_id.slice(0,6)}…)`;
+      opt.textContent = `${v.name} (${v.voice_id.slice(0, 6)}…)`;
       sel.appendChild(opt);
     });
+
     if (!sel.options.length) {
       sel.innerHTML = `<option value="">(no voices)</option>`;
-      sel.disabled = true; state.voiceId = null;
+      sel.disabled = true;
+      state.voiceId = null;
     } else {
-      if (saved && [...sel.options].some(o => o.value === saved)) sel.value = saved;
+      if (saved && [...sel.options].some((o) => o.value === saved)) sel.value = saved;
       state.voiceId = sel.value || null;
       sel.disabled = false;
       sel.onchange = () => {
@@ -111,48 +152,31 @@ function setBusy(btn, busy, idleText, busyText) {
   }
 })();
 
-/* ---------------------------- Browser TTS (fast) --------------------------- */
-function speakBrowser(text) {
-  try {
-    const u = new SpeechSynthesisUtterance(text);
-    u.rate = 1.05; u.pitch = 1.0; u.volume = 1.0;
-    speechSynthesis.speak(u);
-  } catch {}
-}
-
-/* ------------------------- Sentence chunking utils ------------------------- */
+/* ============================================================================
+   SENTENCE CHUNKING
+============================================================================ */
 function extractNewSentences(fullText, cursor) {
   const re = /[^.!?]+[.!?]+(\s+|$)/g;
   re.lastIndex = cursor;
-  const out = []; let m;
+  const out = [];
+  let m;
   while ((m = re.exec(fullText))) out.push(m[0].trim());
   return { sentences: out, nextCursor: re.lastIndex };
 }
 async function enqueueSentences(text) {
   const { sentences, nextCursor } = extractNewSentences(text, state.queueCursor);
   if (sentences.length) {
-    for (const s of sentences) state.playbackQueue.push({ id: crypto.randomUUID(), text: s, status: "queued" });
+    for (const s of sentences) {
+      state.playbackQueue.push({ id: crypto.randomUUID(), text: s, status: "queued" });
+    }
     processQueue();
   }
   state.queueCursor = nextCursor;
 }
 
-/* ------------------------------- TTS helpers ------------------------------- */
-async function playAudioUrl(url) {
-  const el = $("ttsPlayer");
-  try {
-    const a = new Audio();
-    currentAudio = a;
-    a.src = url; a.autoplay = true;
-    a.onended = () => URL.revokeObjectURL(url);
-    await a.play().catch(() => {});   // if blocked, visible control below can play
-    el.src = url;                     // mirror to visible player
-  } catch {
-    el.src = url;
-  }
-}
-
-/** POST /api/tts and return a blob URL (or "" on failure).  */
+/* ============================================================================
+   TTS HELPERS (ElevenLabs first; serialize playback)
+============================================================================ */
 async function ttsUrl(text) {
   try {
     const body = { text };
@@ -164,12 +188,10 @@ async function ttsUrl(text) {
       body: JSON.stringify(body),
     });
     if (!r.ok) {
-      // Common failure you reported: 404 when function/redirect not live
       const msg = await r.text().catch(() => "");
-      console.warn("TTS HTTP", r.status, msg.slice(0,200));
+      console.warn("TTS HTTP", r.status, msg.slice(0, 200));
       return "";
     }
-    // content-type should be audio/mpeg
     const ct = r.headers.get("content-type") || "";
     if (!ct.includes("audio")) {
       console.warn("TTS content-type unexpected:", ct);
@@ -183,13 +205,33 @@ async function ttsUrl(text) {
   }
 }
 
-/* --------- Streaming ElevenLabs via MSE (best) with fallback to MP3 -------- */
-async function playTTSStreamMSE(text) {
-  // If you haven't wired a streaming TTS endpoint yet, skip to MP3 fallback:
-  throw new Error("streaming-tts-not-configured");
+async function playAudioUrl(url) {
+  return new Promise((resolve) => {
+    cancelBrowserTTS();
+
+    const visible = $("ttsPlayer");
+    const a = new Audio();
+    currentAudio = a;
+    a.src = url;
+    a.preload = "auto";
+
+    const cleanup = () => {
+      try { URL.revokeObjectURL(url); } catch {}
+      resolve();
+    };
+    a.onended = cleanup;
+    a.onerror = cleanup;
+
+    if (visible) visible.src = url;
+
+    a.play().catch(() => {
+      // Autoplay blocked: try the visible player
+      try { visible?.play?.(); } catch {}
+      // resolve on ended/error
+    });
+  });
 }
 
-/* --------------------------- Playback queue driver ------------------------- */
 async function processQueue() {
   if (state.interrupted) return;
   while (state.playbackQueue.length) {
@@ -198,154 +240,172 @@ async function processQueue() {
     if (!item) break;
     item.status = "speaking";
 
-    // Try ElevenLabs first (streaming not wired yet, so REST MP3)
+    // ElevenLabs first
     let url = "";
     try {
-      // If/when MSE streaming is implemented, call it here first.
-      // await playTTSStreamMSE(item.text);
       url = await ttsUrl(item.text);
     } catch (e) {
       console.warn("TTS attempt failed:", e);
       url = "";
     }
-
     if (state.interrupted) return;
 
     if (url) {
-      // We got ElevenLabs audio -> make sure browser TTS is not also speaking
-      try { window.speechSynthesis.cancel(); } catch {}
-      await playAudioUrl(url);
+      cancelBrowserTTS();
+      await playAudioUrl(url); // serialize — wait until clip ends
     } else {
-      // ElevenLabs not available; optionally fall back to browser TTS
-      if (PREVIEW_BROWSER_TTS) speakBrowser(item.text);
+      // ElevenLabs unavailable; optional local fallback
+      speakBrowser(item.text);
     }
 
     item.status = "done";
   }
 }
 
-/* --------------------------- Streaming chat (SSE) -------------------------- */
+/* ============================================================================
+   STREAMING CHAT (SSE → live delta → sentence enqueue)
+============================================================================ */
 async function chatStream(message, onDelta) {
-  try {
-    const res = await fetch("/api/chat-stream", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message }),
-    });
-    if (!res.ok) {
-      const txt = await res.text().catch(() => "");
-      console.error("chat-stream HTTP error", res.status, txt);
-      throw new Error(`chat-stream HTTP ${res.status}`);
-    }
-    if (!res.body) throw new Error("no-body");
+  const ac = new AbortController();
+  state.streamAbort = ac;
 
-    const reader = res.body.getReader();
-    const dec = new TextDecoder();
-    let buf = "";
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buf += dec.decode(value, { stream: true });
-      const frames = buf.split("\n\n");
-      buf = frames.pop() || "";
-      for (const f of frames) {
-        if (!f.startsWith("data:")) continue;
-        const json = f.slice(5).trim();
-        if (!json) continue;
-        const msg = JSON.parse(json);
-        if (msg.type === "delta" && msg.delta) onDelta(msg.delta);
-      }
+  const res = await fetch("/api/chat-stream", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ message }),
+    signal: ac.signal,
+  });
+
+  if (!res.ok) {
+    const txt = await res.text().catch(() => "");
+    throw new Error(`chat-stream HTTP ${res.status} ${txt?.slice?.(0, 120) || ""}`);
+  }
+  if (!res.body) throw new Error("No stream body");
+
+  const reader = res.body.getReader();
+  const dec = new TextDecoder();
+  let buf = "";
+
+  while (true) {
+    const { value, done } = await reader.read();
+    if (done) break;
+    buf += dec.decode(value, { stream: true });
+
+    const frames = buf.split("\n\n");
+    buf = frames.pop() || "";
+
+    for (const f of frames) {
+      // format: "data: {json}"
+      const line = f.trim();
+      if (!line.startsWith("data:")) continue;
+      const raw = line.slice(5).trim();
+      if (!raw) continue;
+
+      let json = null;
+      try { json = JSON.parse(raw); } catch { continue; }
+
+      // OpenAI standard SSE shape
+      const text =
+        json?.choices?.[0]?.delta?.content ??
+        json?.delta ??
+        json?.text ??
+        "";
+
+      if (typeof text === "string" && text.length) onDelta(text);
     }
-  } catch (e) {
-    // Fallback to non-streaming so UI still works
-    const r = await fetch("/api/chat", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ message }),
-    });
-    if (!r.ok) throw new Error(`chat fallback ${r.status}`);
-    const j = await r.json();
-    onDelta(j.reply || "");
   }
 }
 
-/* ------------------- Stream → sentence enqueue → speak --------------------- */
+/* ============================================================================
+   STREAM DRIVER: userText -> SSE -> UI + TTS enqueue
+============================================================================ */
 async function chatStreamToTTS(userText) {
   let full = "";
-  await chatStream(userText, (delta) => {
-    if (state.interrupted) return;
-    full += delta;
-    $("reply").textContent = full;
-    state.lastReply = full;
-    enqueueSentences(full);
-  });
-  // flush last fragment (no punctuation)
-  const tail = full.slice(state.queueCursor).trim();
-  if (tail) {
-    state.playbackQueue.push({ id: crypto.randomUUID(), text: tail, status: "queued" });
-    processQueue();
-    state.queueCursor = full.length;
+  try {
+    await chatStream(userText, (delta) => {
+      if (state.interrupted) return;
+      full += delta;
+      $("reply").textContent = full;
+      state.lastReply = full;
+      enqueueSentences(full);
+    });
+  } finally {
+    // flush remainder if no trailing punctuation
+    const tail = full.slice(state.queueCursor).trim();
+    if (tail) {
+      state.playbackQueue.push({ id: crypto.randomUUID(), text: tail, status: "queued" });
+      processQueue();
+      state.queueCursor = full.length;
+    }
+    state.streamAbort = null;
   }
 }
 
-/* --------------------------------- Send ----------------------------------- */
-$("sendText").onclick = async () => {
+/* ============================================================================
+   SEND (text)
+============================================================================ */
+$("sendText")?.addEventListener("click", async () => {
   const input = $("textIn");
-  const text = (input.value || "").trim();
+  const text = (input?.value || "").trim();
   if (!text) return;
 
   cancelPlayback();
+  cancelBrowserTTS();
   state.interrupted = false;
   state.queueCursor = 0;
   $("reply").textContent = "";
   input.value = "";
 
-  try { await chatStreamToTTS(text); }
-  catch (e) { console.error(e); $("reply").textContent = "⚠️ " + (e.message || "stream failed"); }
-};
+  try {
+    await chatStreamToTTS(text);
+  } catch (e) {
+    console.error(e);
+    $("reply").textContent = "⚠️ " + (e.message || "stream failed");
+  }
+});
 
-$("speakReply").onclick = async () => {
-  const text = state.lastReply.trim();
+/* ============================================================================
+   SPEAK REPLY (re-synthesize full reply)
+============================================================================ */
+$("speakReply")?.addEventListener("click", async () => {
+  const text = (state.lastReply || "").trim();
   if (!text) return;
+
   cancelPlayback();
+  cancelBrowserTTS();
   state.interrupted = false;
+
   const btn = $("speakReply");
   setBusy(btn, true, "Speak Reply", "Speaking…");
   try {
     let url = "";
-    try {
-      url = await ttsUrl(text);
-    } catch (e) {
-      console.warn("TTS (speakReply) failed:", e);
-      url = "";
-    }
-
+    try { url = await ttsUrl(text); } catch (e) { console.warn("TTS (speakReply) failed:", e); }
     if (url) {
-      try { window.speechSynthesis.cancel(); } catch {}
+      cancelBrowserTTS();
       await playAudioUrl(url);
-    } else if (PREVIEW_BROWSER_TTS) {
+    } else {
       speakBrowser(text);
     }
   } finally {
     setBusy(btn, false, "Speak Reply", "Speaking…");
   }
-};
+});
 
-/* ----------------------------- Push-to-talk (STT) -------------------------- */
+/* ============================================================================
+   PUSH-TO-TALK (record -> /api/stt -> stream & speak)
+============================================================================ */
 function pickAudioMime() {
   const list = ["audio/webm;codecs=opus", "audio/webm", "audio/ogg;codecs=opus"];
-  for (const t of list) {
-    if (window.MediaRecorder?.isTypeSupported?.(t)) return t;
-  }
+  for (const t of list) if (window.MediaRecorder?.isTypeSupported?.(t)) return t;
   return "";
 }
 
 const pttBtn = $("pttBtn");
 if (pttBtn) {
-  pttBtn.onmousedown = startRecording;
-  pttBtn.onmouseup = stopRecording;
+  pttBtn.onmousedown  = startRecording;
+  pttBtn.onmouseup    = stopRecording;
   pttBtn.ontouchstart = (e) => { e.preventDefault(); startRecording(); };
-  pttBtn.ontouchend = (e) => { e.preventDefault(); stopRecording(); };
+  pttBtn.ontouchend   = (e) => { e.preventDefault(); stopRecording(); };
 }
 
 async function startRecording() {
@@ -360,20 +420,23 @@ async function startRecording() {
   const startedAt = Date.now();
 
   state.mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size) state.chunks.push(e.data); };
+
   state.mediaRecorder.onstop = async () => {
     $("recState").textContent = "processing…";
     try {
       const blob = new Blob(state.chunks, { type: mimeType || "audio/webm" });
       const ms = Date.now() - startedAt;
-      if (ms < 600 || blob.size < 9000) {
-        $("transcript").textContent = "Hold the button and speak for ~1–2 seconds 👍";
+      if (ms < MIN_RECORD_MS || blob.size < STT_MIN_BYTES) {
+        $("transcript").textContent = "Hold to talk for ~1–2 seconds 👍";
         $("recState").textContent = "idle";
-        stream.getTracks().forEach(t => t.stop());
+        stream.getTracks().forEach((t) => t.stop());
         return;
       }
 
       const b64 = await new Promise((res) => {
-        const r = new FileReader(); r.onloadend = () => res(r.result); r.readAsDataURL(blob);
+        const r = new FileReader();
+        r.onloadend = () => res(r.result);
+        r.readAsDataURL(blob);
       });
 
       const sttR = await fetch("/api/stt", {
@@ -385,27 +448,34 @@ async function startRecording() {
         console.error("STT error:", await sttR.text());
         $("transcript").textContent = "Couldn’t transcribe. Try again.";
         $("recState").textContent = "idle";
-        stream.getTracks().forEach(t => t.stop());
+        stream.getTracks().forEach((t) => t.stop());
         return;
       }
+
       const stt = await sttR.json();
       $("transcript").textContent = stt.text || "";
 
-      if (stt.text) {
+      if ((stt.text || "").trim()) {
         cancelPlayback();
+        cancelBrowserTTS();
         state.interrupted = false;
         state.queueCursor = 0;
         $("reply").textContent = "";
-        try { await chatStreamToTTS(stt.text); }
-        catch (e) { console.error(e); $("reply").textContent = "⚠️ " + (e.message || "stream failed"); }
+        try {
+          await chatStreamToTTS(stt.text);
+        } catch (e) {
+          console.error(e);
+          $("reply").textContent = "⚠️ " + (e.message || "stream failed");
+        }
       }
     } catch (err) {
       console.error("PTT stop error:", err);
     } finally {
       $("recState").textContent = "idle";
-      try { stream.getTracks().forEach(t => t.stop()); } catch {}
+      try { stream.getTracks().forEach((t) => t.stop()); } catch {}
     }
   };
+
   state.mediaRecorder.start();
 }
 function stopRecording() {
@@ -414,7 +484,9 @@ function stopRecording() {
   }
 }
 
-/* ------------------------------ Daily (RTC) ------------------------------- */
+/* ============================================================================
+   DAILY (RTC) – simple hooks
+============================================================================ */
 $("createRoom")?.addEventListener("click", async () => {
   const r = await fetch("/api/rtc/create-room", { method: "POST" });
   if (!r.ok) { console.error("create room error", await r.text()); return; }
@@ -445,8 +517,11 @@ $("openRoom")?.addEventListener("click", async () => {
   iframe.style.border = "0"; iframe.style.borderRadius = "12px";
   mount.appendChild(iframe);
 });
-
 $("closeRoom")?.addEventListener("click", () => { $("dailyMount").innerHTML = ""; iframe = null; });
 
-/* ----------------------------- Avatar hook demo ---------------------------- */
-function feedAvatar(text) { $("avatarFeed").textContent = (text || "").slice(0, 1200); }
+/* ============================================================================
+   AVATAR FEED (optional)
+============================================================================ */
+function feedAvatar(text) {
+  $("avatarFeed")?.textContent = (text || "").slice(0, 1200);
+}
