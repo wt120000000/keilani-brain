@@ -1,43 +1,38 @@
-/* public/assets/chat.js
- * Keilani Brain — Live
- * - Push-to-talk → /api/stt
- * - Chat streaming (SSE) → /api/chat-stream
- * - ElevenLabs TTS → /api/tts
- * - Single audio element, bounded queue, de-dupe, and user interruption
- */
+/* public/assets/chat.js */
 
-/* ------------------------------ DOM helpers ------------------------------ */
 const $ = (id) => document.getElementById(id);
 
-/* Expected elements in index.html:
-  <textarea id="textIn"></textarea>
-  <button   id="sendBtn"></button>
-  <button   id="speakBtn"></button>
-  <select   id="voiceSelect"></select>
-  <div      id="reply"></div>
-  <button   id="recBtn"></button>
-  <span     id="recState"></span>
-  <div      id="transcript"></div>
-  <audio    id="ttsPlayer" controls></audio>
-  <div      id="avatarFeed"></div>   (optional)
-*/
+// Map to older IDs if present (backward compat)
+function bind(id, fallbackIds = []) {
+  return $(id) || fallbackIds.map($).find(Boolean) || null;
+}
 
-/* --------------------------- Global conversation ------------------------- */
-let currentAbort = null;           // Active SSE stream abort
-let micStream = null;              // MediaStream
-let mediaRecorder = null;          // MediaRecorder
-let mediaChunks = [];              // Collected audio chunks
+// --- Elements (new IDs, with fallbacks to your earlier page) ---
+const elTextIn     = bind("textIn",     ["textIn", "message"]);
+const elSendBtn    = bind("sendBtn",    ["sendText"]);
+const elSpeakBtn   = bind("speakBtn",   ["speakReply"]);
+const elVoiceSel   = bind("voiceSelect",["voiceSelect"]);
+const elReply      = bind("reply",      ["reply"]);
+const elRecBtn     = bind("recBtn",     ["pttBtn"]);
+const elRecState   = bind("recState",   ["recState"]);
+const elTranscript = bind("transcript", ["transcript"]);
+const elAudio      = bind("ttsPlayer",  ["ttsPlayer"]);
+const elAvatar     = bind("avatarFeed", ["avatarFeed"]);
+
+// ----------------------------- Globals -----------------------------
+let currentAbort = null;
+let micStream = null;
+let mediaRecorder = null;
+let mediaChunks = [];
 let isRecording = false;
 
-/* ----------------------------- TTS Controller ---------------------------- */
-const audioEl = $("ttsPlayer");
-if (audioEl) audioEl.loop = false;
+if (elAudio) elAudio.loop = false;
 
 const TTS_MAX_QUEUE = 6;
 let ttsQueue = [];
 let speaking = false;
 let ttsAbort = null;
-const spokenSet = new Set(); // de-dupe short-term
+const spokenSet = new Set();
 
 function hash(str) {
   let h = 2166136261 >>> 0;
@@ -54,16 +49,15 @@ function clearTTS(reason = "user") {
   ttsAbort = null;
   speaking = false;
   ttsQueue = [];
-  if (audioEl) {
+  if (elAudio) {
     try {
-      audioEl.pause();
-      audioEl.currentTime = 0;
-      if (audioEl.src) URL.revokeObjectURL(audioEl.src);
-      audioEl.removeAttribute("src");
-      audioEl.load();
+      elAudio.pause();
+      elAudio.currentTime = 0;
+      if (elAudio.src) URL.revokeObjectURL(elAudio.src);
+      elAudio.removeAttribute("src");
+      elAudio.load();
     } catch {}
   }
-  // console.debug("[tts] cleared:", reason);
 }
 
 async function playNext() {
@@ -82,29 +76,26 @@ async function playNext() {
     });
     if (!res.ok) throw new Error(`tts http ${res.status}`);
 
-    const blob = await res.blob(); // audio/mpeg
+    const blob = await res.blob();
     const url = URL.createObjectURL(blob);
 
-    audioEl.onended = () => {
+    elAudio.onended = () => {
       try { URL.revokeObjectURL(url); } catch {}
       speaking = false;
       ttsAbort = null;
       resetSpoken();
       playNext();
     };
-    audioEl.onerror = () => {
+    elAudio.onerror = () => {
       try { URL.revokeObjectURL(url); } catch {}
       speaking = false;
       ttsAbort = null;
       playNext();
     };
 
-    audioEl.src = url;
-    await audioEl.play().catch(() => {
-      // user gesture not granted; leave loaded
-    });
-  } catch (err) {
-    // console.warn("[tts] play failed:", err);
+    elAudio.src = url;
+    await elAudio.play().catch(() => {});
+  } catch {
     speaking = false;
     ttsAbort = null;
     playNext();
@@ -115,7 +106,7 @@ function enqueueTTS(text, voiceId) {
   const sentence = (text || "").trim();
   if (!sentence) return;
   const key = hash(sentence);
-  if (spokenSet.has(key)) return;        // de-dupe
+  if (spokenSet.has(key)) return;
   spokenSet.add(key);
 
   if (ttsQueue.length >= TTS_MAX_QUEUE) ttsQueue.shift();
@@ -124,20 +115,15 @@ function enqueueTTS(text, voiceId) {
 }
 function cancelSpeech() { clearTTS("interrupt"); }
 
-/* ------------------------------ Avatar hook ------------------------------ */
 function feedAvatar(text) {
-  // Optional chaining can't be used on assignment. Do a safe lookup first.
-  const el = $("avatarFeed");
-  if (el) el.textContent = (text || "").slice(0, 1200);
+  if (elAvatar) elAvatar.textContent = (text || "").slice(0, 1200);
 }
 
-/* ----------------------------- Chat streaming ---------------------------- */
-
+// --------------------------- Chat Streaming ---------------------------
 const SENTENCE_BOUNDARY = /[.!?]\s$/;
 
-// Parse SSE lines from fetch streaming response
 async function streamSSE(url, body, { onOpen, onError, onPartial, onDone }) {
-  currentAbort?.abort();
+  if (currentAbort) { try { currentAbort.abort(); } catch {} }
   currentAbort = new AbortController();
 
   const res = await fetch(url, {
@@ -152,11 +138,9 @@ async function streamSSE(url, body, { onOpen, onError, onPartial, onDone }) {
     throw new Error(`chat-stream http ${res.status}: ${text?.slice(0, 200)}`);
   }
 
-  // Consume text/event-stream manually
   const reader = res.body.getReader();
   const decoder = new TextDecoder();
   let buffer = "";
-
   onOpen?.();
 
   for (;;) {
@@ -164,13 +148,11 @@ async function streamSSE(url, body, { onOpen, onError, onPartial, onDone }) {
     if (done) break;
     buffer += decoder.decode(value, { stream: true });
 
-    // Split by event frames (double newline separates events)
     let idx;
     while ((idx = buffer.indexOf("\n\n")) >= 0) {
       const raw = buffer.slice(0, idx);
       buffer = buffer.slice(idx + 2);
 
-      // Extract event + data lines
       const lines = raw.split("\n");
       let event = "message";
       let data = "";
@@ -184,80 +166,71 @@ async function streamSSE(url, body, { onOpen, onError, onPartial, onDone }) {
         continue;
       }
       if (event === "done") { onDone?.(); continue; }
-      if (event === "open" || event === "ping") { /* keep-alive */ continue; }
+      if (event === "open" || event === "ping") continue;
 
-      // OpenAI chunks: {choices:[{delta:{content:"..."}}]}
       try {
         const j = JSON.parse(data);
         const chunk = j?.choices?.[0]?.delta?.content ?? "";
         if (chunk) onPartial?.(chunk);
-      } catch {
-        // ignore parse errors
-      }
+      } catch {}
     }
   }
 }
 
-/* Send a message, render partials, and speak sentence-by-sentence */
 async function chatStream(userText) {
-  cancelSpeech();            // stop any playing speech
-  feedAvatar("");            // reset avatar feed
-  $("reply").textContent = ""; // wipe UI
-  let live = "";             // assembled text
+  cancelSpeech();
+  feedAvatar("");
+  if (elReply) elReply.textContent = "";
+  let live = "";
 
   const voiceId = getSelectedVoiceId();
 
   function handlePartial(delta) {
     live += delta;
-    $("reply").textContent = live;
+    if (elReply) elReply.textContent = live;
     feedAvatar(live);
 
-    // speak when we hit a boundary (de-duped by TTS controller)
     if (SENTENCE_BOUNDARY.test(live)) {
       enqueueTTS(live.trim(), voiceId);
-      live = ""; // reset buffer for next sentence
+      live = "";
     }
   }
-
   function handleDone() {
-    // If we ended mid-sentence, speak the remainder once
     const tail = live.trim();
     if (tail) enqueueTTS(tail, voiceId);
   }
-
   function handleError(e) {
     const msg = e?.error || e?.text || "stream error";
-    $("reply").textContent = `⚠ ${msg}`;
+    if (elReply) elReply.textContent = `⚠ ${msg}`;
   }
 
   try {
     await streamSSE("/api/chat-stream", { message: userText }, {
-      onOpen() { /* UI could show "streaming…" */ },
+      onOpen() {},
       onPartial: handlePartial,
       onDone: handleDone,
       onError: handleError,
     });
   } catch (err) {
-    $("reply").textContent = `⚠ ${String(err).slice(0, 240)}`;
+    if (elReply) elReply.textContent = `⚠ ${String(err).slice(0, 240)}`;
   } finally {
     currentAbort = null;
   }
 }
 
-/* ------------------------------ STT (mic) -------------------------------- */
-
+// ------------------------------- STT --------------------------------
 async function startRecording() {
-  cancelSpeech(); // user is talking → stop playback
+  cancelSpeech();
   if (isRecording) return;
 
   try {
     micStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  } catch (e) {
-    $("recState").textContent = "mic denied";
+  } catch {
+    if (elRecState) elRecState.textContent = "mic denied";
     return;
   }
 
-  $("recState").textContent = "recording…";
+  if (elRecState) elRecState.textContent = "recording…";
   mediaChunks = [];
   mediaRecorder = new MediaRecorder(micStream, { mimeType: "audio/webm" });
   isRecording = true;
@@ -268,7 +241,7 @@ async function startRecording() {
 
   mediaRecorder.onstop = async () => {
     isRecording = false;
-    $("recState").textContent = "processing…";
+    if (elRecState) elRecState.textContent = "processing…";
     try {
       const blob = new Blob(mediaChunks, { type: "audio/webm" });
       const b64 = await blobToBase64(blob);
@@ -282,14 +255,14 @@ async function startRecording() {
       if (!sttRes.ok) throw new Error(await sttRes.text());
       const j = await sttRes.json();
       const text = (j.transcript || "").trim();
-      $("transcript").textContent = text || "(no speech)";
+      if (elTranscript) elTranscript.textContent = text || "(no speech)";
 
       if (text) await chatStream(text);
-      else $("recState").textContent = "idle";
-    } catch (err) {
-      $("transcript").textContent = "";
-      $("reply").textContent = "Couldn’t transcribe. Try again.";
-      $("recState").textContent = "idle";
+      else if (elRecState) elRecState.textContent = "idle";
+    } catch {
+      if (elTranscript) elTranscript.textContent = "";
+      if (elReply) elReply.textContent = "Couldn’t transcribe. Try again.";
+      if (elRecState) elRecState.textContent = "idle";
     } finally {
       try { micStream.getTracks().forEach(t => t.stop()); } catch {}
       micStream = null;
@@ -298,64 +271,55 @@ async function startRecording() {
     }
   };
 
-  mediaRecorder.start(150); // small timeslice improves onstop availability
+  mediaRecorder.start(150);
 }
-
 function stopRecording() {
   if (mediaRecorder && isRecording) {
     try { mediaRecorder.stop(); } catch {}
   }
-  $("recState").textContent = "idle";
+  if (elRecState) elRecState.textContent = "idle";
 }
-
 function blobToBase64(blob) {
   return new Promise((resolve, reject) => {
-    const reader = new FileReader();
-    reader.onloadend = () => {
-      const res = reader.result || "";
-      resolve(String(res).split(",")[1] || "");
-    };
-    reader.onerror = reject;
-    reader.readAsDataURL(blob);
+    const r = new FileReader();
+    r.onloadend = () => resolve(String(r.result || "").split(",")[1] || "");
+    r.onerror = reject;
+    r.readAsDataURL(blob);
   });
 }
 
-/* ------------------------------- UI wiring ------------------------------- */
+// ----------------------------- UI bindings -----------------------------
+function getSelectedVoiceId() { return elVoiceSel?.value || ""; }
 
-function getSelectedVoiceId() {
-  return $("voiceSelect")?.value || "";
-}
-
-$("sendBtn")?.addEventListener("click", async () => {
+elSendBtn && elSendBtn.addEventListener("click", async () => {
   cancelSpeech();
-  const text = ($("textIn")?.value || "").trim();
+  const text = (elTextIn?.value || "").trim();
   if (!text) return;
-  $("textIn").value = "";
+  elTextIn.value = "";
   await chatStream(text);
 });
 
-$("speakBtn")?.addEventListener("click", () => {
-  const text = ($("reply")?.textContent || "").trim();
+elSpeakBtn && elSpeakBtn.addEventListener("click", () => {
+  const text = (elReply?.textContent || "").trim();
   if (text) {
     cancelSpeech();
     enqueueTTS(text, getSelectedVoiceId());
   }
 });
 
-// PTT: hold to talk
-$("recBtn")?.addEventListener("mousedown", startRecording);
-$("recBtn")?.addEventListener("touchstart", (e) => { e.preventDefault(); startRecording(); }, { passive: false });
-$("recBtn")?.addEventListener("mouseup", stopRecording);
-$("recBtn")?.addEventListener("mouseleave", stopRecording);
-$("recBtn")?.addEventListener("touchend", (e) => { e.preventDefault(); stopRecording(); }, { passive: false });
+if (elRecBtn) {
+  elRecBtn.addEventListener("mousedown", startRecording);
+  elRecBtn.addEventListener("touchstart", (e) => { e.preventDefault(); startRecording(); }, { passive: false });
+  elRecBtn.addEventListener("mouseup", stopRecording);
+  elRecBtn.addEventListener("mouseleave", stopRecording);
+  elRecBtn.addEventListener("touchend", (e) => { e.preventDefault(); stopRecording(); }, { passive: false });
+}
 
-// Interrupt speech whenever user types or focuses the input
-$("textIn")?.addEventListener("focus", cancelSpeech);
-$("textIn")?.addEventListener("input", () => {
-  if (($("textIn").value || "").trim().length > 0) cancelSpeech();
+elTextIn && elTextIn.addEventListener("focus", cancelSpeech);
+elTextIn && elTextIn.addEventListener("input", () => {
+  if ((elTextIn.value || "").trim().length > 0) cancelSpeech();
 });
 
-// Cancel any active stream when navigating away
 window.addEventListener("beforeunload", () => {
   try { currentAbort?.abort(); } catch {}
   clearTTS("unload");
