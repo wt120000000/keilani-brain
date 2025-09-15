@@ -1,6 +1,7 @@
 /* public/assets/chat.js
    Keilani Brain — Live (text + push-to-talk)
    - Matches index.html IDs
+   - chat-stream (SSE) with automatic fallback to /api/chat JSON
    - Strong PTT debug + status chip
 */
 
@@ -62,7 +63,7 @@
     try { await speaker.play(); } catch (e) { console.warn('[TTS] autoplay blocked', e); }
   }
 
-  // ----- chat-stream (SSE) -----
+  // ----- chat: streaming (SSE) -----
   async function chatStreamSSE(message) {
     const voice = getVoice();
     const resp = await fetch('/.netlify/functions/chat-stream', {
@@ -70,7 +71,14 @@
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message, voice }),
     });
-    if (!resp.ok || !resp.body) throw new Error('chat_stream_failed');
+
+    if (!resp.ok || !resp.body) {
+      // Surface raw body for debugging
+      let raw = '';
+      try { raw = await resp.text(); } catch {}
+      console.error('[chat-stream] HTTP', resp.status, 'raw=', raw?.slice(0, 300));
+      throw new Error('chat_stream_failed');
+    }
 
     const reader = resp.body.getReader();
     const decoder = new TextDecoder('utf-8');
@@ -104,6 +112,38 @@
     return finalText.trim();
   }
 
+  // ----- chat: non-stream fallback -----
+  async function chatOnce(message) {
+    const voice = getVoice();
+    const resp = await fetch('/.netlify/functions/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ message, voice }),
+    });
+    const raw = await resp.text().catch(() => '');
+    if (!resp.ok) {
+      console.error('[chat] HTTP', resp.status, 'raw=', raw?.slice(0, 300));
+      throw new Error('chat_failed');
+    }
+    let data = {};
+    try { data = JSON.parse(raw); } catch {}
+    const reply = (data.reply || data.message || data.text || '').trim();
+    if (!reply) throw new Error('chat_empty');
+    clear(replyEl);
+    append(replyEl, reply);
+    return reply;
+  }
+
+  // Wrapper: try SSE then fallback to JSON chat
+  async function chatSmart(message) {
+    try {
+      return await chatStreamSSE(message);
+    } catch (e) {
+      console.warn('[chat] falling back to /chat:', e?.message || e);
+      return await chatOnce(message);
+    }
+  }
+
   // ----- Text send -----
   async function handleSend() {
     try {
@@ -111,7 +151,7 @@
       const msg = (inputEl?.value || '').trim();
       if (!msg) return;
       setStatus('thinking');
-      const reply = await chatStreamSSE(msg);
+      const reply = await chatSmart(msg);
       setStatus('speaking');
       await speak(reply);
       setStatus('idle');
@@ -228,13 +268,12 @@
         return;
       }
 
-      // IMPORTANT: strip ";codecs=opus" so the server's hint is a clean base type
-      const mimeForHeader = (mimeRecorded.split(';')[0] || 'audio/webm');
-
+      const mimeForHeader = (mimeRecorded.split(';')[0] || 'audio/webm'); // strip ";codecs=opus"
       const ab = await blob.arrayBuffer();
       const dataUrl = `data:${mimeForHeader};base64,${arrayToBase64(ab)}`;
       console.log('[PTT] dataUrl length =', dataUrl.length, 'mimeHeader =', mimeForHeader, 'blobKB =', sizeKB);
 
+      // STT
       const sttResp = await fetch('/.netlify/functions/stt', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -252,8 +291,9 @@
       setText(transcriptEl, transcript || '(no speech)');
       if (!transcript) { setStatus('idle'); return; }
 
+      // Chat + optional TTS (with fallback)
       setStatus('thinking');
-      const reply = await chatStreamSSE(transcript);
+      const reply = await chatSmart(transcript);
       console.log('[PTT] chat reply:', reply);
 
       setStatus('speaking');
