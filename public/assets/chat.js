@@ -2,7 +2,7 @@
    Keilani Brain — Live (text + push-to-talk)
    - Text input -> chat-stream (SSE) -> TTS (ElevenLabs)
    - Press-to-talk -> MediaRecorder -> STT -> chat-stream -> TTS
-   - Firefox-safe (prefer OGG/Opus), chunk flushing, verbose logs
+   - Robust debug logs + multi-event wiring for PTT
    - Status chip: idle → listening → transcribing → thinking → speaking → idle
 */
 
@@ -13,13 +13,13 @@
   const inputEl      = $('#input')        || $('textarea');     // main text area
   const sendBtn      = $('#sendBtn')      || $('#send');        // "Send"
   const speakBtn     = $('#speakBtn')     || $('#speak');       // "Speak Reply"
-  const pttBtn       = $('#ptt')          || $('#holdToTalk');  // "Hold to talk"
+  const pttBtn       = $('#ptt')          || $('#holdToTalk');  // "Hold to talk" button
   const voiceSel     = $('#voice')        || $('#voiceSelect'); // voice <select>
   const statusBadge  = $('#status')       || $('.status');      // small status chip
   const transcriptEl = $('#transcript');                         // optional transcript
   const replyEl      = $('#reply');                               // optional streamed reply bucket
 
-  // One audio element for TTS playback
+  // Single audio element for TTS playback
   const speaker = (() => {
     let el = $('#speaker');
     if (!el) {
@@ -184,16 +184,13 @@
   let mediaRecorder = null;
   let chunks = [];
 
-  function isFirefox() {
-    return /firefox/i.test(navigator.userAgent);
-  }
   function recorderMime() {
-    if (isFirefox() && MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) {
-      return 'audio/ogg;codecs=opus';              // Best for Firefox
-    }
+    // Prefer WebM/Opus first; then fall back.
     if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) return 'audio/webm;codecs=opus';
+    if (MediaRecorder.isTypeSupported('audio/webm')) return 'audio/webm';
+    if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) return 'audio/ogg;codecs=opus';
     if (MediaRecorder.isTypeSupported('audio/ogg')) return 'audio/ogg';
-    return 'audio/webm'; // fallback
+    return 'audio/webm';
   }
 
   function arrayToBase64(buf) {
@@ -210,12 +207,13 @@
       setStatus('listening');
       chunks = [];
 
+      // Debug-friendly constraints: disable processing to avoid "silence"
       const streamConstraints = {
         audio: {
           channelCount: 1,
-          echoCancellation: true,
-          noiseSuppression: true,
-          autoGainControl: true,
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
           sampleRate: 48000
         }
       };
@@ -235,7 +233,7 @@
       };
       mediaRecorder.onstop = onPTTStop;
 
-      // timeslice to ensure periodic chunking (Firefox reliability)
+      // timeslice to ensure periodic chunking across browsers
       mediaRecorder.start(250);
       console.log('[PTT] recording… mime =', mime);
     } catch (e) {
@@ -247,7 +245,7 @@
   async function stopPTT() {
     try {
       if (mediaRecorder && mediaRecorder.state === 'recording') {
-        mediaRecorder.requestData?.();
+        mediaRecorder.requestData?.(); // flush final chunk
         mediaRecorder.stop();
       }
       if (mediaStream) mediaStream.getTracks().forEach((t) => t.stop());
@@ -282,17 +280,21 @@
 
       const ab = await blob.arrayBuffer();
       const dataUrl = `data:${mime};base64,${arrayToBase64(ab)}`;
+      console.log('[PTT] dataUrl length =', dataUrl.length, 'mime =', mime, 'blobKB =', sizeKB);
 
       // ---- STT
       const sttResp = await fetch('/.netlify/functions/stt', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ audioBase64: dataUrl, language: 'en', verbose: false }),
+        body: JSON.stringify({ audioBase64: dataUrl, language: 'en' }) // no verbose
       });
 
+      let sttText = '';
+      try { sttText = await sttResp.text(); } catch {}
+      console.log('[PTT] STT HTTP', sttResp.status, 'raw=', sttText?.slice(0, 200));
+
       let sttJson = {};
-      try { sttJson = await sttResp.json(); } catch {}
-      console.log('[PTT] STT', sttResp.status, sttJson);
+      try { sttJson = JSON.parse(sttText); } catch { sttJson = {}; }
 
       if (!sttResp.ok) { setStatus('idle'); return; }
 
@@ -323,11 +325,17 @@
   if (speakBtn) speakBtn.addEventListener('click', handleSpeak);
 
   if (pttBtn) {
+    // Pointer events
     pttBtn.addEventListener('pointerdown', startPTT);
     pttBtn.addEventListener('pointerup', stopPTT);
     pttBtn.addEventListener('pointerleave', () => {
       if (mediaRecorder && mediaRecorder.state === 'recording') stopPTT();
     });
+    // Mouse/touch fallbacks (for browsers that don't emit pointer events consistently)
+    pttBtn.addEventListener('mousedown', startPTT);
+    pttBtn.addEventListener('mouseup', stopPTT);
+    pttBtn.addEventListener('touchstart', (e) => { e.preventDefault(); startPTT(); }, { passive: false });
+    pttBtn.addEventListener('touchend',   (e) => { e.preventDefault(); stopPTT();  }, { passive: false });
   }
 
   if (inputEl) {
@@ -342,4 +350,6 @@
   // ---------- Init ----------
   setStatus('idle');
   console.log('[Keilani] chat.js loaded');
+  console.log('[PTT] wired?', !!pttBtn, pttBtn?.id, 'handlers: pointerdown/pointerup/pointerleave + mouse/touch');
+  if (pttBtn) console.log('PTT button HTML:', pttBtn.outerHTML);
 })();
