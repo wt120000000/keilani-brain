@@ -22,19 +22,16 @@ function sniffMagic(buf) {
   if (a.startsWith("OggS")) return "OGG";
   if (a.startsWith("ID3")) return "MP3/ID3";
   if (buf[0] === 0xFF && (buf[1] & 0xE0) === 0xE0) return "MP3/Frame";
-  // EBML header 0x1A45DFA3 → Matroska/WebM
   if (buf[0] === 0x1A && buf[1] === 0x45 && buf[2] === 0xDF && buf[3] === 0xA3) return "WEBM/MKV";
   return "unknown";
 }
 function normalizeContentType(ct) {
   if (!ct) return "application/octet-stream";
   const base = ct.split(";")[0].trim().toLowerCase();
-  if (base.includes("wave") || base.includes("x-wav")) return "audio/wav";
-  if (base === "audio/wav") return "audio/wav";
+  if (base.includes("wave") || base.includes("x-wav") || base === "audio/wav") return "audio/wav";
   if (base === "audio/mpeg" || base === "audio/mp3") return "audio/mpeg";
   if (base.startsWith("audio/webm")) return "audio/webm";
-  if (base === "audio/ogg" || base === "application/ogg") return "audio/ogg";
-  if (base === "audio/ogg;codecs=opus") return "audio/ogg"; // strip codecs
+  if (base === "audio/ogg" || base === "application/ogg" || base === "audio/ogg;codecs=opus") return "audio/ogg";
   return base || "application/octet-stream";
 }
 function pickFilename(ct, magic) {
@@ -50,11 +47,10 @@ function pickFilename(ct, magic) {
 }
 
 async function callOpenAI(form, key, signal) {
-  // Do not set Content-Type here — fetch sets the multipart boundary
   const resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
     method: "POST",
     headers: { Authorization: `Bearer ${key}` },
-    body: form,
+    body: form, // Let fetch set multipart boundary automatically
     signal,
   });
   const text = await resp.text();
@@ -123,24 +119,47 @@ exports.handler = async (event) => {
       return json(413, { error: "audio_too_large", detail: "Audio exceeds 25MB" });
     }
 
-    log("[STT] inbound", { contentType, magic, fileName, bytes });
+    log("[STT] inbound", { contentType, magic, fileName, bytes, model: MODEL });
+
+    // Determine best response_format for the chosen model
+    const isWhisper = /^whisper/i.test(MODEL);
+    let responseFormat = isWhisper ? (verbose ? "verbose_json" : "json") : "json";
 
     // Build multipart using native FormData + File (Node 18+ via undici)
     const file1 = new File([buf], fileName, { type: contentType });
     const form1 = new FormData();
     form1.append("file", file1);
     form1.append("model", MODEL);
-    form1.append("response_format", verbose ? "verbose_json" : "json");
+    form1.append("response_format", responseFormat);
     if (language) form1.append("language", language);
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 60_000);
 
-    // Attempt #1: as declared
     let { resp, text } = await callOpenAI(form1, OPENAI_API_KEY, controller.signal);
-    log("[STT] openai#1", { status: resp.status, len: text?.length || 0, ct: resp.headers.get("content-type") });
+    log("[STT] openai#1", { status: resp.status, len: text?.length || 0, ct: resp.headers.get("content-type"), responseFormat });
 
-    // If OpenAI rejects the file as unsupported/corrupted, try a compatibility retry
+    // If OpenAI rejects response_format, retry once with "json"
+    if (!resp.ok && text) {
+      let detailObj;
+      try { detailObj = JSON.parse(text); } catch {}
+      const msg = (detailObj?.error?.message || "").toLowerCase();
+      const param = (detailObj?.error?.param || "").toLowerCase();
+      const code = (detailObj?.error?.code || "").toLowerCase();
+      const responseFormatIssue = param === "response_format" || msg.includes("response_format") || code.includes("unsupported_value");
+
+      if (responseFormatIssue && responseFormat !== "json") {
+        const formRF = new FormData();
+        formRF.append("file", file1);
+        formRF.append("model", MODEL);
+        formRF.append("response_format", "json");
+        if (language) formRF.append("language", language);
+        ({ resp, text } = await callOpenAI(formRF, OPENAI_API_KEY, controller.signal));
+        log("[STT] openai#1b (response_format=json retry)", { status: resp.status, len: text?.length || 0 });
+      }
+    }
+
+    // If still not ok and error says file invalid/unsupported, do compatibility retry
     if (!resp.ok && text) {
       let detailObj;
       try { detailObj = JSON.parse(text); } catch {}
@@ -149,7 +168,6 @@ exports.handler = async (event) => {
       const isInvalidFile = msg.includes("unsupported") || msg.includes("corrupted") || code.includes("invalid_value");
 
       if (isInvalidFile) {
-        // Retry with a filename that matches the sniffed magic, and a generic content type
         const forcedName =
           magic === "OGG" ? "audio.ogg" :
           magic === "WEBM/MKV" ? "audio.webm" :
@@ -160,11 +178,11 @@ exports.handler = async (event) => {
         const form2 = new FormData();
         form2.append("file", file2);
         form2.append("model", MODEL);
-        form2.append("response_format", verbose ? "verbose_json" : "json");
+        form2.append("response_format", "json"); // safest
         if (language) form2.append("language", language);
 
         ({ resp, text } = await callOpenAI(form2, OPENAI_API_KEY, controller.signal));
-        log("[STT] openai#2 (retry)", { status: resp.status, len: text?.length || 0, ct: resp.headers.get("content-type"), forcedName });
+        log("[STT] openai#2 (compat retry)", { status: resp.status, len: text?.length || 0, forcedName });
       }
     }
 
@@ -186,16 +204,7 @@ exports.handler = async (event) => {
       segments: Array.isArray(data.segments) ? data.segments.length : 0,
     });
 
-    if (verbose) {
-      return json(200, {
-        transcript: data.text || "",
-        verbose: true,
-        language: data.language,
-        duration: data.duration,
-        segments: data.segments || [],
-        raw: data,
-      });
-    }
+    // Always return { transcript } to the client
     return json(200, { transcript: (data.text || "").trim() });
   } catch (e) {
     const msg = e?.name === "AbortError" ? "openai_timeout" : (e?.message || String(e));
