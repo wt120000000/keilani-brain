@@ -1,7 +1,5 @@
 // netlify/functions/stt.js
 // POST { audioBase64: "<raw base64 or data: URL>", language?: "en", verbose?: true } -> { transcript, ... }
-const fetch = require("node-fetch");
-const FormData = require("form-data");
 
 function json(status, body) {
   return {
@@ -24,23 +22,26 @@ function sniffMagic(buf) {
   if (a.startsWith("OggS")) return "OGG";
   if (a.startsWith("ID3")) return "MP3/ID3";
   if (buf[0] === 0xFF && (buf[1] & 0xE0) === 0xE0) return "MP3/Frame";
-  if (a.startsWith("\x1A\x45\xDF\xA3")) return "WEBM/MKV";
+  // EBML header 0x1A45DFA3 → Matroska/WebM
+  if (buf[0] === 0x1A && buf[1] === 0x45 && buf[2] === 0xDF && buf[3] === 0xA3) return "WEBM/MKV";
   return "unknown";
 }
-
 function normalizeContentType(ct) {
   if (!ct) return "application/octet-stream";
   const base = ct.split(";")[0].trim().toLowerCase();
-  // Map common variants to canonical types Whisper expects
   if (base.includes("wave") || base.includes("x-wav")) return "audio/wav";
-  if (base === "audio/ogg" || base === "application/ogg") return "audio/ogg";
+  if (base === "audio/wav") return "audio/wav";
+  if (base === "audio/mpeg" || base === "audio/mp3") return "audio/mpeg";
   if (base.startsWith("audio/webm")) return "audio/webm";
-  if (base === "audio/mpeg") return "audio/mpeg";
-  if (base === "audio/mp3") return "audio/mpeg";
+  if (base === "audio/ogg" || base === "application/ogg") return "audio/ogg";
+  if (base === "audio/ogg;codecs=opus") return "audio/ogg"; // strip codecs
   return base || "application/octet-stream";
 }
-
-function pickFilename(ct) {
+function pickFilename(ct, magic) {
+  if (magic === "OGG") return "audio.ogg";
+  if (magic === "WEBM/MKV") return "audio.webm";
+  if (magic.startsWith("MP3")) return "audio.mp3";
+  if (magic === "WAV/RIFF") return "audio.wav";
   if (ct.includes("wav")) return "audio.wav";
   if (ct.includes("mpeg")) return "audio.mp3";
   if (ct.includes("ogg")) return "audio.ogg";
@@ -49,6 +50,7 @@ function pickFilename(ct) {
 }
 
 async function callOpenAI(form, key, signal) {
+  // Do not set Content-Type here — fetch sets the multipart boundary
   const resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
     method: "POST",
     headers: { Authorization: `Bearer ${key}` },
@@ -60,6 +62,7 @@ async function callOpenAI(form, key, signal) {
 }
 
 exports.handler = async (event) => {
+  // CORS preflight
   if (event.httpMethod === "OPTIONS") {
     return {
       statusCode: 204,
@@ -80,17 +83,20 @@ exports.handler = async (event) => {
   if (!OPENAI_API_KEY) return json(500, { error: "missing_env", detail: "Missing OPENAI_API_KEY" });
 
   let audioBase64 = "", mimeHint = "application/octet-stream", language, verbose = false;
+
+  // Parse input
   try {
     const body = JSON.parse(event.body || "{}");
     const raw = (body.audioBase64 || "").trim();
     language = typeof body.language === "string" && body.language.trim() ? body.language.trim() : undefined;
     verbose = Boolean(body.verbose);
+
     if (!raw) return json(400, { error: "missing_audio", detail: "Provide audioBase64 (raw base64 or data: URL)." });
 
     if (raw.startsWith("data:")) {
       const comma = raw.indexOf(",");
       if (comma === -1) return json(400, { error: "bad_data_url", detail: "Malformed data: URL" });
-      const header = raw.substring(0, comma);           // e.g., data:audio/wav;base64
+      const header = raw.substring(0, comma); // e.g. data:audio/webm;codecs=opus;base64
       audioBase64 = raw.substring(comma + 1);
       const m = header.match(/^data:([^;]+)/);
       if (m) mimeHint = m[1];
@@ -106,7 +112,7 @@ exports.handler = async (event) => {
     const bytes = buf.length;
     const magic = sniffMagic(buf);
     let contentType = normalizeContentType(mimeHint);
-    let fileName = pickFilename(contentType);
+    let fileName = pickFilename(contentType, magic);
 
     if (bytes < 200) {
       log("[STT] too small / invalid base64", { contentType, magic, bytes });
@@ -119,23 +125,22 @@ exports.handler = async (event) => {
 
     log("[STT] inbound", { contentType, magic, fileName, bytes });
 
-    const makeForm = (ct, name) => {
-      const form = new FormData();
-      form.append("file", buf, { filename: name, contentType: ct });
-      form.append("model", MODEL);
-      form.append("response_format", verbose ? "verbose_json" : "json");
-      if (language) form.append("language", language);
-      return form;
-    };
+    // Build multipart using native FormData + File (Node 18+ via undici)
+    const file1 = new File([buf], fileName, { type: contentType });
+    const form1 = new FormData();
+    form1.append("file", file1);
+    form1.append("model", MODEL);
+    form1.append("response_format", verbose ? "verbose_json" : "json");
+    if (language) form1.append("language", language);
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), 60_000);
 
-    // First attempt: as declared
-    let { resp, text } = await callOpenAI(makeForm(contentType, fileName), OPENAI_API_KEY, controller.signal);
+    // Attempt #1: as declared
+    let { resp, text } = await callOpenAI(form1, OPENAI_API_KEY, controller.signal);
     log("[STT] openai#1", { status: resp.status, len: text?.length || 0, ct: resp.headers.get("content-type") });
 
-    // If OpenAI says invalid file, try one compatibility retry:
+    // If OpenAI rejects the file as unsupported/corrupted, try a compatibility retry
     if (!resp.ok && text) {
       let detailObj;
       try { detailObj = JSON.parse(text); } catch {}
@@ -144,13 +149,22 @@ exports.handler = async (event) => {
       const isInvalidFile = msg.includes("unsupported") || msg.includes("corrupted") || code.includes("invalid_value");
 
       if (isInvalidFile) {
-        // Retry #2: force generic octet-stream + .wav (OpenAI sniffs bytes)
-        const ct2 = "application/octet-stream";
-        const name2 = magic === "OGG" ? "audio.ogg" :
-                      magic === "WEBM/MKV" ? "audio.webm" :
-                      magic.startsWith("MP3") ? "audio.mp3" : "audio.wav";
-        ({ resp, text } = await callOpenAI(makeForm(ct2, name2), OPENAI_API_KEY, controller.signal));
-        log("[STT] openai#2 (retry)", { status: resp.status, len: text?.length || 0, ct: resp.headers.get("content-type"), forcedCT: ct2, forcedName: name2 });
+        // Retry with a filename that matches the sniffed magic, and a generic content type
+        const forcedName =
+          magic === "OGG" ? "audio.ogg" :
+          magic === "WEBM/MKV" ? "audio.webm" :
+          magic.startsWith("MP3") ? "audio.mp3" :
+          magic === "WAV/RIFF" ? "audio.wav" :
+          "audio.bin";
+        const file2 = new File([buf], forcedName, { type: "application/octet-stream" });
+        const form2 = new FormData();
+        form2.append("file", file2);
+        form2.append("model", MODEL);
+        form2.append("response_format", verbose ? "verbose_json" : "json");
+        if (language) form2.append("language", language);
+
+        ({ resp, text } = await callOpenAI(form2, OPENAI_API_KEY, controller.signal));
+        log("[STT] openai#2 (retry)", { status: resp.status, len: text?.length || 0, ct: resp.headers.get("content-type"), forcedName });
       }
     }
 
