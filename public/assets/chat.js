@@ -1,13 +1,10 @@
 /* public/assets/chat.js
    Keilani Brain — Live (text + push-to-talk)
-   - Matches index.html IDs exactly
-   - Text -> chat-stream (SSE) -> optional TTS
-   - PTT -> MediaRecorder -> STT -> chat-stream -> optional TTS
-   - Loud debug logs + status pill
+   - Matches index.html IDs
+   - Strong PTT debug + status chip
 */
 
 (() => {
-  // ----- Helpers -----
   const $ = (sel) => document.querySelector(sel);
   const setText = (el, t) => { if (el) el.textContent = t; };
 
@@ -20,15 +17,9 @@
   const statusBadge  = $('#statePill');
   const transcriptEl = $('#transcriptBox');
   const replyEl      = $('#reply');
+  const speaker      = $('#ttsPlayer');
 
-  // Reuse the page's audio element
-  const speaker = (() => {
-    const el = $('#ttsPlayer') || Object.assign(document.createElement('audio'), { id: 'ttsPlayer', preload: 'none' });
-    if (!el.parentNode) document.body.appendChild(el);
-    return el;
-  })();
-
-  // ----- Audio unlock (autoplay) -----
+  // ----- Audio unlock -----
   let audioUnlocked = false;
   function unlockAudioOnce() {
     if (audioUnlocked) return;
@@ -38,7 +29,7 @@
         const ac = new AC();
         if (ac.state === 'suspended') ac.resume();
       }
-      speaker.muted = false;
+      if (speaker) speaker.muted = false;
       audioUnlocked = true;
     } catch {}
   }
@@ -55,26 +46,23 @@
     el.appendChild(span);
   }
 
-  // ----- TTS (optional if voice empty) -----
+  // ----- TTS (optional) -----
   async function speak(text) {
     const voice = getVoice();
-    if (!text || !text.trim() || !voice) return; // skip if no voice selected
+    if (!text || !text.trim() || !voice) return;
     const resp = await fetch('/.netlify/functions/tts', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ text, voice }),
     });
-    if (!resp.ok) {
-      console.error('[TTS] HTTP', resp.status);
-      return;
-    }
+    if (!resp.ok) { console.error('[TTS] HTTP', resp.status); return; }
     const ab = await resp.arrayBuffer();
     const url = URL.createObjectURL(new Blob([ab], { type: 'audio/mpeg' }));
     speaker.src = url;
     try { await speaker.play(); } catch (e) { console.warn('[TTS] autoplay blocked', e); }
   }
 
-  // ----- chat-stream (SSE via fetch) -----
+  // ----- chat-stream (SSE) -----
   async function chatStreamSSE(message) {
     const voice = getVoice();
     const resp = await fetch('/.netlify/functions/chat-stream', {
@@ -82,10 +70,7 @@
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify({ message, voice }),
     });
-    if (!resp.ok || !resp.body) {
-      console.error('[chat-stream] HTTP', resp.status);
-      throw new Error('chat_stream_failed');
-    }
+    if (!resp.ok || !resp.body) throw new Error('chat_stream_failed');
 
     const reader = resp.body.getReader();
     const decoder = new TextDecoder('utf-8');
@@ -176,7 +161,6 @@
       setStatus('listening');
       chunks = [];
 
-      // Debug-friendly constraints to avoid "silent" clips
       const streamConstraints = {
         audio: {
           channelCount: 1,
@@ -202,7 +186,6 @@
       };
       mediaRecorder.onstop = onPTTStop;
 
-      // Ensure periodic chunking across browsers
       mediaRecorder.start(250);
       console.log('[PTT] recording… mime =', mime);
     } catch (e) {
@@ -235,22 +218,23 @@
       }
 
       const blob = new Blob(chunks, { type: mediaRecorder?.mimeType || recorderMime() });
-      const mime = blob.type || 'application/octet-stream';
+      const mimeRecorded = blob.type || 'application/octet-stream';
       const sizeKB = Math.round(blob.size / 1024);
-      console.log('[PTT] final blob', mime, sizeKB, 'KB');
+      console.log('[PTT] final blob', mimeRecorded, sizeKB, 'KB');
 
       if (blob.size < 2000) {
         setText(transcriptEl, '(no speech)');
-        console.log('[PTT] blob too small for STT (', blob.size, 'bytes )');
         setStatus('idle');
         return;
       }
 
-      const ab = await blob.arrayBuffer();
-      const dataUrl = `data:${mime};base64,${arrayToBase64(ab)}`;
-      console.log('[PTT] dataUrl length =', dataUrl.length, 'mime =', mime, 'blobKB =', sizeKB);
+      // IMPORTANT: strip ";codecs=opus" so the server's hint is a clean base type
+      const mimeForHeader = (mimeRecorded.split(';')[0] || 'audio/webm');
 
-      // STT
+      const ab = await blob.arrayBuffer();
+      const dataUrl = `data:${mimeForHeader};base64,${arrayToBase64(ab)}`;
+      console.log('[PTT] dataUrl length =', dataUrl.length, 'mimeHeader =', mimeForHeader, 'blobKB =', sizeKB);
+
       const sttResp = await fetch('/.netlify/functions/stt', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -268,7 +252,6 @@
       setText(transcriptEl, transcript || '(no speech)');
       if (!transcript) { setStatus('idle'); return; }
 
-      // Chat + optional TTS
       setStatus('thinking');
       const reply = await chatStreamSSE(transcript);
       console.log('[PTT] chat reply:', reply);
@@ -291,7 +274,6 @@
   if (speakBtn) speakBtn.addEventListener('click', handleSpeak);
 
   if (pttBtn) {
-    // Pointer events
     pttBtn.addEventListener('pointerdown', startPTT);
     pttBtn.addEventListener('pointerup', stopPTT);
     pttBtn.addEventListener('pointerleave', () => {
@@ -316,7 +298,6 @@
     });
   }
 
-  // ----- Init -----
   setStatus('idle');
   console.log('[Keilani] chat.js ready (IDs wired to index.html)');
 })();
