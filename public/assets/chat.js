@@ -3,7 +3,8 @@
    - Text chat (SSE)
    - Push-to-talk with VAD-lite + live mic meter
    - Streaming TTS via MediaSource (fallback to /tts)
-   - Barge-in, voice picker auto-load + saved selection
+   - Voice picker auto-load + saved selection
+   - STT: normalize data URL, skip micro-blobs (<8 KB), backpressure-friendly
 */
 
 (() => {
@@ -13,40 +14,25 @@
   const inputEl      = $('#textIn');
   const sendBtn      = $('#sendBtn');
   const speakBtn     = $('#speakBtn');
-  const stopBtn      = $('#stopBtn');       // optional: <button id="stopBtn">Stop</button>
+  const stopBtn      = $('#stopBtn');
   const pttBtn       = $('#pttBtn');
   const voiceSel     = $('#voicePick');
   const transcriptEl = $('#transcriptBox');
   const replyEl      = $('#reply');
-  const speaker      = $('#ttsPlayer');     // <audio id="ttsPlayer" controls preload="none">
-  const micBar       = $('#micBar');        // meter fill
-  const micDb        = $('#micDb');         // small dB label
-  const vadSlider    = $('#vadThresh');     // sensitivity 1..12 (lower = more sensitive)
+  const speaker      = $('#ttsPlayer');
+  const micBar       = $('#micBar');
+  const micDb        = $('#micDb');
+  const vadSlider    = $('#vadThresh');
 
-  // --- helpers
   const setTxt = (el, t) => { if (el) el.textContent = t; };
   const append = (el, t) => { if (el && t) el.textContent += t; };
   const clear  = (el) => { if (el) el.textContent = ''; };
-  const sleep  = (ms) => new Promise(r => setTimeout(r, ms));
-
   const VOICE_KEY = 'keilani.voiceId';
 
-  function getVoice() {
-    // prefer select value, fallback to saved, else empty
-    const v = voiceSel?.value || localStorage.getItem(VOICE_KEY) || '';
-    return (v || '').trim();
-  }
+  const getVoice = () => (voiceSel?.value || localStorage.getItem(VOICE_KEY) || '').trim();
+  const setVoice = (id) => { if (voiceSel) { const ok=[...voiceSel.options].some(o=>o.value===id); if (ok) voiceSel.value=id; } localStorage.setItem(VOICE_KEY,id||''); };
 
-  function setVoice(id) {
-    if (voiceSel) {
-      if ([...voiceSel.options].some(o => o.value === id)) {
-        voiceSel.value = id;
-      }
-    }
-    localStorage.setItem(VOICE_KEY, id || '');
-  }
-
-  // --- audio unlock
+  // Unlock audio once
   let audioUnlocked = false;
   function unlockAudio() {
     if (audioUnlocked) return;
@@ -62,29 +48,22 @@
   }
   document.addEventListener('pointerdown', unlockAudio, { once: true });
 
-  // =========================
-  //  V O I C E S
-  // =========================
+  // ---- Voices
   async function loadVoices() {
     if (!voiceSel) return;
     try {
-      const resp = await fetch('/.netlify/functions/voices', { method: 'GET' });
-      if (!resp.ok) throw new Error('voices_http_' + resp.status);
-      const data = await resp.json(); // expect [{id, name}, ...]
+      const r = await fetch('/.netlify/functions/voices');
+      const arr = r.ok ? (await r.json()) : [];
       voiceSel.innerHTML = '';
-      const optNone = document.createElement('option');
-      optNone.value = '';
-      optNone.textContent = '(default / no TTS)';
-      voiceSel.appendChild(optNone);
-
-      (data || []).forEach(v => {
+      const opt0 = document.createElement('option');
+      opt0.value = ''; opt0.textContent = '(default / no TTS)';
+      voiceSel.appendChild(opt0);
+      arr.forEach(v => {
         const o = document.createElement('option');
         o.value = v.id || v.voice_id || '';
-        o.textContent = `${v.name || 'Voice'}${o.value ? ' (' + o.value.slice(0,6) + '…)' : ''}`;
+        o.textContent = `${v.name || 'Voice'}${o.value ? ' ('+o.value.slice(0,6)+'…)' : ''}`;
         voiceSel.appendChild(o);
       });
-
-      // prefer saved voice; else first non-empty voice
       const saved = localStorage.getItem(VOICE_KEY) || '';
       if (saved && [...voiceSel.options].some(o => o.value === saved)) {
         voiceSel.value = saved;
@@ -93,20 +72,17 @@
         if (first) voiceSel.value = first.value;
       }
       setVoice(voiceSel.value);
-      console.log('[VOICES] ready, selected:', voiceSel.value);
+      console.log('[VOICES] ready, selected:', voiceSel.value || '(server default)');
     } catch (e) {
       console.warn('[VOICES] load failed', e);
-      // leave whatever’s currently in the select
     }
   }
-
   voiceSel?.addEventListener('change', () => setVoice(voiceSel.value));
 
   // =========================
-  //  T T S   (Streaming MSE)
+  //  TTS (Streaming + fallback)
   // =========================
-  let ttsAbort = null;
-  let mse = null, sourceBuffer = null, mseUrl = null, chunkQ = [];
+  let ttsAbort = null, mse = null, sourceBuffer = null, mseUrl = null, chunkQ = [];
   let audioEndedResolver = null;
 
   function resetMSE() {
@@ -118,7 +94,7 @@
   }
 
   async function stopSpeaking() {
-    try { if (ttsAbort) ttsAbort.abort(); } catch {}
+    try { ttsAbort?.abort(); } catch {}
     ttsAbort = null;
     try { speaker.pause(); } catch {}
     try { speaker.removeAttribute('src'); } catch {}
@@ -128,11 +104,10 @@
     console.log('[TTS] stopSpeaking() – barge in');
   }
 
-  // non-streaming fallback (still honors default voice on server)
   async function speakFallback(text, voice) {
     const resp = await fetch('/.netlify/functions/tts', {
       method:'POST', headers:{ 'Content-Type':'application/json' },
-      body: JSON.stringify({ text, voice })
+      body: JSON.stringify({ text, voice: (voice || undefined) })
     });
     if (!resp.ok) { console.error('[TTS] fallback HTTP', resp.status); return; }
     const ab = await resp.arrayBuffer();
@@ -145,14 +120,13 @@
 
   async function speakStream(text, voice) {
     if (!text) return;
-    // toggling: if already speaking, stop
+    // toggle-stop
     if (!speaker.paused || ttsAbort) { await stopSpeaking(); return; }
     unlockAudio();
 
-    // visual LED
     const led = document.createElement('span');
     led.id = 'speakLed';
-    led.style.cssText = 'display:inline-block;width:10px;height:10px;margin-left:6px;border-radius:50%;background:#0f0;';
+    led.style.cssText='display:inline-block;width:10px;height:10px;margin-left:6px;border-radius:50%;background:#0f0;';
     speakBtn?.insertAdjacentElement('afterend', led);
 
     const canMSE = !!window.MediaSource && MediaSource.isTypeSupported('audio/mpeg');
@@ -174,10 +148,10 @@
       sourceBuffer.addEventListener('updateend', () => {
         if (!sourceBuffer || !chunkQ.length || sourceBuffer.updating) return;
         const chunk = chunkQ.shift();
-        try { sourceBuffer.appendBuffer(chunk); } catch { /* queue if busy */ }
+        try { sourceBuffer.appendBuffer(chunk); } catch { /* backpressure */ }
       });
 
-      // Fetch streaming MP3 from our function. NOTE: voice may be '', server has default.
+      // If no voice selected, server default will be used (set ELEVEN_DEFAULT_VOICE)
       let resp;
       try {
         resp = await fetch('/.netlify/functions/tts-stream', {
@@ -197,12 +171,12 @@
         resetMSE(); await speakFallback(text, voice);
         return;
       }
+
+      // If host buffers responses, resp.body may be present but delivers at once.
       if (!resp.body) {
-        // Some hosts fully buffer. Just play it as a blob.
         const ab = await resp.arrayBuffer();
-        const u = URL.createObjectURL(new Blob([ab], { type: 'audio/mpeg'}));
-        speaker.src = u;
-        try { await speaker.play(); } catch {}
+        const u = URL.createObjectURL(new Blob([ab], { type:'audio/mpeg'}));
+        speaker.src = u; try { await speaker.play(); } catch {}
         await new Promise(res => speaker.addEventListener('ended', res, { once:true }));
         URL.revokeObjectURL(u);
         resetMSE();
@@ -210,7 +184,7 @@
       }
 
       const reader = resp.body.getReader();
-      speaker.play().catch(()=>{ /* wait for user gesture */ });
+      speaker.play().catch(()=>{});
 
       while (true) {
         const { value, done } = await reader.read();
@@ -226,7 +200,6 @@
         }
       }
 
-      // finalize
       const end = () => { try { if (mse && mse.readyState === 'open') mse.endOfStream(); } catch {} };
       if (!sourceBuffer || !mse) end();
       else if (!sourceBuffer.updating && chunkQ.length === 0) end();
@@ -247,7 +220,7 @@
   }
 
   // =========================
-  //  C H A T   (SSE)
+  //  Chat (SSE)
   // =========================
   async function chatStream(message, voice) {
     const msg = (message || '').trim();
@@ -288,16 +261,16 @@
   }
 
   // =========================
-  //  S T T   (PTT + VAD)
+  //  STT (PTT + VAD + guards)
   // =========================
   let mediaStream, mediaRecorder, chunks = [];
   let vadActive = false, silenceTimer = null;
 
-  function arrayToBase64(buf) {
+  const arrayToBase64 = (buf) => {
     let bin = '', bytes = new Uint8Array(buf);
     for (const b of bytes) bin += String.fromCharCode(b);
     return btoa(bin);
-  }
+  };
   function recorderMime() {
     if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) return 'audio/webm;codecs=opus';
     if (MediaRecorder.isTypeSupported('audio/webm')) return 'audio/webm';
@@ -311,16 +284,14 @@
   }
 
   async function startPTT() {
-    // barge-in first, then record immediately
-    await stopSpeaking();
-
+    await stopSpeaking(); // barge-in
     chunks = [];
     const mime = recorderMime();
     mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
     mediaRecorder = new MediaRecorder(mediaStream, { mimeType: mime });
     console.log('[PTT] recording… mime=', mime);
 
-    // VAD + meter
+    // VAD/meter
     const AC = window.AudioContext || window.webkitAudioContext;
     const ctx = AC ? new AC() : null;
     if (ctx) {
@@ -331,8 +302,8 @@
       const data = new Uint8Array(analyser.fftSize);
 
       const thresh = () => {
-        const v = Number(vadSlider?.value || 4);            // 1..12
-        return 0.8 + (v-1) * ((2.5-0.8)/11);                // amplitude threshold
+        const v = Number(vadSlider?.value || 4);
+        return 0.8 + (v-1) * ((2.5-0.8)/11);
       };
 
       vadActive = true;
@@ -345,7 +316,7 @@
           if (d > peak) peak = d;
           sum += d*d;
         }
-        const rms = Math.sqrt(sum / data.length);           // ~0..128
+        const rms = Math.sqrt(sum / data.length);
         const db  = 20 * Math.log10((rms||1)/64);
         const pct = Math.min(100, (peak/64)*100);
         updateMeter(pct, db);
@@ -375,8 +346,12 @@
   async function onPTTStop() {
     if (!chunks.length) { setTxt(transcriptEl,'(no audio captured)'); return; }
     const blob = new Blob(chunks, { type: mediaRecorder?.mimeType || 'audio/webm' });
+
+    // Guard: too small => skip STT (avoids OpenAI 400s on breath/noise)
+    if (blob.size < 8 * 1024) { setTxt(transcriptEl, '(no speech)'); return; }
+
     const ab   = await blob.arrayBuffer();
-    const baseMime = (blob.type || 'audio/webm').split(';')[0];
+    const baseMime = (blob.type || 'audio/webm').split(';')[0]; // strip codecs
     const dataUrl  = `data:${baseMime};base64,${arrayToBase64(ab)}`;
 
     const resp = await fetch('/.netlify/functions/stt', {
@@ -392,14 +367,11 @@
     if (!transcript) return;
 
     const reply = await chatStream(transcript, getVoice());
-    // Prefer streaming; both endpoints can now cope with missing voice (server default)
     try { await speakStream(reply, getVoice()); }
     catch { await speakFallback(reply, getVoice()); }
   }
 
-  // =========================
-  //  H A N D L E R S
-  // =========================
+  // ---- Chat handlers
   async function handleSend() {
     await stopSpeaking();
     const text = inputEl.value.trim();
@@ -408,14 +380,14 @@
     try { await speakStream(reply, getVoice()); }
     catch { await speakFallback(reply, getVoice()); }
   }
-
   async function handleSpeak() {
     const text = (replyEl?.textContent?.trim() || inputEl?.value?.trim() || '');
     if (!text) return;
-    await speakStream(text, getVoice()); // toggles stop if already speaking
+    try { await speakStream(text, getVoice()); }
+    catch { await speakFallback(text, getVoice()); }
   }
 
-  // wire UI
+  // Wire UI
   sendBtn?.addEventListener('click', handleSend);
   speakBtn?.addEventListener('click', handleSpeak);
   stopBtn?.addEventListener('click', stopSpeaking);
@@ -424,20 +396,13 @@
   pttBtn?.addEventListener('pointerup', stopPTT);
   pttBtn?.addEventListener('pointerleave', stopPTT);
 
-  // keyboard: Space = PTT, S = stop TTS, Enter = send
   window.addEventListener('keydown', (e) => {
     if (e.code === 'Space' && !e.repeat) { e.preventDefault(); startPTT(); }
     if (e.key?.toLowerCase() === 's')   { e.preventDefault(); stopSpeaking(); }
-    if (e.key === 'Enter' && e.target === inputEl && !e.shiftKey) {
-      e.preventDefault(); handleSend();
-    }
+    if (e.key === 'Enter' && e.target === inputEl && !e.shiftKey) { e.preventDefault(); handleSend(); }
   });
-  window.addEventListener('keyup', (e) => {
-    if (e.code === 'Space') { e.preventDefault(); stopPTT(); }
-  });
+  window.addEventListener('keyup', (e) => { if (e.code === 'Space') { e.preventDefault(); stopPTT(); } });
 
-  // init
-  loadVoices().finally(() => {
-    console.log('[Keilani] chat.js ready (streaming TTS + voices)');
-  });
+  // Init
+  loadVoices().finally(() => console.log('[Keilani] chat.js ready (streaming TTS + voices + robust STT)'));
 })();
