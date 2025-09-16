@@ -1,14 +1,11 @@
 // netlify/edge-functions/chat-stream.js
-// Edge Function (ESM) – reliable streaming SSE proxy for OpenAI Chat Completions
-// POST { message, history?: [{role:"user"|"assistant", text:string}] } -> SSE { delta: "..." }
+// Edge Function (ESM) — streams OpenAI Chat Completions as SSE { delta: "..." }.
+// POST { message, history?: [{role:"user"|"assistant", text:string}] }
 
-export default async (request, context) => {
+export default async (request) => {
   try {
     if (request.method === "OPTIONS") {
-      return new Response("", {
-        status: 204,
-        headers: corsHeaders(),
-      });
+      return new Response("", { status: 204, headers: corsHeaders() });
     }
     if (request.method !== "POST") {
       return json(405, { error: "method_not_allowed" });
@@ -16,24 +13,17 @@ export default async (request, context) => {
 
     const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
     const MODEL = Deno.env.get("OPENAI_CHAT_MODEL") || "gpt-4o-mini";
-    if (!OPENAI_API_KEY) {
-      return json(500, { error: "missing_openai_key" });
-    }
+    if (!OPENAI_API_KEY) return json(500, { error: "missing_openai_key" });
 
     let body = {};
-    try {
-      body = await request.json();
-    } catch {
-      return json(400, { error: "invalid_json" });
-    }
+    try { body = await request.json(); }
+    catch { return json(400, { error: "invalid_json" }); }
 
     const userText = String(body?.message || "").trim();
-    const history = Array.isArray(body?.history) ? body.history.slice(-10) : [];
-    if (!userText) {
-      return json(400, { error: "missing_text" });
-    }
+    const history  = Array.isArray(body?.history) ? body.history.slice(-10) : [];
+    if (!userText) return json(400, { error: "missing_text" });
 
-    // Build messages for chat.completions
+    // Build chat.completions messages
     const messages = [
       {
         role: "system",
@@ -41,8 +31,8 @@ export default async (request, context) => {
           "You are Keilani: concise, warm, and helpful. Keep responses brief unless asked. If the user is vague, ask one short clarifying question.",
       },
       ...history
-        .filter((h) => h && h.text)
-        .map((h) => ({
+        .filter(h => h && h.text)
+        .map(h => ({
           role: h.role === "assistant" ? "assistant" : "user",
           content: String(h.text || "").trim(),
         }))
@@ -50,41 +40,32 @@ export default async (request, context) => {
       { role: "user", content: userText },
     ];
 
-    // Start OpenAI streaming request from the edge (fast + stable)
+    // OpenAI streaming request from the edge
     const upstream = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${OPENAI_API_KEY}`,
         "Content-Type": "application/json",
       },
-      body: JSON.stringify({
-        model: MODEL,
-        messages,
-        stream: true,
-      }),
+      body: JSON.stringify({ model: MODEL, messages, stream: true }),
     });
 
-    // If upstream refuses streaming, fallback to one-shot and re-emit as SSE
+    // If streaming not available, do one-shot and re-emit as SSE
     if (!upstream.ok || !upstream.body) {
       const fallback = await fetch("https://api.openai.com/v1/chat/completions", {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${OPENAI_API_KEY}`,
-          "Content-Type": "application/json",
+            Authorization: `Bearer ${OPENAI_API_KEY}`,
+            "Content-Type": "application/json",
         },
-        body: JSON.stringify({
-          model: MODEL,
-          messages,
-          stream: false,
-        }),
+        body: JSON.stringify({ model: MODEL, messages }),
       });
 
       let fullText = "";
       if (fallback.ok) {
         const j = await fallback.json().catch(() => ({}));
         if (Array.isArray(j?.choices) && j.choices.length) {
-          const c = j.choices[0];
-          fullText = c?.message?.content || c?.text || "";
+          fullText = j.choices[0]?.message?.content || j.choices[0]?.text || "";
         }
       }
 
@@ -103,7 +84,7 @@ export default async (request, context) => {
       );
     }
 
-    // Translate OpenAI’s SSE to { delta } SSE
+    // Translate OpenAI SSE -> { delta } SSE for the client
     const reader = upstream.body.getReader();
     const dec = new TextDecoder();
     const enc = new TextEncoder();
@@ -131,7 +112,7 @@ export default async (request, context) => {
             try {
               const evt = JSON.parse(data);
               const choice = Array.isArray(evt?.choices) ? evt.choices[0] : null;
-              const piece = choice?.delta?.content || "";
+              const piece  = choice?.delta?.content || "";
               if (piece) send({ delta: piece });
             } catch {
               if (data) send({ delta: data });
@@ -142,12 +123,7 @@ export default async (request, context) => {
         controller.enqueue(enc.encode("data: [DONE]\n\n"));
         controller.close();
       },
-
-      cancel() {
-        try {
-          reader.cancel();
-        } catch {}
-      },
+      cancel() { try { reader.cancel(); } catch {} },
     });
 
     return new Response(stream, { headers: sseHeaders() });
@@ -172,11 +148,7 @@ const sseHeaders = () => ({
 });
 
 const json = (status, body) =>
-  new Response(JSON.stringify(body), {
-    status,
-    headers: { ...corsHeaders(), "Content-Type": "application/json" },
-  });
+  new Response(JSON.stringify(body), { status, headers: { ...corsHeaders(), "Content-Type": "application/json" } });
 
-export const config = {
-  path: "/api/chat-stream", // route this Edge Function here
-};
+// Optional (TOML already binds routes; this is harmless to keep)
+export const config = { path: "/api/chat-stream" };

@@ -5,13 +5,13 @@
 [functions]
   node_bundler = "esbuild"
 
-# Serve static assets directly
+# ---------- Static assets ----------
 [[redirects]]
   from = "/assets/*"
   to = "/assets/:splat"
   status = 200
 
-# API routes
+# ---------- Node Functions (JSON / non-streaming) ----------
 [[redirects]]
   from = "/api/chat"
   to = "/.netlify/functions/chat"
@@ -21,7 +21,7 @@
   from = "/api/stt"
   to = "/.netlify/functions/stt"
   status = 200
-  
+
 [[redirects]]
   from = "/api/eleven-token"
   to   = "/.netlify/functions/eleven-token"
@@ -46,29 +46,32 @@
   from = "/api/rtc/token"
   to = "/.netlify/functions/rtc-token"
   status = 200
-  
+
 [[redirects]]
   from = "/api/voices"
   to = "/.netlify/functions/voices"
   status = 200
 
-# Correct MIME type for .js in assets
+# ---------- Edge Function (SSE streaming) ----------
+# Bind the edge function to BOTH routes so the frontend can use either.
+[[edge_functions]]
+  path = "/api/chat-stream"
+  function = "chat-stream"
+
+[[edge_functions]]
+  path = "/.netlify/functions/chat-stream"
+  function = "chat-stream"
+
+# ---------- Headers ----------
+# Correct MIME for asset JS
 [[headers]]
-for = "/assets/*.js"
+  for = "/assets/*.js"
   [headers.values]
   Content-Type = "application/javascript"
 
-[[edge_functions]]
-path = "/api/chat-stream"
-function = "chat-stream"
-
-[[edge_functions]]
-path = "/.netlify/functions/chat-stream"
-function = "chat-stream"
-  
-# Global headers
+# Global security headers
 [[headers]]
-for = "/*"
+  for = "/*"
   [headers.values]
   Content-Security-Policy = '''
     default-src 'self';
