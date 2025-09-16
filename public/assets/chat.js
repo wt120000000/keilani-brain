@@ -420,28 +420,60 @@
   }
   function arrayToBase64(buf){ let b=''; const a=new Uint8Array(buf); for(let i=0;i<a.byteLength;i++) b+=String.fromCharCode(a[i]); return btoa(b); }
 
+  // --- replace your existing startPTT with this version ---
   async function startPTT() {
     try {
-      // If speaking, barge-in first
-      if (!speaker.paused || ttsAbort) await stopSpeaking();
+    // If speaking, BARGE-IN first (stop TTS) then continue straight to recording
+      if (!speaker.paused || ttsAbort) {
+        console.log('[PTT] barge-in: stopping TTS then starting capture');
+        await stopSpeaking(); // do not return; we want to continue into recording
+      }
 
-      if (isRecording || state === State.THINK || state === State.SPEAK || state === State.TRANSCRIBE) return;
-      unlockAudioOnce(); setStatus(State.LISTEN); isRecording = true; chunks = [];
+    // Don't start a second recorder, and don't interrupt STT/Think
+      if (isRecording || state === State.THINK || state === State.TRANSCRIBE) {
+        console.log('[PTT] blocked: isRecording/THINK/TRANSCRIBE');
+        return;
+      }
+
+      unlockAudioOnce();
+
+      // IMPORTANT: move status to LISTEN now so our old SPEAK state doesn't block us
+      setStatus(State.LISTEN);
+      isRecording = true;
+      chunks = [];
 
       const stream = await navigator.mediaDevices.getUserMedia({
-        audio:{ channelCount:1, echoCancellation:false, noiseSuppression:false, autoGainControl:false, sampleRate:48000 }
+        audio: {
+          channelCount: 1,
+          echoCancellation: false,
+          noiseSuppression: false,
+          autoGainControl: false,
+          sampleRate: 48000,
+        },
       });
-      mediaStream = stream; startMeter(stream);
+      mediaStream = stream;
+      startMeter(stream);
 
       const mime = recorderMime();
-      mediaRecorder = new MediaRecorder(stream, { mimeType: mime, audioBitsPerSecond: 128000 });
-      mediaRecorder.ondataavailable = (e)=>{ if (e.data && e.data.size) chunks.push(e.data); };
+      mediaRecorder = new MediaRecorder(stream, {
+        mimeType: mime,
+        audioBitsPerSecond: 128000,
+      });
+
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data && e.data.size) chunks.push(e.data);
+      };
       mediaRecorder.onstop = onPTTStop;
+
       mediaRecorder.start(250);
+      console.log('[PTT] recording… mime =', mime);
     } catch (e) {
-      console.error('[PTT] gUM', e); isRecording = false; setStatus(State.IDLE);
+      console.error('[PTT] gUM/start error', e);
+      isRecording = false;
+      setStatus(State.IDLE);
     }
   }
+
   async function stopPTT() {
     try {
       if (!isRecording) return;
