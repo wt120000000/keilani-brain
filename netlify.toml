@@ -4,10 +4,6 @@
 
 [functions]
   node_bundler = "esbuild"
-  
-[[edge_functions]]
-  path = "/api/chat-stream"
-  function = "chat-stream"
 
 # Serve static assets directly
 [[redirects]]
@@ -62,13 +58,10 @@ for = "/assets/*.js"
   [headers.values]
   Content-Type = "application/javascript"
 
-[[headers]]
-  for = "/api/chat-stream"
-  [headers.values]
-  Cache-Control = "no-cache, no-transform"
-  Access-Control-Allow-Origin = "https://api.keilani.ai"
-  Access-Control-Allow-Methods = "POST, OPTIONS"
-  Access-Control-Allow-Headers = "Content-Type, Authorization, X-Requested-With"
+# netlify.toml
+[edge_functions]
+  path = "/api/chat-stream"
+  function = "chat-stream"
   
 # Global headers
 [[headers]]
