@@ -1,6 +1,12 @@
 // netlify/functions/chat-stream.js
 // POST { message, voice?, history?: [{role:"user"|"assistant", text:string}] }
 // -> text/event-stream with { delta: "..." } chunks and a final [DONE]
+//
+// Uses OpenAI *Chat Completions* streaming (stable).
+// - CommonJS (no ESM) for your eslint/husky
+// - Backoff on 429/5xx
+// - Non-streaming fallback if stream cannot be opened
+// - Keeps your short session memory from the client
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -19,9 +25,10 @@ const json = (status, body) => ({ statusCode: status, headers: JSON_HEADERS, bod
 exports.handler = async (event) => {
   try {
     if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers: CORS, body: "" };
-    if (event.httpMethod !== "POST")  return json(405, { error: "method_not_allowed" });
+    if (event.httpMethod !== "POST") return json(405, { error: "method_not_allowed" });
 
     const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+    // Any chat-completions-capable model works; defaults to gpt-4o-mini
     const MODEL = process.env.OPENAI_CHAT_MODEL || "gpt-4o-mini";
     if (!OPENAI_API_KEY) return json(500, { error: "missing_openai_key" });
 
@@ -30,11 +37,11 @@ exports.handler = async (event) => {
     catch { return json(400, { error: "invalid_json" }); }
 
     const userText = (body.message || "").trim();
-    const history  = Array.isArray(body.history) ? body.history.slice(-10) : [];
+    const history = Array.isArray(body.history) ? body.history.slice(-10) : [];
     if (!userText) return json(400, { error: "missing_text" });
 
-    // System + (short) history + current message
-    const input = [
+    // Build chat.completions messages
+    const messages = [
       {
         role: "system",
         content:
@@ -49,11 +56,11 @@ exports.handler = async (event) => {
 
     const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
-    async function openaiRequest(opts) {
+    async function openaiRequest(path, opts) {
       let lastErr = null;
       for (let attempt = 0; attempt < 3; attempt++) {
         try {
-          const resp = await fetch("https://api.openai.com/v1/responses", {
+          const resp = await fetch(`https://api.openai.com/v1/${path}`, {
             method: "POST",
             headers: {
               "Authorization": `Bearer ${OPENAI_API_KEY}`,
@@ -76,37 +83,26 @@ exports.handler = async (event) => {
       throw new Error(lastErr || "openai_request_failed");
     }
 
-    // Try STREAMING first
+    // Try STREAMING first via chat.completions
     let upstream = null;
     try {
-      upstream = await openaiRequest({
+      upstream = await openaiRequest("chat/completions", {
         model: MODEL,
-        input,
+        messages,
         stream: true,
-        modalities: ["text"],
       });
     } catch (e) {
-      // If streaming creation itself failed, try NON-STREAMING once, then yield as one SSE payload
-      const nonStream = await openaiRequest({
+      // Fallback to NON-STREAM (one-shot) and re-emit as SSE
+      const nonStream = await openaiRequest("chat/completions", {
         model: MODEL,
-        input,
+        messages,
         stream: false,
-        modalities: ["text"],
       });
       const j = await nonStream.json().catch(() => ({}));
-      // Four common shapes across models:
       let fullText = "";
-      if (j?.output_text) {
-        fullText = String(j.output_text || "");
-      } else if (Array.isArray(j?.output)) {
-        fullText = j.output
-          .map(b => {
-            const t = b?.content?.[0]?.text?.value;
-            return typeof t === "string" ? t : "";
-          })
-          .join("");
-      } else if (Array.isArray(j?.choices)) {
-        fullText = j.choices.map(c => c?.message?.content || c?.text || "").join("");
+      if (Array.isArray(j?.choices) && j.choices.length) {
+        const c = j.choices[0];
+        fullText = c?.message?.content || c?.text || "";
       }
       const encoder = new TextEncoder();
       const stream = new ReadableStream({
@@ -121,16 +117,19 @@ exports.handler = async (event) => {
       return new Response(stream, { headers: SSE_HEADERS });
     }
 
-    // If we got a streaming response, translate its SSE to {delta} SSE
+    // Streaming available
     if (!upstream?.body) {
-      // Extremely rare: server says OK but no body; fallback quickly
-      const nonStream = await openaiRequest({ model: MODEL, input, stream: false, modalities: ["text"] });
+      // Rare: OK but no body; use non-stream fallback
+      const nonStream = await openaiRequest("chat/completions", {
+        model: MODEL,
+        messages,
+        stream: false,
+      });
       const j = await nonStream.json().catch(() => ({}));
-      let fullText = j?.output_text || "";
-      if (!fullText && Array.isArray(j?.output)) {
-        fullText = j.output
-          .map(b => b?.content?.[0]?.text?.value || "")
-          .join("");
+      let fullText = "";
+      if (Array.isArray(j?.choices) && j.choices.length) {
+        const c = j.choices[0];
+        fullText = c?.message?.content || c?.text || "";
       }
       const encoder = new TextEncoder();
       const stream = new ReadableStream({
@@ -145,6 +144,7 @@ exports.handler = async (event) => {
       return new Response(stream, { headers: SSE_HEADERS });
     }
 
+    // Translate OpenAI's SSE to {delta} SSE
     const reader  = upstream.body.getReader();
     const encoder = new TextEncoder();
     const decoder = new TextDecoder();
@@ -160,32 +160,29 @@ exports.handler = async (event) => {
           if (done) break;
           buffer += decoder.decode(value, { stream: true });
 
-          // Responses API returns its own SSE; parse lines
           let idx;
           while ((idx = buffer.indexOf("\n")) >= 0) {
             const line = buffer.slice(0, idx).trim();
             buffer = buffer.slice(idx + 1);
-            if (!line.startsWith("data:")) continue;
 
+            if (!line.startsWith("data:")) continue;
             const data = line.slice(5).trim();
-            if (!data || data === "[DONE]") continue;
+
+            if (data === "[DONE]") {
+              // OpenAI end marker — we'll finalize after loop
+              continue;
+            }
 
             try {
               const evt = JSON.parse(data);
-              if (evt.type === "response.output_text.delta" && typeof evt.delta === "string") {
-                send({ delta: evt.delta });
-              } else if (evt.type === "response.delta" && Array.isArray(evt.delta)) {
-                // Extract any text blocks if present
-                const parts = [];
-                for (const d of evt.delta) {
-                  const t = d?.content?.[0]?.text?.value;
-                  if (t) parts.push(t);
-                }
-                if (parts.length) send({ delta: parts.join("") });
-              }
+              // Standard chat.completions stream payload:
+              // { id, choices: [{ delta: { role?, content? }, finish_reason, ... }], ... }
+              const choice = Array.isArray(evt?.choices) ? evt.choices[0] : null;
+              const piece  = choice?.delta?.content || "";
+              if (piece) send({ delta: piece });
             } catch {
-              // Forward raw payload if not JSON
-              send({ delta: data });
+              // Forward raw if not JSON
+              if (data) send({ delta: data });
             }
           }
         }
@@ -193,9 +190,7 @@ exports.handler = async (event) => {
         controller.enqueue(encoder.encode("data: [DONE]\n\n"));
         controller.close();
       },
-      cancel() {
-        try { reader.cancel(); } catch {}
-      },
+      cancel() { try { reader.cancel(); } catch {} },
     });
 
     return new Response(stream, { headers: SSE_HEADERS });
