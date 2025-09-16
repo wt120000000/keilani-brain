@@ -1,19 +1,25 @@
 /* public/assets/chat.js
-   Keilani Brain — Live (text + push-to-talk + barge-in + VAD-lite)
+   Keilani Brain — Live (PTT + VAD + barge-in) with mic meter & sensitivity
 */
 
 (() => {
   const $ = (sel) => document.querySelector(sel);
 
+  // DOM
   const inputEl      = $('#textIn');
   const sendBtn      = $('#sendBtn');
   const speakBtn     = $('#speakBtn');
-  const stopBtn      = $('#stopBtn'); // needs <button id="stopBtn">Stop</button>
+  const stopBtn      = $('#stopBtn');          // optional Stop button
   const pttBtn       = $('#pttBtn');
   const voiceSel     = $('#voicePick');
   const transcriptEl = $('#transcriptBox');
   const replyEl      = $('#reply');
   const ttsPlayer    = $('#ttsPlayer');
+
+  // NEW: meter UI
+  const micBar       = $('#micBar');
+  const micDb        = $('#micDb');
+  const vadSlider    = $('#vadThresh');        // 1 (very sensitive) .. 12 (less sensitive)
 
   let audioUnlocked = false;
   function unlockAudio() {
@@ -30,12 +36,12 @@
   }
   document.addEventListener('pointerdown', unlockAudio, { once: true });
 
-  function getVoice() { return voiceSel?.value || ''; }
-  function setTranscript(t) { if (transcriptEl) transcriptEl.textContent = t || '(no speech)'; }
-  function appendReply(txt) { if (replyEl) replyEl.textContent += txt; }
-  function clearReply() { if (replyEl) replyEl.textContent = ''; }
+  const getVoice = () => (voiceSel?.value || '');
+  const setTranscript = (t) => { if (transcriptEl) transcriptEl.textContent = t || '(no speech)'; };
+  const appendReply   = (txt) => { if (replyEl) replyEl.textContent += txt; };
+  const clearReply    = () => { if (replyEl) replyEl.textContent = ''; };
 
-  // ------------------ TTS (simple, with barge-in) ------------------
+  // ---------- TTS (simple) + barge-in ----------
   let ac, source, analyser, rafId;
   function stopSpeaking() {
     try { ttsPlayer.pause(); } catch {}
@@ -44,6 +50,7 @@
     if (source) try { source.disconnect(); } catch {}
     if (analyser) try { analyser.disconnect(); } catch {}
     console.log('[TTS] stopSpeaking() – barge in');
+    $('#speakLed')?.remove();
   }
 
   async function speak(text, voice) {
@@ -57,15 +64,16 @@
       body: JSON.stringify({ text, voice }),
     });
     if (!resp.ok) throw new Error('TTS failed');
-    const ab = await resp.arrayBuffer();
+
+    const ab  = await resp.arrayBuffer();
     const url = URL.createObjectURL(new Blob([ab], { type: 'audio/mpeg' }));
     ttsPlayer.src = url;
 
-    // LED feedback
+    // LED
     const AC = window.AudioContext || window.webkitAudioContext;
     if (!ac && AC) ac = new AC();
     if (ac) {
-      source = ac.createMediaElementSource(ttsPlayer);
+      source   = ac.createMediaElementSource(ttsPlayer);
       analyser = ac.createAnalyser();
       source.connect(analyser);
       analyser.connect(ac.destination);
@@ -86,16 +94,13 @@
       };
       draw();
 
-      ttsPlayer.onended = () => {
-        stopSpeaking();
-        $('#speakLed')?.remove();
-      };
+      ttsPlayer.onended = () => { stopSpeaking(); };
     }
 
     try { await ttsPlayer.play(); } catch { console.warn('[TTS] autoplay blocked'); }
   }
 
-  // ------------------ Chat-stream (SSE) ------------------
+  // ---------- chat-stream (SSE) ----------
   async function chatStream(msg, voice) {
     const text = (msg || '').trim();
     if (!text) throw new Error('missing_text');
@@ -109,9 +114,9 @@
     if (!resp.ok || !resp.body) throw new Error('chat-stream failed');
 
     const reader = resp.body.getReader();
-    const dec = new TextDecoder();
-    let buffer = '';
-    let finalText = '';
+    const dec    = new TextDecoder();
+    let buffer   = '';
+    let final    = '';
 
     while (true) {
       const { value, done } = await reader.read();
@@ -125,25 +130,24 @@
         if (!line.startsWith('data:')) continue;
         const data = line.slice(5).trim();
         if (data === '[DONE]') break;
-
         try {
           const obj = JSON.parse(data);
           const delta = obj.delta || obj.content || obj.text || '';
-          if (delta) { finalText += delta; appendReply(delta); }
+          if (delta) { final += delta; appendReply(delta); }
         } catch {}
       }
     }
-    return finalText.trim();
+    return final.trim();
   }
 
-  // ------------------ STT (PTT + VAD-lite) ------------------
+  // ---------- STT (PTT + VAD + meter) ----------
   let mediaStream, mediaRecorder, chunks = [], silenceTimer, vadActive = false;
 
-  function arrayToBase64(buf) {
+  const arrayToBase64 = (buf) => {
     let bin = '', bytes = new Uint8Array(buf);
     for (let b of bytes) bin += String.fromCharCode(b);
     return btoa(bin);
-  }
+  };
   function recorderMime() {
     if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) return 'audio/webm;codecs=opus';
     if (MediaRecorder.isTypeSupported('audio/webm')) return 'audio/webm';
@@ -152,8 +156,13 @@
     return 'audio/webm';
   }
 
+  function updateMeter(pct, db) {
+    if (micBar) micBar.style.width = `${Math.max(0, Math.min(100, pct))}%`;
+    if (micDb)  micDb.textContent  = `${db.toFixed(1)} dB`;
+  }
+
   async function startPTT() {
-    // Barge-in while speaking, then start recording immediately
+    // barge-in
     stopSpeaking();
 
     chunks = [];
@@ -162,28 +171,48 @@
     mediaRecorder = new MediaRecorder(mediaStream, { mimeType: mime });
     console.log('[PTT] recording… mime=', mime);
 
-    // VAD-lite based on time-domain amplitude
+    // VAD + meter
     const AC = window.AudioContext || window.webkitAudioContext;
     const ctx = AC ? new AC() : null;
     let analyser, data;
     if (ctx) {
       const src = ctx.createMediaStreamSource(mediaStream);
-      analyser = ctx.createAnalyser();
+      analyser  = ctx.createAnalyser();
       src.connect(analyser);
       analyser.fftSize = 512;
       data = new Uint8Array(analyser.fftSize);
 
+      // thresh knob: lower = more sensitive
+      const getThresh = () => {
+        const v = Number(vadSlider?.value || 4); // 1..12
+        // map 1..12  -> amplitude 0.8..2.5
+        return 0.8 + (v-1) * ((2.5-0.8)/11);
+      };
+
       vadActive = true;
-      (function checkSilence() {
+      (function loop() {
         if (!vadActive || !analyser) return;
+
         analyser.getByteTimeDomainData(data);
-        const avg = data.reduce((a, b) => a + Math.abs(b - 128), 0) / data.length;
-        if (avg < 2) {
-          if (!silenceTimer) silenceTimer = setTimeout(stopPTT, 1200);
+        // center around 128, compute peak & RMS-ish value
+        let peak = 0, sum = 0;
+        for (let i=0;i<data.length;i++) {
+          const v = Math.abs(data[i]-128);
+          if (v > peak) peak = v;
+          sum += v*v;
+        }
+        const rms = Math.sqrt(sum / data.length);     // ~0..128
+        const db  = 20 * Math.log10((rms || 1)/64);   // crude display
+        const pct = Math.min(100, (peak/64)*100);
+        updateMeter(pct, db);
+
+        const thr = getThresh();
+        if (rms < thr) {
+          if (!silenceTimer) silenceTimer = setTimeout(stopPTT, 1100);
         } else {
           if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
         }
-        requestAnimationFrame(checkSilence);
+        requestAnimationFrame(loop);
       })();
     }
 
@@ -195,20 +224,19 @@
   async function stopPTT() {
     vadActive = false;
     if (silenceTimer) { clearTimeout(silenceTimer); silenceTimer = null; }
+    updateMeter(0, 0);
     if (mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.stop();
     if (mediaStream) { mediaStream.getTracks().forEach(t => t.stop()); mediaStream = null; }
   }
 
   async function onPTTStop() {
     if (!chunks.length) { setTranscript('(no audio captured)'); return; }
-
     const blob = new Blob(chunks, { type: mediaRecorder?.mimeType || 'audio/webm' });
-    const ab = await blob.arrayBuffer();
-    const b64 = arrayToBase64(ab);
+    const ab   = await blob.arrayBuffer();
+    const b64  = arrayToBase64(ab);
 
-    // IMPORTANT: use the BASE MIME, not "audio/webm;codecs=opus"
     const baseMime = (blob.type || 'audio/webm').split(';')[0];
-    const dataUrl = `data:${baseMime};base64,${b64}`;
+    const dataUrl  = `data:${baseMime};base64,${b64}`;
 
     const resp = await fetch('/.netlify/functions/stt', {
       method: 'POST',
@@ -217,7 +245,7 @@
     });
 
     const raw = await resp.text().catch(()=> '');
-    let json = {}; try { json = JSON.parse(raw); } catch {}
+    let json  = {}; try { json = JSON.parse(raw); } catch {}
     console.log('[PTT] STT', resp.status, json);
 
     if (!resp.ok) {
@@ -235,7 +263,7 @@
     await speak(reply, getVoice());
   }
 
-  // ------------------ Handlers ------------------
+  // ---------- handlers ----------
   async function handleSend() {
     stopSpeaking();
     const text = inputEl.value.trim();
@@ -249,7 +277,7 @@
     if (text) await speak(text, getVoice());
   }
 
-  // ------------------ UI bindings ------------------
+  // UI bindings
   sendBtn?.addEventListener('click', handleSend);
   speakBtn?.addEventListener('click', handleSpeak);
   stopBtn?.addEventListener('click', stopSpeaking);
@@ -258,11 +286,13 @@
   pttBtn?.addEventListener('pointerup', stopPTT);
   pttBtn?.addEventListener('pointerleave', stopPTT);
 
-  // Keyboard helpers: Space = PTT, S = stop TTS
+  // keyboard: Space = PTT, S = stop TTS, Enter = send
   window.addEventListener('keydown', (e) => {
     if (e.code === 'Space' && !e.repeat) { e.preventDefault(); startPTT(); }
-    if (e.key.toLowerCase() === 's') { e.preventDefault(); stopSpeaking(); }
-    if (e.key === 'Enter' && e.target === inputEl && !e.shiftKey) { e.preventDefault(); handleSend(); }
+    if (e.key.toLowerCase() === 's')    { e.preventDefault(); stopSpeaking(); }
+    if (e.key === 'Enter' && e.target === inputEl && !e.shiftKey) {
+      e.preventDefault(); handleSend();
+    }
   });
   window.addEventListener('keyup', (e) => {
     if (e.code === 'Space') { e.preventDefault(); stopPTT(); }

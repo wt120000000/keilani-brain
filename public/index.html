@@ -138,6 +138,20 @@
       .state-dot.hot {
         background: #19c37d;
       }
+      .meter {
+        position: relative;
+        width: 180px;
+        height: 8px;
+        background: #0f1319;
+        border: 1px solid #273142;
+        border-radius: 999px;
+        overflow: hidden;
+      }
+      .meter #micBar {
+        height: 100%;
+        width: 0%;
+        background: #22c55e;
+      }
     </style>
   </head>
   <body>
@@ -161,6 +175,27 @@
               <button id="sendBtn" class="primary">Send</button>
               <button id="speakBtn">Speak Reply</button>
               <button id="pttBtn">Hold to talk</button>
+              <!-- Mic meter + VAD threshold -->
+              <div
+                class="row"
+                style="gap: 8px; align-items: center; margin-top: 8px"
+              >
+                <div class="meter">
+                  <div id="micBar"></div>
+                </div>
+                <span id="micDb" class="mono muted">– dB</span>
+
+                <label class="muted" style="margin-left: 8px">VAD</label>
+                <input
+                  id="vadThresh"
+                  type="range"
+                  min="1"
+                  max="12"
+                  value="4"
+                  step="1"
+                />
+              </div>
+
               <button id="stopBtn">Stop</button>
 
               <span id="stateDot" class="state-dot" aria-hidden="true"></span>
