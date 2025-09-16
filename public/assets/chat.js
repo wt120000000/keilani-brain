@@ -1,9 +1,9 @@
 /* public/assets/chat.js
    Keilani Brain — Live
    - Streaming OpenAI (server SSE) + streaming ElevenLabs TTS (MediaSource)
-   - Barge-in: PTT or Speak stops current TTS immediately
+   - Barge-in: Speak/PTT can interrupt TTS at any time (Send is the only disabled button while busy)
    - Retries/backoff for chat, STT, TTS
-   - Mic meter with safe teardown (no analyser=null errors)
+   - Mic meter with safe teardown
 */
 
 (() => {
@@ -46,14 +46,37 @@
 
   // ------- Utils -------
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
-  function setBusy(b) { [sendBtn, speakBtn, pttBtn].forEach(el => el && el.classList.toggle('btn-busy', !!b)); }
+
+  // Only ever disable the Send button; keep Speak/PTT enabled for barge-in
+  function setBusySend(isBusy) {
+    if (sendBtn) {
+      sendBtn.disabled = !!isBusy;
+      sendBtn.classList.toggle('btn-busy', !!isBusy);
+      sendBtn.setAttribute('aria-disabled', isBusy ? 'true' : 'false');
+    }
+    if (speakBtn) {
+      speakBtn.disabled = false;
+      speakBtn.classList.remove('btn-busy');
+      speakBtn.removeAttribute('aria-disabled');
+    }
+    if (pttBtn) {
+      pttBtn.disabled = false;
+      pttBtn.classList.remove('btn-busy');
+      pttBtn.removeAttribute('aria-disabled');
+    }
+  }
+
   function setStatus(s) {
     state = s;
     setText(statusBadge, s);
+
     const hot = (s === State.LISTEN || s === State.TRANSCRIBE);
     if (stateDot) stateDot.classList.toggle('hot', hot);
-    setBusy(s === State.SPEAK || s === State.THINK || s === State.TRANSCRIBE);
+
+    const sendIsBusy = (s === State.SPEAK || s === State.THINK || s === State.TRANSCRIBE);
+    setBusySend(sendIsBusy);
   }
+
   async function fetchWithRetry(url, opts={}, { retries=2, baseDelay=400, maxDelay=2000, retryOn=(r)=>r.status===429||r.status>=500 } = {}) {
     let attempt = 0;
     while (true) {
@@ -93,10 +116,7 @@
       }
       const saved = localStorage.getItem('kb_voice_id') || '';
       if (saved && [...voiceSel.options].some(o => o.value === saved)) voiceSel.value = saved;
-      else {
-        const first = [...voiceSel.options].find(o => o.value);
-        if (first) voiceSel.value = first.value;
-      }
+      else { const first = [...voiceSel.options].find(o => o.value); if (first) voiceSel.value = first.value; }
       voiceSel.addEventListener('change', () => localStorage.setItem('kb_voice_id', voiceSel.value || ''));
       console.log('[VOICES] ready, selected:', voiceSel.value || '(none)');
     } catch (e) {
@@ -186,14 +206,8 @@
     speaker.addEventListener('ended', onEnded, { once: true });
 
     mse.addEventListener('sourceopen', async () => {
-      try {
-        sourceBuffer = mse.addSourceBuffer('audio/mpeg');
-      } catch (e) {
-        console.warn('[MSE] addSourceBuffer failed, falling back:', e);
-        resetMSE();
-        await speakFallback();
-        return;
-      }
+      try { sourceBuffer = mse.addSourceBuffer('audio/mpeg'); }
+      catch (e) { console.warn('[MSE] addSourceBuffer failed, falling back:', e); resetMSE(); await speakFallback(); return; }
 
       sourceBuffer.addEventListener('updateend', () => {
         if (!sourceBuffer || !chunkQueue.length || sourceBuffer.updating) return;
@@ -212,14 +226,12 @@
         if (!resp.ok || !resp.body) {
           let raw = ''; try { raw = await resp.text(); } catch {}
           console.error('[tts-stream] HTTP', resp.status, raw.slice(0,300));
-          resetMSE();
-          await speakFallback();
-          return;
+          resetMSE(); await speakFallback(); return;
         }
 
         const reader = resp.body.getReader();
-        // Start playback ASAP (even before first append — some browsers queue it)
-        speaker.play().catch(()=>{ /* user gesture needed */ });
+        // Start playback ASAP
+        speaker.play().catch(()=>{ /* needs gesture; user will click */ });
 
         while (true) {
           const { value, done } = await reader.read();
@@ -236,9 +248,7 @@
         }
 
         // finalize
-        const finish = () => {
-          try { if (mse && mse.readyState === 'open') mse.endOfStream(); } catch {}
-        };
+        const finish = () => { try { if (mse && mse.readyState === 'open') mse.endOfStream(); } catch {} };
         if (!sourceBuffer || !mse) finish();
         else if (!sourceBuffer.updating && chunkQueue.length === 0) finish();
         else {
