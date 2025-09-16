@@ -1,7 +1,12 @@
 // netlify/functions/chat-stream.js
-// Streams directly from OpenAI → re-emit as SSE. With per-IP rate limiting.
-
-import { allow } from "./_ratelimit.mjs";
+// POST { message, voice?, history?: [{role:"user"|"assistant", text:string}] }
+// -> text/event-stream with { delta: "..." } chunks and a final [DONE]
+//
+// Notes
+// - CJS (no ESM) to satisfy your eslint/husky rules
+// - Uses OpenAI "responses" streaming API and translates to simple SSE for the client
+// - Short system prompt + optional short history (<= 10 turns recommended)
+// - Backoff on 429/5xx
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -14,116 +19,156 @@ const SSE_HEADERS = {
   "Cache-Control": "no-cache, no-transform",
   "Connection": "keep-alive",
 };
-const JSON_HEADERS = { ...CORS, "Content-Type": "application/json" };
 
-function json(status, body) {
-  return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
-}
-function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
+const json = (status, body) => ({
+  statusCode: status,
+  headers: { ...CORS, "Content-Type": "application/json" },
+  body: JSON.stringify(body),
+});
 
-async function openAIStreamRequest(body, { retries = 2, baseDelay = 500, maxDelay = 2500 } = {}) {
-  const key = process.env.OPENAI_API_KEY;
-  if (!key) throw new Error("Missing OPENAI_API_KEY");
+exports.handler = async (event) => {
+  try {
+    if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers: CORS, body: "" };
+    if (event.httpMethod !== "POST") return json(405, { error: "method_not_allowed" });
 
-  let attempt = 0;
-  // retry loop
-  while (true) {
-    try {
-      const resp = await fetch("https://api.openai.com/v1/chat/completions", {
-        method: "POST",
-        headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json" },
-        body: JSON.stringify(body),
-      });
-      if (!resp.ok && (resp.status === 429 || resp.status >= 500) && attempt < retries) {
-        const delay = Math.min(maxDelay, baseDelay * Math.pow(2, attempt)) + Math.random()*150;
-        attempt++; await sleep(delay); continue;
-      }
-      return resp;
-    } catch (e) {
-      if (attempt >= retries) throw e;
-      const delay = Math.min(maxDelay, baseDelay * Math.pow(2, attempt)) + Math.random()*150;
-      attempt++; await sleep(delay);
+    const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+    const MODEL = process.env.OPENAI_CHAT_MODEL || "gpt-4o-mini";
+    if (!OPENAI_API_KEY) return json(500, { error: "missing_openai_key" });
+
+    let body = {};
+    try { body = JSON.parse(event.body || "{}"); }
+    catch { return json(400, { error: "invalid_json" }); }
+
+    const userText = (body.message || "").trim();
+    const history = Array.isArray(body.history) ? body.history.slice(-10) : [];
+    if (!userText) return json(400, { error: "missing_text" });
+
+    // Convert history to "input" messages for Responses API
+    const historyInputs = [];
+    for (const h of history) {
+      const role = h?.role === "assistant" ? "assistant" : "user";
+      const text = (h?.text || "").trim();
+      if (!text) continue;
+      historyInputs.push({ role, content: text });
     }
-  }
-}
 
-export default async (req) => {
-  if (req.method === "OPTIONS") return new Response("", { status: 204, headers: CORS });
-  if (req.method !== "POST")   return json(405, { error: "method_not_allowed" });
+    // Final input (system + history + current)
+    const input = [
+      {
+        role: "system",
+        content:
+          "You are Keilani: concise, warm, and helpful. Keep responses brief unless asked. If user is vague, ask a short clarifying question.",
+      },
+      ...historyInputs,
+      { role: "user", content: userText },
+    ];
 
-  // 9) rate limit
-  const ip = req.headers.get('x-nf-client-connection-ip') || req.headers.get('x-forwarded-for') || 'anon';
-  const cap = Number(process.env.RL_TOKENS || 30);
-  const rps = Number(process.env.RL_REFILL_PER_SEC || 1.5);
-  if (!allow(ip, { capacity: cap, refillPerSec: rps })) {
-    return json(429, { error: "rate_limited" });
-  }
+    // Backoff helper
+    const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+    async function openaiStream() {
+      let lastErr = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          const resp = await fetch("https://api.openai.com/v1/responses", {
+            method: "POST",
+            headers: {
+              "Authorization": `Bearer ${OPENAI_API_KEY}`,
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              model: MODEL,
+              input,
+              stream: true,
+              modalities: ["text"],
+            }),
+          });
+          if (resp.ok && resp.body) return resp;
+          if (resp.status === 429 || (resp.status >= 500 && resp.status <= 599)) {
+            await sleep(300 * Math.pow(2, attempt));
+            continue;
+          }
+          lastErr = await resp.text().catch(() => "");
+          break;
+        } catch (e) {
+          lastErr = String(e?.message || e);
+          await sleep(300 * Math.pow(2, attempt));
+        }
+      }
+      throw new Error(`openai_stream_failed: ${lastErr || "unknown"}`);
+    }
 
-  let payload = {};
-  try { payload = await req.json(); } catch { return json(400, { error: "bad_json" }); }
+    const upstream = await openaiStream();
+    const reader = upstream.body.getReader();
+    const encoder = new TextEncoder();
 
-  const userMessage = (payload?.message || "").toString();
-  if (!userMessage) return json(400, { error: "missing_message" });
+    const stream = new ReadableStream({
+      async start(controller) {
+        // Helper to push one SSE data line
+        const send = (obj) => {
+          controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
+        };
 
-  const model = process.env.OPENAI_CHAT_MODEL || "gpt-4o-mini";
-  const systemPrompt = process.env.SYSTEM_PROMPT || "You are Keilani, a helpful assistant.";
+        // Read OpenAI SSE and translate to {delta}
+        const textDec = new TextDecoder();
+        let buffer = "";
 
-  const oaiBody = {
-    model,
-    stream: true,
-    messages: [
-      { role: "system", content: systemPrompt },
-      { role: "user",   content: userMessage }
-    ],
-    temperature: 0.7
-  };
+        // Emit an initial event so client is ready
+        send({ event: "start" });
 
-  let upstream;
-  try { upstream = await openAIStreamRequest(oaiBody); }
-  catch (e) { return json(502, { error: "openai_connect_error", detail: String(e?.message || e) }); }
-
-  if (!upstream.ok || !upstream.body) {
-    const raw = await upstream.text().catch(() => "");
-    return json(upstream.status || 502, { error: "openai_error", raw: raw?.slice(0, 2000) });
-  }
-
-  const enc = new TextEncoder();
-  const decoder = new TextDecoder("utf-8");
-
-  const stream = new ReadableStream({
-    async start(controller) {
-      const reader = upstream.body.getReader();
-      let buffer = "";
-      const push = (obj) => controller.enqueue(enc.encode(`data: ${JSON.stringify(obj)}\n\n`));
-
-      try {
         while (true) {
           const { value, done } = await reader.read();
           if (done) break;
-          buffer += decoder.decode(value, { stream: true });
+          buffer += textDec.decode(value, { stream: true });
 
-          const parts = buffer.split("\n\n");
-          buffer = parts.pop() || "";
-          for (const part of parts) {
-            const line = part.trim();
+          // OpenAI responses SSE is line-based
+          let idx;
+          while ((idx = buffer.indexOf("\n")) >= 0) {
+            let line = buffer.slice(0, idx).trim();
+            buffer = buffer.slice(idx + 1);
+
             if (!line.startsWith("data:")) continue;
-            const data = line.slice(5).trim();
-            if (data === "[DONE]") continue;
+            const payload = line.slice(5).trim();
+            if (!payload || payload === "[DONE]") continue;
+
             try {
-              const obj = JSON.parse(data);
-              const delta = obj?.choices?.[0]?.delta?.content || "";
-              if (delta) push({ delta });
-            } catch { /* ignore */ }
+              const evt = JSON.parse(payload);
+
+              // The streaming text shows up in these delta events:
+              // - response.output_text.delta
+              // Some models may emit content via "response.delta" too; guard both.
+              if (evt.type === "response.output_text.delta" && typeof evt.delta === "string") {
+                send({ delta: evt.delta });
+              } else if (evt.type === "response.delta" && evt.delta?.length) {
+                // Rare format (array of blocks) — extract text blocks if any
+                const textParts = [];
+                for (const d of evt.delta) {
+                  const t = d?.content?.[0]?.text?.value;
+                  if (t) textParts.push(t);
+                }
+                if (textParts.length) send({ delta: textParts.join("") });
+              } else if (evt.type === "response.completed") {
+                // end of stream (ignore here; we'll send [DONE] after loop)
+              }
+            } catch {
+              // If it's plain text (shouldn't be), forward as-is
+              send({ delta: payload });
+            }
           }
         }
-      } catch (e) {
-        push({ error: "stream_error", detail: String(e?.message || e) });
-      } finally {
-        controller.enqueue(enc.encode(`data: [DONE]\n\n`));
-        controller.close();
-      }
-    }
-  });
 
-  return new Response(stream, { status: 200, headers: SSE_HEADERS });
+        // Close
+        controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+        controller.close();
+      },
+      cancel() {
+        try { reader.cancel(); } catch {}
+      },
+    });
+
+    // Return streaming response
+    return new Response(stream, { headers: SSE_HEADERS });
+  } catch (err) {
+    console.error("[chat-stream] exception", err);
+    return json(500, { error: "chat_stream_exception", detail: String(err?.message || err) });
+  }
 };
