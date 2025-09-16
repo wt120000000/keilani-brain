@@ -1,6 +1,8 @@
 // netlify/functions/stt.js
-// POST { audioBase64: "<raw base64 or data: URL>", language?: "en" } -> { transcript }
-// Zero external deps. Robust MIME/filename handling + careful retry.
+// POST { audioBase64: "<raw b64 or data: URL>", language?: "en" } -> { transcript }
+// MIME sniffing, filename hints, retry/backoff, per-IP rate limiting (CJS).
+
+const { allow } = require("./_ratelimit.cjs");
 
 function json(status, body) {
   return {
@@ -26,12 +28,9 @@ function sniffMagic(buf) {
   if (buf[0] === 0x1A && buf[1] === 0x45 && buf[2] === 0xDF && buf[3] === 0xA3) return "WEBM/MKV";
   return "unknown";
 }
-function baseContentType(ct) {
-  if (!ct) return "";
-  return ct.split(";")[0].trim().toLowerCase();
-}
+function baseCT(ct) { return (ct || "").split(";")[0].trim().toLowerCase(); }
 function normalizeFromHint(ct) {
-  const b = baseContentType(ct);
+  const b = baseCT(ct);
   if (b === "audio/webm") return "audio/webm";
   if (b === "audio/ogg" || b === "application/ogg") return "audio/ogg";
   if (b === "audio/wav" || b.includes("x-wav") || b.includes("wave")) return "audio/wav";
@@ -50,22 +49,28 @@ function filenameForCT(ct) {
   if (ct.includes("ogg"))  return "audio.ogg";
   if (ct.includes("wav"))  return "audio.wav";
   if (ct.includes("mpeg")) return "audio.mp3";
-  return "audio.bin"; // last resort
+  return "audio.bin";
 }
+function sleep(ms){ return new Promise(r=>setTimeout(r,ms)); }
 
-async function callOpenAI(form, key, signal) {
-  const resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${key}` },
-    body: form, // fetch sets multipart boundary
-    signal,
-  });
-  const text = await resp.text();
-  return { resp, text };
+async function callOpenAI(form, key, { retries = 2, baseDelay = 500, maxDelay = 2500 } = {}) {
+  let attempt = 0;
+  while (true) {
+    const resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${key}` },
+      body: form,
+    });
+    if (!resp.ok && (resp.status === 429 || resp.status >= 500) && attempt < retries) {
+      const delay = Math.min(maxDelay, baseDelay*Math.pow(2, attempt)) + Math.random()*150;
+      attempt++; await sleep(delay); continue;
+    }
+    const text = await resp.text();
+    return { resp, text };
+  }
 }
 
 exports.handler = async (event) => {
-  // CORS preflight
   if (event.httpMethod === "OPTIONS") {
     return {
       statusCode: 204,
@@ -79,13 +84,19 @@ exports.handler = async (event) => {
   }
   if (event.httpMethod !== "POST") return json(405, { error: "method_not_allowed" });
 
+  // 9) rate limit
+  const ip = event.headers['x-nf-client-connection-ip'] || event.headers['x-forwarded-for'] || 'anon';
+  const cap = Number(process.env.RL_TOKENS || 30);
+  const rps = Number(process.env.RL_REFILL_PER_SEC || 1.5);
+  if (!allow(ip, { capacity: cap, refillPerSec: rps })) {
+    return json(429, { error: "rate_limited" });
+  }
+
   const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
   const MODEL = process.env.OPENAI_STT_MODEL || "gpt-4o-mini-transcribe";
   if (!OPENAI_API_KEY) return json(500, { error: "missing_env", detail: "Missing OPENAI_API_KEY" });
 
-  // Parse body
-  let audioBase64 = "", hint = "";
-  let language;
+  let audioBase64 = "", hint = "", language;
   try {
     const body = JSON.parse(event.body || "{}");
     const raw = (body.audioBase64 || "").trim();
@@ -95,9 +106,9 @@ exports.handler = async (event) => {
     if (raw.startsWith("data:")) {
       const comma = raw.indexOf(",");
       if (comma < 0) return json(400, { error: "bad_data_url" });
-      const header = raw.substring(0, comma);                  // e.g. data:audio/webm;base64
+      const header = raw.substring(0, comma);
       audioBase64 = raw.substring(comma + 1);
-      const m = header.match(/^data:([^;]+)/);                 // take base type before any ;codecs
+      const m = header.match(/^data:([^;]+)/);
       if (m) hint = m[1];
     } else {
       audioBase64 = raw;
@@ -114,61 +125,51 @@ exports.handler = async (event) => {
     if (bytes < 200) return json(400, { error: "audio_too_small" });
     if (bytes > 25 * 1024 * 1024) return json(413, { error: "audio_too_large" });
 
-    // Decide content-type and filename:
     const ctFromMagic = contentTypeFromMagic(magic);
     const ctFromHint  = normalizeFromHint(hint);
-    // Prefer: hint → magic → webm (safe default)
     let contentType = ctFromHint || ctFromMagic || "audio/webm";
     let fileName    = filenameForCT(contentType);
 
     log("[STT] inbound", { hint: hint || null, magic, contentType, fileName, bytes, model: MODEL });
 
-    // Build multipart
-    const makeForm = (ct, name) => {
-      const file = new File([buf], name, { type: ct });
+    const file = new File([buf], fileName, { type: contentType });
+    const makeForm = () => {
       const form = new FormData();
       form.append("file", file);
       form.append("model", MODEL);
-      form.append("response_format", "json"); // supported by both whisper & 4o-mini-transcribe
+      form.append("response_format", "json");
       if (language) form.append("language", language);
       return form;
     };
 
-    const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 60_000);
-
-    // Attempt #1
-    let { resp, text } = await callOpenAI(makeForm(contentType, fileName), OPENAI_API_KEY, controller.signal);
+    let { resp, text } = await callOpenAI(makeForm(), OPENAI_API_KEY);
     log("[STT] openai#1", { status: resp.status, len: text?.length || 0, ct: resp.headers.get("content-type") });
 
-    // If unsupported/corrupted, retry once with **explicit** webm/ogg/wav based on best info
     if (!resp.ok && text) {
-      let err;
-      try { err = JSON.parse(text); } catch {}
+      let err; try { err = JSON.parse(text); } catch {}
       const msg  = (err?.error?.message || "").toLowerCase();
       const code = (err?.error?.code || "").toLowerCase();
       const unsupported = msg.includes("unsupported") || msg.includes("corrupted") || code.includes("invalid_value");
-
       if (unsupported) {
-        // Choose retry CT/name: prefer magic; if unknown but hint says webm/ogg/wav/mpeg, use that;
-        // else **force webm** instead of .bin (this fixes the "bin" case).
-        let retryCT = ctFromMagic || ctFromHint || "audio/webm";
-        let retryName = filenameForCT(retryCT);
-        ({ resp, text } = await callOpenAI(makeForm(retryCT, retryName), OPENAI_API_KEY, controller.signal));
+        const retryCT = ctFromMagic || ctFromHint || "audio/webm";
+        const retryName = filenameForCT(retryCT);
+        const retryFile = new File([buf], retryName, { type: retryCT });
+        const form = new FormData();
+        form.append("file", retryFile);
+        form.append("model", MODEL);
+        form.append("response_format", "json");
+        if (language) form.append("language", language);
+        ({ resp, text } = await callOpenAI(form, OPENAI_API_KEY));
         log("[STT] openai#2 (compat)", { status: resp.status, len: text?.length || 0, retryCT, retryName });
       }
     }
 
-    clearTimeout(timeout);
-
     if (!resp.ok) {
-      let detail = text;
-      try { detail = JSON.parse(text); } catch {}
+      let detail = text; try { detail = JSON.parse(text); } catch {}
       return json(resp.status, { error: "openai_stt_error", detail });
     }
 
-    let data = {};
-    try { data = JSON.parse(text); } catch {}
+    let data = {}; try { data = JSON.parse(text); } catch {}
     const transcript = (data.text || "").trim();
 
     log("[STT] parsed", {

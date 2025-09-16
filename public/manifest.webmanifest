@@ -1,0 +1,11 @@
+{
+  "name": "Keilani Brain — Live",
+  "short_name": "Keilani",
+  "start_url": "/index.html",
+  "display": "standalone",
+  "background_color": "#0b0e12",
+  "theme_color": "#0b0e12",
+  "icons": [
+    { "src": "/favicon.ico", "sizes": "48x48 64x64 96x96", "type": "image/x-icon" }
+  ]
+}

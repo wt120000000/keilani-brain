@@ -1,170 +1,129 @@
 // netlify/functions/chat-stream.js
-// POST { message, system?, history?, model? } -> SSE stream of partial text
-// Client should connect with fetch() and read the body as a ReadableStream.
-// Each chunk is sent as "data: {json}\n\n" where json = { type, delta?, done? }
+// Streams directly from OpenAI → re-emit as SSE. With per-IP rate limiting.
 
-exports.handler = async (event) => {
-  // Preflight
-  if (event.httpMethod === "OPTIONS") {
-    return {
-      statusCode: 204,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization",
-      },
-      body: "",
-    };
-  }
+import { allow } from "./_ratelimit.mjs";
 
-  if (event.httpMethod !== "POST") {
-    return {
-      statusCode: 405,
-      headers: { "Access-Control-Allow-Origin": "*" },
-      body: "Method Not Allowed",
-    };
-  }
+const CORS = {
+  "Access-Control-Allow-Origin": "*",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
+  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With",
+};
+const SSE_HEADERS = {
+  ...CORS,
+  "Content-Type": "text/event-stream; charset=utf-8",
+  "Cache-Control": "no-cache, no-transform",
+  "Connection": "keep-alive",
+};
+const JSON_HEADERS = { ...CORS, "Content-Type": "application/json" };
 
-  if (!process.env.OPENAI_API_KEY) {
-    return {
-      statusCode: 500,
-      headers: { "Access-Control-Allow-Origin": "*" },
-      body: "Missing OPENAI_API_KEY",
-    };
-  }
+function json(status, body) {
+  return new Response(JSON.stringify(body), { status, headers: JSON_HEADERS });
+}
+function sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 
-  try {
-    const input = JSON.parse(event.body || "{}");
-    const {
-      message,
-      system,
-      history = [],
-      model = "gpt-4o-mini",
-      max_tokens = 220,
-    } = input;
+async function openAIStreamRequest(body, { retries = 2, baseDelay = 500, maxDelay = 2500 } = {}) {
+  const key = process.env.OPENAI_API_KEY;
+  if (!key) throw new Error("Missing OPENAI_API_KEY");
 
-    if (!message || typeof message !== "string") {
-      return {
-        statusCode: 400,
-        headers: { "Access-Control-Allow-Origin": "*" },
-        body: "Missing 'message' (string)",
-      };
+  let attempt = 0;
+  // retry loop
+  while (true) {
+    try {
+      const resp = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: { "Authorization": `Bearer ${key}`, "Content-Type": "application/json" },
+        body: JSON.stringify(body),
+      });
+      if (!resp.ok && (resp.status === 429 || resp.status >= 500) && attempt < retries) {
+        const delay = Math.min(maxDelay, baseDelay * Math.pow(2, attempt)) + Math.random()*150;
+        attempt++; await sleep(delay); continue;
+      }
+      return resp;
+    } catch (e) {
+      if (attempt >= retries) throw e;
+      const delay = Math.min(maxDelay, baseDelay * Math.pow(2, attempt)) + Math.random()*150;
+      attempt++; await sleep(delay);
     }
+  }
+}
 
-    const messages = [];
-    if (system) messages.push({ role: "system", content: system });
-    if (Array.isArray(history)) {
-      for (const m of history) {
-        if (
-          m &&
-          typeof m.content === "string" &&
-          ["system", "user", "assistant"].includes(m.role)
-        ) {
-          messages.push({ role: m.role, content: m.content });
+export default async (req) => {
+  if (req.method === "OPTIONS") return new Response("", { status: 204, headers: CORS });
+  if (req.method !== "POST")   return json(405, { error: "method_not_allowed" });
+
+  // 9) rate limit
+  const ip = req.headers.get('x-nf-client-connection-ip') || req.headers.get('x-forwarded-for') || 'anon';
+  const cap = Number(process.env.RL_TOKENS || 30);
+  const rps = Number(process.env.RL_REFILL_PER_SEC || 1.5);
+  if (!allow(ip, { capacity: cap, refillPerSec: rps })) {
+    return json(429, { error: "rate_limited" });
+  }
+
+  let payload = {};
+  try { payload = await req.json(); } catch { return json(400, { error: "bad_json" }); }
+
+  const userMessage = (payload?.message || "").toString();
+  if (!userMessage) return json(400, { error: "missing_message" });
+
+  const model = process.env.OPENAI_CHAT_MODEL || "gpt-4o-mini";
+  const systemPrompt = process.env.SYSTEM_PROMPT || "You are Keilani, a helpful assistant.";
+
+  const oaiBody = {
+    model,
+    stream: true,
+    messages: [
+      { role: "system", content: systemPrompt },
+      { role: "user",   content: userMessage }
+    ],
+    temperature: 0.7
+  };
+
+  let upstream;
+  try { upstream = await openAIStreamRequest(oaiBody); }
+  catch (e) { return json(502, { error: "openai_connect_error", detail: String(e?.message || e) }); }
+
+  if (!upstream.ok || !upstream.body) {
+    const raw = await upstream.text().catch(() => "");
+    return json(upstream.status || 502, { error: "openai_error", raw: raw?.slice(0, 2000) });
+  }
+
+  const enc = new TextEncoder();
+  const decoder = new TextDecoder("utf-8");
+
+  const stream = new ReadableStream({
+    async start(controller) {
+      const reader = upstream.body.getReader();
+      let buffer = "";
+      const push = (obj) => controller.enqueue(enc.encode(`data: ${JSON.stringify(obj)}\n\n`));
+
+      try {
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          buffer += decoder.decode(value, { stream: true });
+
+          const parts = buffer.split("\n\n");
+          buffer = parts.pop() || "";
+          for (const part of parts) {
+            const line = part.trim();
+            if (!line.startsWith("data:")) continue;
+            const data = line.slice(5).trim();
+            if (data === "[DONE]") continue;
+            try {
+              const obj = JSON.parse(data);
+              const delta = obj?.choices?.[0]?.delta?.content || "";
+              if (delta) push({ delta });
+            } catch { /* ignore */ }
+          }
         }
+      } catch (e) {
+        push({ error: "stream_error", detail: String(e?.message || e) });
+      } finally {
+        controller.enqueue(enc.encode(`data: [DONE]\n\n`));
+        controller.close();
       }
     }
-    messages.push({ role: "user", content: message });
+  });
 
-    // Ask OpenAI for a streaming response
-    const oaiRes = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: {
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        model,
-        messages,
-        max_tokens,
-        stream: true,
-      }),
-    });
-
-    if (!oaiRes.ok || !oaiRes.body) {
-      const txt = await oaiRes.text();
-      return {
-        statusCode: 500,
-        headers: { "Access-Control-Allow-Origin": "*" },
-        body: `OpenAI stream error: ${txt}`,
-      };
-    }
-
-    // Pipe OpenAI's SSE to client SSE, normalizing to simple "delta" messages
-    const encoder = new TextEncoder();
-    const reader = oaiRes.body.getReader();
-
-    const stream = new ReadableStream({
-      async start(controller) {
-        // helpers
-        const send = (obj) => {
-          const line = `data: ${JSON.stringify(obj)}\n\n`;
-          controller.enqueue(encoder.encode(line));
-        };
-
-        // send an open event
-        send({ type: "open" });
-
-        let doneFlag = false;
-        let buffer = "";
-
-        try {
-          while (true) {
-            const { value, done } = await reader.read();
-            if (done) break;
-            buffer += new TextDecoder().decode(value);
-
-            // OpenAI sends lines separated by \n\n. Parse them:
-            const parts = buffer.split("\n\n");
-            buffer = parts.pop() || "";
-
-            for (const part of parts) {
-              const line = part.trim();
-              if (!line.startsWith("data:")) continue;
-              const data = line.slice(5).trim();
-
-              if (data === "[DONE]") {
-                doneFlag = true;
-                break;
-              }
-
-              try {
-                const json = JSON.parse(data);
-                const delta =
-                  json?.choices?.[0]?.delta?.content ??
-                  json?.choices?.[0]?.delta?.reasoning_content ??
-                  "";
-                if (delta) send({ type: "delta", delta });
-              } catch (_) {
-                // ignore malformed chunk
-              }
-            }
-
-            if (doneFlag) break;
-          }
-        } catch (e) {
-          send({ type: "error", message: String(e?.message || e) });
-        } finally {
-          send({ type: "done" });
-          controller.close();
-        }
-      },
-    });
-
-    return new Response(stream, {
-      status: 200,
-      headers: {
-        "Content-Type": "text/event-stream; charset=utf-8",
-        "Cache-Control": "no-store",
-        "Connection": "keep-alive",
-        "Access-Control-Allow-Origin": "*",
-      },
-    });
-  } catch (e) {
-    return {
-      statusCode: 500,
-      headers: { "Access-Control-Allow-Origin": "*" },
-      body: `chat-stream exception: ${e.message}`,
-    };
-  }
+  return new Response(stream, { status: 200, headers: SSE_HEADERS });
 };

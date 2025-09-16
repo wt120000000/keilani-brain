@@ -1,0 +1,9 @@
+{
+  "overrides": [
+    {
+      "files": ["netlify/functions/**/*.js", "netlify/functions/**/*.mjs"],
+      "parserOptions": { "sourceType": "module" },
+      "env": { "es2022": true, "node": true }
+    }
+  ]
+}
