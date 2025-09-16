@@ -3,7 +3,7 @@
    - Text chat (SSE)
    - Push-to-talk with VAD-lite + live mic meter
    - Streaming TTS via MediaSource (fallback to /tts)
-   - Barge-in: Speak/PTT can interrupt TTS any time
+   - Barge-in, voice picker auto-load + saved selection
 */
 
 (() => {
@@ -28,7 +28,23 @@
   const append = (el, t) => { if (el && t) el.textContent += t; };
   const clear  = (el) => { if (el) el.textContent = ''; };
   const sleep  = (ms) => new Promise(r => setTimeout(r, ms));
-  const getVoice = () => (voiceSel?.value || '');
+
+  const VOICE_KEY = 'keilani.voiceId';
+
+  function getVoice() {
+    // prefer select value, fallback to saved, else empty
+    const v = voiceSel?.value || localStorage.getItem(VOICE_KEY) || '';
+    return (v || '').trim();
+  }
+
+  function setVoice(id) {
+    if (voiceSel) {
+      if ([...voiceSel.options].some(o => o.value === id)) {
+        voiceSel.value = id;
+      }
+    }
+    localStorage.setItem(VOICE_KEY, id || '');
+  }
 
   // --- audio unlock
   let audioUnlocked = false;
@@ -45,6 +61,46 @@
     } catch {}
   }
   document.addEventListener('pointerdown', unlockAudio, { once: true });
+
+  // =========================
+  //  V O I C E S
+  // =========================
+  async function loadVoices() {
+    if (!voiceSel) return;
+    try {
+      const resp = await fetch('/.netlify/functions/voices', { method: 'GET' });
+      if (!resp.ok) throw new Error('voices_http_' + resp.status);
+      const data = await resp.json(); // expect [{id, name}, ...]
+      voiceSel.innerHTML = '';
+      const optNone = document.createElement('option');
+      optNone.value = '';
+      optNone.textContent = '(default / no TTS)';
+      voiceSel.appendChild(optNone);
+
+      (data || []).forEach(v => {
+        const o = document.createElement('option');
+        o.value = v.id || v.voice_id || '';
+        o.textContent = `${v.name || 'Voice'}${o.value ? ' (' + o.value.slice(0,6) + '…)' : ''}`;
+        voiceSel.appendChild(o);
+      });
+
+      // prefer saved voice; else first non-empty voice
+      const saved = localStorage.getItem(VOICE_KEY) || '';
+      if (saved && [...voiceSel.options].some(o => o.value === saved)) {
+        voiceSel.value = saved;
+      } else {
+        const first = [...voiceSel.options].find(o => o.value);
+        if (first) voiceSel.value = first.value;
+      }
+      setVoice(voiceSel.value);
+      console.log('[VOICES] ready, selected:', voiceSel.value);
+    } catch (e) {
+      console.warn('[VOICES] load failed', e);
+      // leave whatever’s currently in the select
+    }
+  }
+
+  voiceSel?.addEventListener('change', () => setVoice(voiceSel.value));
 
   // =========================
   //  T T S   (Streaming MSE)
@@ -72,7 +128,7 @@
     console.log('[TTS] stopSpeaking() – barge in');
   }
 
-  // non-streaming fallback
+  // non-streaming fallback (still honors default voice on server)
   async function speakFallback(text, voice) {
     const resp = await fetch('/.netlify/functions/tts', {
       method:'POST', headers:{ 'Content-Type':'application/json' },
@@ -88,8 +144,8 @@
   }
 
   async function speakStream(text, voice) {
-    if (!text || !voice) return;
-    // toggle stop if already speaking
+    if (!text) return;
+    // toggling: if already speaking, stop
     if (!speaker.paused || ttsAbort) { await stopSpeaking(); return; }
     unlockAudio();
 
@@ -121,13 +177,13 @@
         try { sourceBuffer.appendBuffer(chunk); } catch { /* queue if busy */ }
       });
 
-      // Fetch streaming MP3 from our function
+      // Fetch streaming MP3 from our function. NOTE: voice may be '', server has default.
       let resp;
       try {
         resp = await fetch('/.netlify/functions/tts-stream', {
           method:'POST',
           headers:{ 'Content-Type':'application/json' },
-          body: JSON.stringify({ text, voice, latency: 3, format: 'mp3_44100_128' }),
+          body: JSON.stringify({ text, voice: (voice || undefined), latency: 3, format: 'mp3_44100_128' }),
           signal: ctrl.signal
         });
       } catch (e) {
@@ -135,10 +191,21 @@
         resetMSE(); return;
       }
 
-      if (!resp.ok || !resp.body) {
+      if (!resp.ok) {
         let raw=''; try { raw = await resp.text(); } catch {}
         console.error('[tts-stream] HTTP', resp.status, raw.slice(0,200));
         resetMSE(); await speakFallback(text, voice);
+        return;
+      }
+      if (!resp.body) {
+        // Some hosts fully buffer. Just play it as a blob.
+        const ab = await resp.arrayBuffer();
+        const u = URL.createObjectURL(new Blob([ab], { type: 'audio/mpeg'}));
+        speaker.src = u;
+        try { await speaker.play(); } catch {}
+        await new Promise(res => speaker.addEventListener('ended', res, { once:true }));
+        URL.revokeObjectURL(u);
+        resetMSE();
         return;
       }
 
@@ -325,11 +392,9 @@
     if (!transcript) return;
 
     const reply = await chatStream(transcript, getVoice());
-    // Use streaming TTS first; fall back if no voice or error
-    if (getVoice()) {
-      try { await speakStream(reply, getVoice()); }
-      catch { await speakFallback(reply, getVoice()); }
-    }
+    // Prefer streaming; both endpoints can now cope with missing voice (server default)
+    try { await speakStream(reply, getVoice()); }
+    catch { await speakFallback(reply, getVoice()); }
   }
 
   // =========================
@@ -340,22 +405,17 @@
     const text = inputEl.value.trim();
     if (!text) return;
     const reply = await chatStream(text, getVoice());
-    if (getVoice()) {
-      try { await speakStream(reply, getVoice()); }
-      catch { await speakFallback(reply, getVoice()); }
-    }
+    try { await speakStream(reply, getVoice()); }
+    catch { await speakFallback(reply, getVoice()); }
   }
 
   async function handleSpeak() {
     const text = (replyEl?.textContent?.trim() || inputEl?.value?.trim() || '');
     if (!text) return;
-    if (!getVoice()) return;
     await speakStream(text, getVoice()); // toggles stop if already speaking
   }
 
-  // =========================
-  //  W I R E   U I
-  // =========================
+  // wire UI
   sendBtn?.addEventListener('click', handleSend);
   speakBtn?.addEventListener('click', handleSpeak);
   stopBtn?.addEventListener('click', stopSpeaking);
@@ -376,5 +436,8 @@
     if (e.code === 'Space') { e.preventDefault(); stopPTT(); }
   });
 
-  console.log('[Keilani] chat.js ready (streaming TTS)');
+  // init
+  loadVoices().finally(() => {
+    console.log('[Keilani] chat.js ready (streaming TTS + voices)');
+  });
 })();
