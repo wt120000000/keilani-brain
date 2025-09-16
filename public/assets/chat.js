@@ -4,8 +4,8 @@
    - Push-to-talk with VAD-lite + live mic meter
    - Streaming TTS via MediaSource (fallback to /tts)
    - Voice picker auto-load + saved selection
-   - STT: normalize data URL, skip micro-blobs (<8 KB), backoff on server side
-   - NEW: Toasts + Telemetry events to /.netlify/functions/telemetry
+   - STT: normalize data URL, skip micro-blobs (<16 KB), single in-flight request
+   - Toasts + Telemetry
 */
 
 (() => {
@@ -25,9 +25,7 @@
   const micDb        = $('#micDb');
   const vadSlider    = $('#vadThresh');
 
-  // =========================
-  //  Toasts (no external file)
-  // =========================
+  // --- Toasts (inline) ---
   (function ensureToast() {
     if (document.getElementById('toaster')) return;
     const style = document.createElement('style');
@@ -45,7 +43,6 @@
     document.head.appendChild(style);
     document.body.appendChild(host);
   })();
-
   function toast(msg, kind = 'ok', meta = '') {
     const host = $('#toaster'); if (!host) return;
     const el = document.createElement('div');
@@ -57,9 +54,7 @@
   }
   const escapeHtml = (s='') => s.replace(/[&<>"']/g, m => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#039;'}[m]));
 
-  // =========================
-  //  Telemetry
-  // =========================
+  // --- Telemetry (fire-and-forget) ---
   async function sendTelemetry(type, data={}) {
     try {
       await fetch('/.netlify/functions/telemetry', {
@@ -68,10 +63,9 @@
         keepalive: true,
         body: JSON.stringify({ type, ts: new Date().toISOString(), data })
       });
-    } catch (_) { /* fire-and-forget */ }
+    } catch (_) {}
   }
 
-  // helpers
   const setTxt = (el, t) => { if (el) el.textContent = t; };
   const append = (el, t) => { if (el && t) el.textContent += t; };
   const clear  = (el) => { if (el) el.textContent = ''; };
@@ -121,9 +115,7 @@
       }
       setVoice(voiceSel.value);
       sendTelemetry('voices_ready', { selected: voiceSel.value || '(server_default)' });
-      console.log('[VOICES] ready, selected:', voiceSel.value || '(server default)');
     } catch (e) {
-      console.warn('[VOICES] load failed', e);
       toast('Could not load voices', 'warn');
       sendTelemetry('voices_error', { message: String(e?.message || e) });
     }
@@ -156,7 +148,6 @@
     resetMSE();
     if (audioEndedResolver) { audioEndedResolver(); audioEndedResolver = null; }
     $('#speakLed')?.remove();
-    console.log('[TTS] stopSpeaking() – barge in');
     sendTelemetry('tts_stop');
   }
 
@@ -166,23 +157,14 @@
         method:'POST', headers:{ 'Content-Type':'application/json' },
         body: JSON.stringify({ text, voice: (voice || undefined) })
       });
-      if (!resp.ok) {
-        console.error('[TTS] fallback HTTP', resp.status);
-        toast('TTS error (fallback)', 'err', `HTTP ${resp.status}`);
-        sendTelemetry('tts_fallback_error', { status: resp.status });
-        return;
-      }
+      if (!resp.ok) { toast('TTS error (fallback)', 'err', `HTTP ${resp.status}`); return; }
       const ab = await resp.arrayBuffer();
       const url = URL.createObjectURL(new Blob([ab], { type:'audio/mpeg' }));
       speaker.src = url;
       try { await speaker.play(); } catch {}
       await new Promise(res => speaker.addEventListener('ended', res, { once:true }));
       URL.revokeObjectURL(url);
-      sendTelemetry('tts_fallback_done', { bytes: ab.byteLength });
-    } catch (e) {
-      toast('TTS failed', 'err');
-      sendTelemetry('tts_fallback_exception', { message: String(e?.message || e) });
-    }
+    } catch (e) { toast('TTS failed', 'err'); }
   }
 
   async function speakStream(text, voice) {
@@ -210,15 +192,13 @@
 
     mse.addEventListener('sourceopen', async () => {
       try { sourceBuffer = mse.addSourceBuffer('audio/mpeg'); }
-      catch (e) { console.warn('[MSE] addSourceBuffer failed, fallback', e); resetMSE(); await speakFallback(text, voice); return; }
+      catch (e) { resetMSE(); await speakFallback(text, voice); return; }
 
       sourceBuffer.addEventListener('updateend', () => {
         if (!sourceBuffer || !chunkQ.length || sourceBuffer.updating) return;
         const chunk = chunkQ.shift();
         try { sourceBuffer.appendBuffer(chunk); } catch { /* backpressure */ }
       });
-
-      sendTelemetry('tts_stream_start', { voice: voice || '(server_default)' });
 
       let resp;
       try {
@@ -228,22 +208,10 @@
           body: JSON.stringify({ text, voice: (voice || undefined), latency: 3, format: 'mp3_44100_128' }),
           signal: ctrl.signal
         });
-      } catch (e) {
-        if (e?.name !== 'AbortError') {
-          console.warn('[tts-stream] fetch err', e);
-          toast('TTS connection failed', 'err');
-          sendTelemetry('tts_stream_fetch_error', { message: String(e?.message || e) });
-        }
-        resetMSE(); return;
-      }
+      } catch (e) { resetMSE(); return; }
 
       if (!resp.ok) {
-        let raw=''; try { raw = await resp.text(); } catch {}
-        console.error('[tts-stream] HTTP', resp.status, raw.slice(0,200));
-        toast('TTS failed', 'err', `HTTP ${resp.status}`);
-        sendTelemetry('tts_stream_http_error', { status: resp.status, body: raw?.slice(0,300) });
-        resetMSE(); await speakFallback(text, voice);
-        return;
+        resetMSE(); await speakFallback(text, voice); return;
       }
 
       if (!resp.body) {
@@ -253,19 +221,15 @@
         await new Promise(res => speaker.addEventListener('ended', res, { once:true }));
         URL.revokeObjectURL(u);
         resetMSE();
-        sendTelemetry('tts_stream_buffered_done', { bytes: ab.byteLength });
         return;
       }
 
       const reader = resp.body.getReader();
       speaker.play().catch(()=>{});
-      let total = 0;
-
       while (true) {
         const { value, done } = await reader.read();
         if (done) break;
         if (!value || !value.byteLength) continue;
-        total += value.byteLength;
         const chunk = value.buffer ? new Uint8Array(value) : new Uint8Array(value);
         if (sourceBuffer) {
           if (!sourceBuffer.updating && chunkQ.length === 0) {
@@ -286,8 +250,6 @@
         };
         sourceBuffer.addEventListener('updateend', flush);
       }
-
-      sendTelemetry('tts_stream_done', { bytes: total });
     });
 
     try { await speaker.play(); } catch {}
@@ -305,18 +267,11 @@
     if (!msg) throw new Error('missing_text');
     clear(replyEl);
 
-    const t0 = performance.now();
     const resp = await fetch('/.netlify/functions/chat-stream', {
       method:'POST', headers:{ 'Content-Type':'application/json' },
       body: JSON.stringify({ message: msg, voice })
     });
-    if (!resp.ok || !resp.body) {
-      toast('Chat error', 'err', `HTTP ${resp.status}`);
-      sendTelemetry('chat_stream_http_error', { status: resp.status });
-      throw new Error('chat_stream_failed');
-    }
-
-    sendTelemetry('chat_stream_start', { chars: msg.length });
+    if (!resp.ok || !resp.body) { toast('Chat error', 'err', `HTTP ${resp.status}`); throw new Error('chat_stream_failed'); }
 
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
@@ -342,17 +297,17 @@
         } catch { final += data; append(replyEl, data); }
       }
     }
-
-    const dt = Math.round(performance.now() - t0);
-    sendTelemetry('chat_stream_done', { ms: dt, chars: final.length });
     return final.trim();
   }
 
   // =========================
-  //  STT (PTT + VAD + guards)
+  //  STT (PTT + VAD + guards + single in-flight)
   // =========================
   let mediaStream, mediaRecorder, chunks = [];
   let vadActive = false, silenceTimer = null;
+
+  // STT in-flight canceler (prevents overlapping POSTs)
+  let sttAbort = null;
 
   const arrayToBase64 = (buf) => {
     let bin = '', bytes = new Uint8Array(buf);
@@ -437,23 +392,46 @@
     if (!chunks.length) { setTxt(transcriptEl,'(no audio captured)'); return; }
     const blob = new Blob(chunks, { type: mediaRecorder?.mimeType || 'audio/webm' });
 
-    // Guard: too small => skip STT
-    if (blob.size < 8 * 1024) { setTxt(transcriptEl, '(no speech)'); sendTelemetry('stt_skip_small', { bytes: blob.size }); return; }
+    // Guard: too small => skip STT (raise to 16 KB)
+    if (blob.size < 16 * 1024) { setTxt(transcriptEl, '(no speech)'); sendTelemetry('stt_skip_small', { bytes: blob.size }); return; }
 
     const ab   = await blob.arrayBuffer();
     const baseMime = (blob.type || 'audio/webm').split(';')[0]; // strip codecs
     const dataUrl  = `data:${baseMime};base64,${arrayToBase64(ab)}`;
 
+    // Cancel any in-flight STT before starting a new one
+    try { sttAbort?.abort(); } catch {}
+    sttAbort = new AbortController();
+
     sendTelemetry('stt_start', { mime: baseMime, bytes: ab.byteLength });
 
-    const resp = await fetch('/.netlify/functions/stt', {
-      method:'POST', headers:{ 'Content-Type':'application/json' },
-      body: JSON.stringify({ audioBase64: dataUrl, language:'en' })
-    });
-    const raw = await resp.text().catch(()=> ''); let json={}; try{ json=JSON.parse(raw);}catch{}
+    let resp, raw, json = {};
+    try {
+      resp = await fetch('/.netlify/functions/stt', {
+        method:'POST',
+        headers:{ 'Content-Type':'application/json' },
+        body: JSON.stringify({ audioBase64: dataUrl, language:'en' }),
+        signal: sttAbort.signal
+      });
+      raw = await resp.text().catch(()=> '');
+      try { json = JSON.parse(raw); } catch { json = {}; }
+    } catch (e) {
+      if (e?.name !== 'AbortError') {
+        toast('Speech recognition failed', 'err', String(e?.message || e));
+        sendTelemetry('stt_fetch_error', { message: String(e?.message || e) });
+      }
+      return;
+    }
+
     console.log('[PTT] STT', resp.status, json);
 
-    if (!resp.ok) { setTxt(transcriptEl,'(stt error)'); toast('Speech recognition failed', 'err', `HTTP ${resp.status}`); sendTelemetry('stt_error', { status: resp.status, body: raw?.slice(0,300) }); return; }
+    if (!resp.ok) {
+      setTxt(transcriptEl,'(stt error)');
+      toast('Speech recognition failed', 'err', `HTTP ${resp.status}`);
+      sendTelemetry('stt_error', { status: resp.status, body: raw?.slice(0,300) });
+      return;
+    }
+
     const transcript = (json.transcript || '').trim();
     setTxt(transcriptEl, transcript || '(no speech)');
     sendTelemetry('stt_done', { chars: transcript.length });

@@ -3,6 +3,7 @@
 // - Ignores tiny audio
 // - Normalizes mime/filename for OpenAI
 // - Retries 3x with backoff on 429/5xx
+// - PLUS: if OpenAI claims "unsupported file format", retry once with alt filename (webm<->ogg)
 
 const CORS = {
   "Access-Control-Allow-Origin": "*",
@@ -41,13 +42,12 @@ exports.handler = async (event) => {
     }
 
     // Normalize mime to a safe filename/contentType OpenAI likes
-    const ext =
+    const primaryExt =
       mime.includes("wav") ? "wav" :
       mime.includes("mp3") ? "mp3" :
       mime.includes("m4a") ? "m4a" :
       mime.includes("ogg") ? "ogg" : "webm";
 
-    // Some browsers give "audio/webm;codecs=opus" -> use generic type
     const normalizedMime =
       mime.startsWith("audio/webm") ? "audio/webm" :
       mime.startsWith("audio/ogg")  ? "audio/ogg"  : mime;
@@ -58,40 +58,54 @@ exports.handler = async (event) => {
       return json(200, { transcript: "" });
     }
 
-    // Build form-data with native undici FormData/Blob (Node 18+)
-    const form = new FormData();
-    const blob = new Blob([buf], { type: normalizedMime });
-    form.append("file", blob, `audio.${ext}`);
-    form.append("model", MODEL);
-    form.append("response_format", "json");
-    if (language) form.append("language", language);
+    // Build FormData with Node 18+ native types (undici)
+    const buildForm = (ext) => {
+      const form = new FormData();
+      const blob = new Blob([buf], { type: normalizedMime });
+      form.append("file", blob, `audio.${ext}`);
+      form.append("model", MODEL);
+      form.append("response_format", "json");
+      if (language) form.append("language", language);
+      return form;
+    };
 
-    // Retry helper
     const backoff = (n) => new Promise((r) => setTimeout(r, 300 * Math.pow(2, n)));
-    let resp, text, ok = false, lastErr = null;
 
-    for (let attempt = 0; attempt < 3; attempt++) {
-      try {
-        resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
-          method: "POST",
-          headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
-          body: form,
-        });
-        text = await resp.text();
-        if (resp.ok) { ok = true; break; }
-
-        // Retry on 429/5xx
-        if (resp.status === 429 || (resp.status >= 500 && resp.status <= 599)) {
+    async function callOpenAI(form) {
+      let resp, text, ok = false, lastErr = null;
+      for (let attempt = 0; attempt < 3; attempt++) {
+        try {
+          resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+            method: "POST",
+            headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
+            body: form,
+          });
+          text = await resp.text();
+          if (resp.ok) { ok = true; break; }
+          if (resp.status === 429 || (resp.status >= 500 && resp.status <= 599)) {
+            await backoff(attempt);
+            continue;
+          }
+          lastErr = text;
+          break;
+        } catch (e) {
+          lastErr = String(e?.message || e);
           await backoff(attempt);
-          continue;
         }
-        // Non-retryable
-        lastErr = text;
-        break;
-      } catch (e) {
-        lastErr = String(e?.message || e);
-        await backoff(attempt);
       }
+      return { ok, resp, text, lastErr };
+    }
+
+    // Primary attempt
+    let { ok, resp, text, lastErr } = await callOpenAI(buildForm(primaryExt));
+
+    // If "unsupported file format", try an alternate extension without re-encoding
+    if (!ok && isUnsupportedFileError(text)) {
+      const altExt = primaryExt === "webm" ? "ogg"
+                   : primaryExt === "ogg"  ? "webm"
+                   : "webm";
+      const second = await callOpenAI(buildForm(altExt));
+      ok = second.ok; resp = second.resp; text = second.text; lastErr = second.lastErr;
     }
 
     if (!ok) return json(resp?.status || 500, { error: "openai_stt_error", detail: tryParse(lastErr) });
@@ -104,6 +118,15 @@ exports.handler = async (event) => {
   }
 };
 
+function isUnsupportedFileError(s) {
+  try {
+    const j = JSON.parse(s);
+    const msg = j?.error?.message || "";
+    return /unsupported file format/i.test(msg);
+  } catch {
+    return /unsupported file format/i.test(String(s || ""));
+  }
+}
 function tryParse(s) {
   try { return JSON.parse(s); } catch { return s; }
 }
