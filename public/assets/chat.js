@@ -166,8 +166,14 @@
     // include short history (server trims to 10)
     const payload = { message: msg, voice, history };
 
-    const resp=await fetch('/.netlify/functions/chat-stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
+    const resp=await fetch('/api/chat-stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(payload)});
     if(!resp.ok || !resp.body){ toast('Chat error','err',`HTTP ${resp.status}`); throw new Error('chat_stream_failed'); }
+	
+	const resp = await fetch(CHAT_STREAM_URL, {
+	  method: "POST",
+	  headers: { "Content-Type": "application/json" },
+	  body: JSON.stringify({ message, history }),
+	});
 
     const reader=resp.body.getReader(); const dec=new TextDecoder(); let buffer='', final='';
     while(true){
