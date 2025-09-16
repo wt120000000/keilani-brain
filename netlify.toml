@@ -58,10 +58,13 @@ for = "/assets/*.js"
   [headers.values]
   Content-Type = "application/javascript"
 
-# netlify.toml
-[edge_functions]
-  path = "/api/chat-stream"
-  function = "chat-stream"
+[[edge_functions]]
+path = "/api/chat-stream"
+function = "chat-stream"
+
+[[edge_functions]]
+path = "/.netlify/functions/chat-stream"
+function = "chat-stream"
   
 # Global headers
 [[headers]]
