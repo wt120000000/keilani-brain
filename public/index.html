@@ -8,43 +8,143 @@
     <link rel="icon" href="/favicon.ico" />
     <link rel="manifest" href="/manifest.webmanifest" />
     <style>
-      :root { color-scheme: dark light; }
+      :root {
+        color-scheme: dark light;
+      }
       body {
-        margin: 0; background: #0b0e12; color: #e6e6e6;
-        font: 16px/1.4 system-ui, Segoe UI, Roboto, Helvetica, Arial;
+        margin: 0;
+        background: #0b0e12;
+        color: #e6e6e6;
+        font:
+          16px/1.4 system-ui,
+          Segoe UI,
+          Roboto,
+          Helvetica,
+          Arial;
       }
-      .wrap { max-width: 1100px; margin: 40px auto; padding: 0 16px; }
-      h1 { font-weight: 700; letter-spacing: .2px; }
-      .card { background: #12161c; border: 1px solid #232a35; border-radius: 14px; padding: 16px; }
-      .row { display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+      .wrap {
+        max-width: 1100px;
+        margin: 40px auto;
+        padding: 0 16px;
+      }
+      h1 {
+        font-weight: 700;
+        letter-spacing: 0.2px;
+      }
+      .card {
+        background: #12161c;
+        border: 1px solid #232a35;
+        border-radius: 14px;
+        padding: 16px;
+      }
+      .row {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
       textarea {
-        width: 100%; min-height: 160px; resize: vertical; border-radius: 10px;
-        border: 1px solid #273142; background: #0f1319; color: inherit; padding: 12px; font: inherit;
+        width: 100%;
+        min-height: 160px;
+        resize: vertical;
+        border-radius: 10px;
+        border: 1px solid #273142;
+        background: #0f1319;
+        color: inherit;
+        padding: 12px;
+        font: inherit;
       }
-      select, button, input[type="range"] {
-        border-radius: 10px; border: 1px solid #273142; background: #0f1319;
-        color: inherit; font: inherit; padding: 10px 12px;
+      select,
+      button,
+      input[type="range"] {
+        border-radius: 10px;
+        border: 1px solid #273142;
+        background: #0f1319;
+        color: inherit;
+        font: inherit;
+        padding: 10px 12px;
       }
-      button.primary { background: #1260ff; border-color: #1260ff; }
-      button:disabled, .btn-busy { opacity: .6; cursor: not-allowed; pointer-events: none; }
-      .pill { padding: 4px 10px; border-radius: 999px; border: 1px solid #273142; background: #0f1319; font-size: 12px; opacity: .9; }
-      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
-      .muted { opacity: .7; }
-      .split { display: grid; grid-template-columns: 1fr; gap: 16px; }
-      @media (min-width: 980px) { .split { grid-template-columns: 1fr 1fr; } }
-      .reply { min-height: 140px; white-space: pre-wrap; background: #0f1319; border: 1px solid #273142; border-radius: 10px; padding: 12px; }
-      .row audio { width: 100%; }
+      button.primary {
+        background: #1260ff;
+        border-color: #1260ff;
+      }
+      button:disabled,
+      .btn-busy {
+        opacity: 0.6;
+        cursor: not-allowed;
+        pointer-events: none;
+      }
+      .pill {
+        padding: 4px 10px;
+        border-radius: 999px;
+        border: 1px solid #273142;
+        background: #0f1319;
+        font-size: 12px;
+        opacity: 0.9;
+      }
+      .mono {
+        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      }
+      .muted {
+        opacity: 0.7;
+      }
+      .split {
+        display: grid;
+        grid-template-columns: 1fr;
+        gap: 16px;
+      }
+      @media (min-width: 980px) {
+        .split {
+          grid-template-columns: 1fr 1fr;
+        }
+      }
+      .reply {
+        min-height: 140px;
+        white-space: pre-wrap;
+        background: #0f1319;
+        border: 1px solid #273142;
+        border-radius: 10px;
+        padding: 12px;
+      }
+      .row audio {
+        width: 100%;
+      }
 
       /* UX polish */
-      .meter { height: 6px; width: 160px; border-radius: 999px; background: #151a22; border: 1px solid #273142; overflow: hidden; }
-      .meter > i { display: block; height: 100%; width: 0%; background: linear-gradient(90deg, #19c37d, #1260ff); transition: width .08s linear; }
-      .state-dot { display:inline-block;width:8px;height:8px;border-radius:50%;margin-left:6px;background:#394b63; vertical-align:middle; }
-      .state-dot.hot { background:#19c37d; }
+      .meter {
+        height: 6px;
+        width: 160px;
+        border-radius: 999px;
+        background: #151a22;
+        border: 1px solid #273142;
+        overflow: hidden;
+      }
+      .meter > i {
+        display: block;
+        height: 100%;
+        width: 0%;
+        background: linear-gradient(90deg, #19c37d, #1260ff);
+        transition: width 0.08s linear;
+      }
+      .state-dot {
+        display: inline-block;
+        width: 8px;
+        height: 8px;
+        border-radius: 50%;
+        margin-left: 6px;
+        background: #394b63;
+        vertical-align: middle;
+      }
+      .state-dot.hot {
+        background: #19c37d;
+      }
     </style>
   </head>
   <body>
     <div class="wrap">
-      <h1>Keilani Brain — Live <span id="statePill" class="pill muted">idle</span></h1>
+      <h1>
+        Keilani Brain — Live <span id="statePill" class="pill muted">idle</span>
+      </h1>
 
       <div class="card">
         <div class="split">
@@ -61,6 +161,7 @@
               <button id="sendBtn" class="primary">Send</button>
               <button id="speakBtn">Speak Reply</button>
               <button id="pttBtn">Hold to talk</button>
+              <button id="stopBtn">Stop</button>
 
               <span id="stateDot" class="state-dot" aria-hidden="true"></span>
               <div class="meter" title="input level"><i id="micMeter"></i></div>
