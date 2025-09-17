@@ -21,18 +21,21 @@ export default async (request) => {
       const content = message.replace(/^(\s*remember|\s*save)\s*/i, "").trim();
       const immediate = streamText(content ? "Saved to memory." : "I didn't catch what to remember.");
       if (content && SUPABASE_URL && SUPABASE_SERVICE) {
-        persistMemory({
-          SUPABASE_URL,
-          SUPABASE_SERVICE,
-          userId,
-          sessionId,
-          role: "note",
-          content,
-          // meta is optional; safe to send now that it's jsonb
-          meta: { source: "edge", ts: new Date().toISOString() },
-        }).catch(() => {});
-      }
-      return immediate;
+        try {
+		  await persistMemory({
+			SUPABASE_URL,
+			SUPABASE_SERVICE,
+			userId,
+			sessionId,
+			role: "note",
+			content,
+			meta: { source: "edge", ts: new Date().toISOString() },
+  });
+  return streamText("Saved to memory.");
+} catch (e) {
+  return streamText("I tried to save that but hit a database hiccup.");
+}
+
     }
 
     // ---- recall
