@@ -1,9 +1,6 @@
 // netlify/edge-functions/chat-stream.js
-// Edge Runtime: streams OpenAI chat completion and persists conversation
-// to Supabase keyed by sessionId. Route is configured in netlify.toml:
-//   [[edge_functions]]
-//   path = "/api/chat-stream"
-//   function = "chat-stream"
+// Edge Runtime (Deno). Streams OpenAI chat + persists to Supabase by sessionId.
+// Exposed at /api/chat-stream via [[edge_functions]] in netlify.toml.
 
 export default async (request, context) => {
   try {
@@ -11,31 +8,29 @@ export default async (request, context) => {
       return new Response(null, { status: 204, headers: cors() });
     }
     if (request.method !== "POST") {
-      return json(405, { error: "method_not_allowed" });
+      return j(405, { error: "method_not_allowed" });
     }
 
+    // ----- ENV: use context.env (Edge runtime) -----
     const {
       OPENAI_API_KEY,
       OPENAI_CHAT_MODEL = "gpt-4o-mini",
       SUPABASE_URL,
       SUPABASE_SERVICE_ROLE,
-      MEMORY_WINDOW = "16", // number of last messages to hydrate
-    } = env();
+      MEMORY_WINDOW = "16",
+    } = env(context);
 
-    if (!OPENAI_API_KEY) return json(500, { error: "missing_openai_key" });
-    if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE) {
-      console.warn("[chat-stream] Missing Supabase env; will run stateless.");
-    }
+    if (!OPENAI_API_KEY) return j(500, { error: "missing_openai_key" });
 
     const body = await safeJson(request);
     const userText = String(body?.message || "").trim();
     const sessionId = String(body?.sessionId || "").trim();
-    const voice = (body?.voice ?? "");
+    const voice = body?.voice ?? "";
 
-    if (!userText) return json(400, { error: "missing_text" });
-    if (!sessionId) return json(400, { error: "missing_session_id" });
+    if (!userText) return j(400, { error: "missing_text" });
+    if (!sessionId) return j(400, { error: "missing_session_id" });
 
-    // ----- 1) Pull recent history from Supabase (server-side, using service key)
+    // ----- 1) Load recent history from Supabase (optional) -----
     let history = [];
     if (SUPABASE_URL && SUPABASE_SERVICE_ROLE) {
       const url =
@@ -54,11 +49,10 @@ export default async (request, context) => {
       if (h.ok) {
         history = await h.json();
       } else {
-        console.warn("[chat-stream] supabase history error", await h.text());
+        console.warn("[edge chat-stream] supabase history err", h.status, await h.text());
       }
     }
 
-    // Keep last N messages (role/content pairs), then add current user msg
     const windowN = clampInt(MEMORY_WINDOW, 2, 40);
     const prior = history.slice(-windowN);
     const messages = [
@@ -67,8 +61,8 @@ export default async (request, context) => {
       { role: "user", content: userText },
     ];
 
-    // ----- 2) Stream from OpenAI
-    const openaiResp = await fetch("https://api.openai.com/v1/chat/completions", {
+    // ----- 2) OpenAI streaming request -----
+    const ai = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         Authorization: `Bearer ${OPENAI_API_KEY}`,
@@ -78,71 +72,77 @@ export default async (request, context) => {
         model: OPENAI_CHAT_MODEL,
         stream: true,
         messages,
-        // temperature intentionally omitted for cross-model compatibility
+        // omit temperature for model-compat
       }),
     });
 
-    if (!openaiResp.ok || !openaiResp.body) {
-      const raw = await openaiResp.text().catch(() => "");
-      console.error("[chat-stream] openai error", openaiResp.status, raw);
-      return json(502, { error: "openai_upstream_error", detail: raw });
+    if (!ai.ok || !ai.body) {
+      const raw = await ai.text().catch(() => "");
+      console.error("[edge chat-stream] openai upstream", ai.status, raw);
+      return j(502, { error: "openai_upstream_error", detail: raw });
     }
 
-    // We'll capture the streamed assistant text to persist after the stream ends
     let fullAssistant = "";
 
     const stream = new ReadableStream({
       start(controller) {
-        const encoder = new TextEncoder();
-        const reader = openaiResp.body.getReader();
+        const enc = new TextEncoder();
+        const dec = new TextDecoder();
+        const reader = ai.body.getReader();
 
-        // SSE-style "data: {json}\n\n"
-        controller.enqueue(encoder.encode(`event: ready\ndata: {}\n\n`));
+        controller.enqueue(enc.encode(`event: ready\ndata: {}\n\n`));
 
         const pump = async () => {
           while (true) {
             const { value, done } = await reader.read();
             if (done) break;
-            const chunk = new TextDecoder().decode(value);
+            const chunk = dec.decode(value);
 
-            // forward raw chunks as text/event-stream lines
-            // also aggregate assistant tokens from "delta" fields
             const lines = chunk.split(/\r?\n/);
             for (const line of lines) {
               if (!line) continue;
-              controller.enqueue(encoder.encode(line + "\n"));
-              // try parse assistant deltas for local aggregation
+              // Forward as text/event-stream
+              controller.enqueue(enc.encode(line + "\n"));
+
               if (line.startsWith("data: ")) {
                 const payload = line.slice(6).trim();
                 if (payload && payload !== "[DONE]") {
                   try {
                     const j = JSON.parse(payload);
-                    const d = j.choices?.[0]?.delta?.content || j.delta || j.content || "";
+                    const d =
+                      j?.choices?.[0]?.delta?.content ??
+                      j?.delta ??
+                      j?.content ??
+                      "";
                     if (d) fullAssistant += d;
-                  } catch { /* ignore */ }
+                  } catch {
+                    // ignore parse errs
+                  }
                 }
               }
             }
           }
-          controller.enqueue(encoder.encode("data: [DONE]\n\n"));
+
+          controller.enqueue(enc.encode("data: [DONE]\n\n"));
           controller.close();
         };
 
         pump().catch((e) => {
-          console.error("[chat-stream] stream pump error", e);
+          console.error("[edge chat-stream] pump error", e);
           controller.error(e);
         });
       },
     });
 
-    // Fire-and-forget persist (don’t block the stream)
+    // ----- 3) Persist turn to Supabase (fire-and-forget) -----
     persistTurn({
+      context,
       SUPABASE_URL,
       SUPABASE_SERVICE_ROLE,
       sessionId,
       userText,
-      assistantTextProvider: () => fullAssistant, // evaluated after stream finishes
-    }).catch((e) => console.warn("[chat-stream] persist error", e));
+      assistantTextProvider: () => fullAssistant,
+    }).catch((e) => console.warn("[edge chat-stream] persist error", e));
 
     return new Response(stream, {
       status: 200,
@@ -155,32 +155,37 @@ export default async (request, context) => {
       },
     });
   } catch (e) {
-    console.error("[chat-stream] exception", e);
-    return json(500, { error: "chat_stream_exception", detail: String(e?.message || e) });
+    console.error("[edge chat-stream] exception", e);
+    return j(500, { error: "chat_stream_exception", detail: String(e?.message || e) });
   }
 };
 
-/* ----------------------- helpers ----------------------- */
+/* ---------------- helpers ---------------- */
 
 const cors = () => ({
   "Access-Control-Allow-Origin": "*",
   "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With",
+  "Access-Control-Allow-Headers":
+    "Content-Type, Authorization, X-Requested-With",
 });
 
-const json = (status, obj) =>
+const j = (status, obj) =>
   new Response(JSON.stringify(obj), {
     status,
     headers: { "Content-Type": "application/json", ...cors() },
   });
 
-const env = () => ({
-  OPENAI_API_KEY: process.env.OPENAI_API_KEY,
-  OPENAI_CHAT_MODEL: process.env.OPENAI_CHAT_MODEL,
-  SUPABASE_URL: process.env.SUPABASE_URL,
-  SUPABASE_SERVICE_ROLE: process.env.SUPABASE_SERVICE_ROLE,
-  MEMORY_WINDOW: process.env.MEMORY_WINDOW,
-});
+// Read env from Edge runtime
+function env(ctx) {
+  const e = ctx?.env ?? {};
+  return {
+    OPENAI_API_KEY: e.OPENAI_API_KEY,
+    OPENAI_CHAT_MODEL: e.OPENAI_CHAT_MODEL,
+    SUPABASE_URL: e.SUPABASE_URL,
+    SUPABASE_SERVICE_ROLE: e.SUPABASE_SERVICE_ROLE,
+    MEMORY_WINDOW: e.MEMORY_WINDOW,
+  };
+}
 
 async function safeJson(req) {
   try { return await req.json(); } catch { return null; }
@@ -191,23 +196,26 @@ function baseSystemPrompt() {
 }
 
 function clampInt(v, lo, hi) {
-  const n = Math.max(lo, Math.min(hi, parseInt(v || `${lo}`, 10)));
-  return Number.isFinite(n) ? n : lo;
+  const n = parseInt(v ?? `${lo}`, 10);
+  if (!Number.isFinite(n)) return lo;
+  return Math.max(lo, Math.min(hi, n));
 }
 
-/**
- * Persist both user and assistant messages to Supabase.
- * We insert them as two rows in a single RPC (bulk insert via PostgREST).
- */
-async function persistTurn({ SUPABASE_URL, SUPABASE_SERVICE_ROLE, sessionId, userText, assistantTextProvider }) {
+async function persistTurn({
+  context,
+  SUPABASE_URL,
+  SUPABASE_SERVICE_ROLE,
+  sessionId,
+  userText,
+  assistantTextProvider,
+}) {
   if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE) return;
-
-  // small delay to ensure stream closed and assistant text accumulated
+  // small delay so the stream can fully aggregate text
   await new Promise((r) => setTimeout(r, 10));
   const assistantText = assistantTextProvider() || "";
 
   const rows = [
-    { session_id: sessionId, role: "user",      content: userText },
+    { session_id: sessionId, role: "user", content: userText },
     { session_id: sessionId, role: "assistant", content: assistantText },
   ];
 
@@ -223,7 +231,6 @@ async function persistTurn({ SUPABASE_URL, SUPABASE_SERVICE_ROLE, sessionId, use
   });
 
   if (!resp.ok) {
-    const raw = await resp.text();
-    console.warn("[chat-stream] supabase insert error", resp.status, raw);
+    console.warn("[edge chat-stream] supabase insert err", resp.status, await resp.text());
   }
 }
