@@ -1,11 +1,10 @@
 /* public/assets/chat.js
    Keilani Brain — Live
    Edge streaming + voices + PTT + barge-in + session memory
-   iOS PTT (audio/mp4), VAD with hysteresis, tunable via URL (?silence=, ?vad=, ?vadLow=)
-   Optional Start Chat (continuous) button with auto-chunking
+   Now with: release tail, soft VAD tail, flush guarantee, bigger timeslice
 */
-
 (() => {
+  // ---------- DOM ----------
   const $ = (s) => document.querySelector(s);
   const inputEl      = $('#textIn')    || $('#input')  || $('textarea');
   const sendBtn      = $('#sendBtn')   || $('#send');
@@ -16,44 +15,19 @@
   const transcriptEl = $('#transcriptBox') || $('#transcript');
   const replyEl      = $('#reply');
 
-  // Add Start Chat if missing
-  let startBtn = $('#startBtn') || document.getElementById('startChatBtn');
-  if (!startBtn) {
-    startBtn = document.createElement('button');
-    startBtn.id = 'startBtn';
-    startBtn.textContent = 'Start Chat';
-    startBtn.style.marginLeft = '8px';
-    const row = document.querySelector('.row') || document.body;
-    row.appendChild(startBtn);
-  }
-
-  // ---------- URL + IDs ----------
-  const qp = new URLSearchParams(location.search);
-  const urlUser    = qp.get('user') || '';
-  const urlSession = qp.get('session') || '';
-  const urlVoice   = qp.get('voice') || '';
-  const doReset    = qp.has('reset');
-  // VAD knobs
-  const urlSilence = Number(qp.get('silence')) || NaN;
-  const urlVadHi   = Number(qp.get('vad'))     || NaN;
-  const urlVadLo   = Number(qp.get('vadLow'))  || NaN;
-
+  // ---------- Session ----------
+  const SESSION_KEY = 'kb_session';
   function uuidv4() {
     return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
       (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (c / 4))).toString(16)
     );
   }
-  const SESSION_KEY = 'kb_session';
-  const USER_KEY    = 'kb_user';
-  if (doReset) { try { localStorage.removeItem(SESSION_KEY); } catch {}; try { localStorage.removeItem(USER_KEY); } catch {}; }
-  function getId(key, prefix, override) {
-    if (override) { localStorage.setItem(key, override); return override; }
-    let v = localStorage.getItem(key);
-    if (!v) { v = `${prefix}-${uuidv4()}`; localStorage.setItem(key, v); }
-    return v;
+  function getSessionId() {
+    let id = localStorage.getItem(SESSION_KEY);
+    if (!id) { id = uuidv4(); localStorage.setItem(SESSION_KEY, id); }
+    return id;
   }
-  const userId    = getId(USER_KEY, 'user', urlUser);
-  const sessionId = getId(SESSION_KEY, 'sess', urlSession);
+  const sessionId = getSessionId();
 
   // ---------- Audio / TTS ----------
   const player = (() => {
@@ -61,21 +35,19 @@
     el.id = 'ttsPlayer';
     el.preload = 'none';
     el.controls = true;
-    el.playsInline = true;
     if (!el.parentNode) document.body.appendChild(el);
     return el;
   })();
 
-  let bargeIn = { speaking: false };
+  let ac, bargeIn = { speaking: false };
   function unlockAudioOnce() {
     try {
       const Ctx = window.AudioContext || window.webkitAudioContext;
-      const ac = Ctx ? new Ctx() : null;
+      if (!ac && Ctx) ac = new Ctx();
       if (ac?.state === 'suspended') ac.resume();
       player.muted = false;
     } catch {}
   }
-  document.addEventListener('touchstart', unlockAudioOnce, { once: true, passive: true });
   document.addEventListener('pointerdown', unlockAudioOnce, { once: true });
 
   function setStatus(s) { if (statusPill) statusPill.textContent = s; }
@@ -90,8 +62,8 @@
   function stopSpeaking() {
     try { player.pause(); player.currentTime = 0; } catch {}
     bargeIn.speaking = false;
+    console.log('[TTS] stopSpeaking() – barge in');
   }
-
   async function speakText(text, voice) {
     if (!text?.trim()) return;
     const resp = await fetch('/.netlify/functions/tts', {
@@ -106,22 +78,24 @@
     try { bargeIn.speaking = true; await player.play(); } catch (e) { console.warn('[TTS] autoplay?', e); }
   }
 
-  // ---------- Chat (Edge SSE) ----------
+  // ---------- Chat Stream (Edge) ----------
   async function chatStream(message, voice) {
     const resp = await fetch('/api/chat-stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message, voice, sessionId, userId }),
+      body: JSON.stringify({ message, voice, sessionId }),
     });
     if (!resp.ok || !resp.body) {
       const raw = await resp.text().catch(()=> '');
       console.error('[chat-stream] HTTP', resp.status, 'raw=', raw);
       throw new Error('chat_stream_failed');
     }
+
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
     let finalText = '';
     clear(replyEl);
+
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
@@ -132,7 +106,7 @@
         if (!data || data === '[DONE]') continue;
         try {
           const j = JSON.parse(data);
-          const d = j.choices?.[0]?.delta?.content || j.delta || j.content || '';
+          const d = j.choices?.[0]?.delta?.content || j.delta || j.content || j.text || '';
           if (d) { finalText += d; append(replyEl, d); }
         } catch {
           finalText += data; append(replyEl, data);
@@ -142,7 +116,7 @@
     return finalText.trim();
   }
 
-  // ---------- Send (text) ----------
+  // ---------- Send ----------
   async function handleSend() {
     try {
       unlockAudioOnce();
@@ -160,15 +134,23 @@
     }
   }
 
-  // ---------- PTT / STT ----------
-  function isiOS() { return /iphone|ipad|ipod/i.test(navigator.userAgent); }
-  function isFirefox() { return /firefox/i.test(navigator.userAgent); }
+  // ---------- PTT / STT  (end-clipping fixes) ----------
+  let mediaStream = null, mediaRecorder = null, chunks = [];
+  let analyser = null, sourceNode = null;   // for soft VAD tail
+  let pttState = { holding: false, releasedAt: 0, stopping: false };
+
+  // Tunables (feel free to tweak)
+  const TIMESLICE_MS     = 400; // larger chunk -> better encoder flush
+  const RELEASE_TAIL_MS  = 380; // minimum tail after button-up
+  const SILENCE_DB       = -50; // roughly quiet threshold
+  const SILENCE_HOLD_MS  = 450; // require this much silence before stop
+  const MAX_TAIL_MS      = 1200; // cap total tail waiting time
+  const SMALL_BLOB_MIN   = 2000; // bytes
+
   function mimePick() {
-    if (isiOS() && MediaRecorder.isTypeSupported('audio/mp4')) return 'audio/mp4';
-    if (isFirefox() && MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) return 'audio/ogg;codecs=opus';
+    if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) return 'audio/ogg;codecs=opus';
     if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) return 'audio/webm;codecs=opus';
-    if (MediaRecorder.isTypeSupported('audio/webm')) return 'audio/webm';
-    return 'audio/mp4';
+    return 'audio/webm';
   }
   function toB64(buf) {
     let bin = '', bytes = new Uint8Array(buf);
@@ -176,39 +158,138 @@
     return btoa(bin);
   }
 
-  let mediaStream = null, mediaRecorder = null, chunks = [];
+  function rmsDb(samples) {
+    // simple VAD-ish RMS->dB
+    let sum = 0;
+    for (let i = 0; i < samples.length; i++) {
+      const v = samples[i] / 128 - 1; // center on 0
+      sum += v * v;
+    }
+    const mean = sum / samples.length;
+    const rms = Math.sqrt(mean);
+    const db = 20 * Math.log10(rms + 1e-6);
+    return db;
+  }
+
   async function startPTT() {
     try {
       unlockAudioOnce();
       stopSpeaking();
       setStatus('listening');
+      pttState = { holding: true, releasedAt: 0, stopping: false };
       chunks = [];
+
       mediaStream = await navigator.mediaDevices.getUserMedia({
-        audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true, sampleRate: 48000 }
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: true,
+          autoGainControl: true,
+          sampleRate: 48000
+        }
       });
+
+      // Wire analyser for soft VAD tail
+      const Ctx = window.AudioContext || window.webkitAudioContext;
+      if (!ac && Ctx) ac = new Ctx();
+      if (ac?.state === 'suspended') await ac.resume();
+      sourceNode = ac?.createMediaStreamSource ? ac.createMediaStreamSource(mediaStream) : null;
+      analyser = ac?.createAnalyser ? ac.createAnalyser() : null;
+      if (sourceNode && analyser) {
+        analyser.fftSize = 1024;
+        sourceNode.connect(analyser);
+      }
+
       const mime = mimePick();
       mediaRecorder = new MediaRecorder(mediaStream, { mimeType: mime, audioBitsPerSecond: 128000 });
-      mediaRecorder.ondataavailable = (e) => { if (e.data?.size) chunks.push(e.data); };
+
+      mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
       mediaRecorder.onstop = onPTTStop;
-      mediaRecorder.start(250);
+
+      mediaRecorder.start(TIMESLICE_MS);
       console.log('[PTT] recording… mime=', mime);
     } catch (e) {
       console.error('[PTT] start error', e);
       setStatus('idle');
     }
   }
+
+  // Wait for either enough silence OR max tail time after pointer-up
+  async function waitTail() {
+    const buf = new Uint8Array(256);
+    const tailStart = performance.now();
+    const minTailAt = tailStart + RELEASE_TAIL_MS;
+
+    while (true) {
+      if (!analyser) break; // nothing to sample
+      analyser.getByteTimeDomainData(buf);
+      const db = rmsDb(buf);
+
+      const now = performance.now();
+      const passedMinTail = now >= minTailAt;
+      const exceededMax = now - tailStart >= MAX_TAIL_MS;
+
+      if (passedMinTail && (db < SILENCE_DB || exceededMax)) break;
+
+      // Small sleep to avoid a hot loop
+      await new Promise(r => setTimeout(r, 45));
+    }
+  }
+
   async function stopPTT() {
     try {
-      if (mediaRecorder?.state === 'recording') { mediaRecorder.requestData?.(); mediaRecorder.stop(); }
-      mediaStream?.getTracks().forEach(t => t.stop());
-    } catch {}
+      if (!mediaRecorder || mediaRecorder.state !== 'recording') return;
+      pttState.holding = false;
+      pttState.releasedAt = performance.now();
+
+      // Soft VAD + minimum tail
+      await waitTail();
+
+      if (pttState.stopping) return;
+      pttState.stopping = true;
+
+      // Guaranteed flush
+      try { mediaRecorder.requestData?.(); } catch {}
+      mediaRecorder.stop();
+      // tracks stopped in onPTTStop finally{}
+    } catch (e) {
+      console.warn('[PTT] stop error', e);
+    }
   }
+
+  function onStopPromise(mr) {
+    return new Promise((resolve) => {
+      if (!mr) return resolve();
+      const done = () => resolve();
+      mr.addEventListener('stop', done, { once: true });
+    });
+  }
+
   async function onPTTStop() {
     try {
+      // Ensure we actually got the last dataavailable emitted
+      await new Promise(r => setTimeout(r, 10));
+
       setStatus('transcribing');
-      if (!chunks.length) { setStatus('idle'); return; }
+
+      if (!chunks.length) {
+        console.warn('[PTT] no chunks captured');
+        if (transcriptEl) transcriptEl.textContent = '(no audio captured)';
+        setStatus('idle');
+        return;
+      }
+
       const blob = new Blob(chunks, { type: mediaRecorder?.mimeType || mimePick() });
-      if (blob.size < 2000) { transcriptEl && (transcriptEl.textContent = '(no speech)'); setStatus('idle'); return; }
+      const sizeKB = Math.round(blob.size / 1024);
+      console.log('[PTT] final blob', blob.type, sizeKB, 'KB');
+
+      if (blob.size < SMALL_BLOB_MIN) {
+        if (transcriptEl) transcriptEl.textContent = '(no speech)';
+        console.log('[PTT] blob too small for STT (', blob.size, 'bytes )');
+        setStatus('idle');
+        return;
+      }
+
       const ab = await blob.arrayBuffer();
       const dataUrl = `data:${blob.type || 'audio/webm'};base64,${toB64(ab)}`;
 
@@ -217,8 +298,11 @@
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ audioBase64: dataUrl, language: 'en' }),
       });
-      const sttJson = await stt.json().catch(()=> ({}));
+
+      let sttJson = {};
+      try { sttJson = await stt.json(); } catch {}
       console.log('[PTT] STT', stt.status, sttJson);
+
       const transcript = (sttJson?.transcript || '').trim();
       if (transcriptEl) transcriptEl.textContent = transcript || '(no speech)';
       if (!stt.ok || !transcript) { setStatus('idle'); return; }
@@ -232,152 +316,15 @@
       console.error('[PTT] flow error', e);
       setStatus('idle');
     } finally {
-      chunks = []; mediaRecorder = null; mediaStream = null;
+      // Cleanup audio graph & tracks
+      try {
+        mediaStream?.getTracks().forEach(t => t.stop());
+        sourceNode && sourceNode.disconnect();
+        analyser && analyser.disconnect && analyser.disconnect();
+      } catch {}
+      chunks = []; mediaRecorder = null; mediaStream = null; analyser = null; sourceNode = null;
+      pttState = { holding: false, releasedAt: 0, stopping: false };
     }
-  }
-
-  // Pointer + touch bindings (iOS safe)
-  if (pttBtn) {
-    const down = (e) => { e.preventDefault?.(); startPTT(); };
-    const up   = (e) => { e.preventDefault?.(); stopPTT(); };
-    pttBtn.addEventListener('pointerdown', down);
-    pttBtn.addEventListener('pointerup', up);
-    pttBtn.addEventListener('pointerleave', up);
-    pttBtn.addEventListener('touchstart', down, { passive: false });
-    pttBtn.addEventListener('touchend', up);
-    pttBtn.addEventListener('touchcancel', up);
-    pttBtn.addEventListener('mousedown', down);
-    pttBtn.addEventListener('mouseup', up);
-    pttBtn.addEventListener('mouseleave', up);
-  }
-
-  // ---------- Continuous Start Chat (VAD with hysteresis) ----------
-  let liveOn = false;
-  let vadTimer = null;
-  let liveStream = null;
-  let liveRecorder = null;
-  let liveChunks = [];
-  let speechActive = false;
-
-  const DEFAULT_SILENCE_MS = !Number.isNaN(urlSilence) ? urlSilence : 1200; // was 700
-  const VAD_HI = !Number.isNaN(urlVadHi) ? urlVadHi : 0.035;               // start talking threshold
-  const VAD_LO = !Number.isNaN(urlVadLo) ? urlVadLo : 0.020;               // stop talking threshold
-  const MIN_UTT_MS = 400; // ignore super-short blips
-
-  async function liveToggle() { if (liveOn) await liveStop(); else await liveStart(); }
-
-  async function liveStart() {
-    unlockAudioOnce();
-    stopSpeaking();
-    setStatus('listening');
-    liveChunks = [];
-    liveOn = true;
-    startBtn.textContent = 'Stop Chat';
-
-    liveStream = await navigator.mediaDevices.getUserMedia({
-      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true, sampleRate: 48000 }
-    });
-
-    const AC = window.AudioContext || window.webkitAudioContext;
-    const ac = new AC();
-    const src = ac.createMediaStreamSource(liveStream);
-    const analyser = ac.createAnalyser();
-    analyser.fftSize = 2048;
-    src.connect(analyser);
-
-    const mime = mimePick();
-    liveRecorder = new MediaRecorder(liveStream, { mimeType: mime, audioBitsPerSecond: 128000 });
-    liveRecorder.ondataavailable = (e) => { if (e.data?.size) liveChunks.push(e.data); };
-
-    let lastSpeech = 0;
-    let startedAt = 0;
-
-    function energy() {
-      const buf = new Uint8Array(analyser.frequencyBinCount);
-      analyser.getByteTimeDomainData(buf);
-      let sum = 0;
-      for (let i=0;i<buf.length;i++){
-        const v = (buf[i]-128)/128;
-        sum += v*v;
-      }
-      return Math.sqrt(sum / buf.length);
-    }
-
-    function tick() {
-      if (!liveOn) return;
-      const rms = energy();
-      const now = performance.now();
-
-      if (!speechActive) {
-        if (rms > VAD_HI) {
-          speechActive = true;
-          startedAt = now;
-          try { liveRecorder.start(250); } catch {}
-          lastSpeech = now;
-        }
-      } else {
-        if (rms > VAD_LO) {
-          lastSpeech = now;
-        } else if (now - lastSpeech > DEFAULT_SILENCE_MS) {
-          // end utterance
-          speechActive = false;
-          try { liveRecorder.requestData?.(); liveRecorder.stop(); } catch {}
-          const dur = now - startedAt;
-          if (dur > MIN_UTT_MS) handleLiveUtterance().catch(console.error);
-          else liveChunks = [];
-        }
-      }
-
-      vadTimer = setTimeout(tick, 60);
-    }
-    tick();
-  }
-
-  async function handleLiveUtterance() {
-    try {
-      setStatus('transcribing');
-      if (!liveChunks.length) return;
-      const blob = new Blob(liveChunks, { type: liveRecorder?.mimeType || mimePick() });
-      liveChunks = [];
-      if (blob.size < 1800) { setStatus('listening'); return; }
-      const ab = await blob.arrayBuffer();
-      const dataUrl = `data:${blob.type || 'audio/webm'};base64,${toB64(ab)}`;
-
-      const stt = await fetch('/.netlify/functions/stt', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ audioBase64: dataUrl, language: 'en' }),
-      });
-      const sttJson = await stt.json().catch(()=> ({}));
-      console.log('[LIVE] STT', stt.status, sttJson);
-      const transcript = (sttJson?.transcript || '').trim();
-      if (transcriptEl) transcriptEl.textContent = transcript || '(no speech)';
-      if (!stt.ok || !transcript) { setStatus('listening'); return; }
-
-      setStatus('thinking');
-      const reply = await chatStream(transcript, getVoice());
-      setStatus('speaking');
-      await speakText(reply, getVoice());
-      if (liveOn) setStatus('listening');
-    } catch (e) {
-      console.error('[LIVE] error', e);
-      if (liveOn) setStatus('listening');
-    }
-  }
-
-  async function liveStop() {
-    liveOn = false;
-    startBtn.textContent = 'Start Chat';
-    if (vadTimer) { clearTimeout(vadTimer); vadTimer = null; }
-    try {
-      if (liveRecorder && liveRecorder.state === 'recording') {
-        liveRecorder.requestData?.();
-        liveRecorder.stop();
-      }
-    } catch {}
-    try { liveStream?.getTracks().forEach(t => t.stop()); } catch {}
-    liveRecorder = null; liveStream = null; liveChunks = [];
-    setStatus('idle');
   }
 
   // ---------- Wire UI ----------
@@ -388,16 +335,23 @@
     if (!text) return;
     setStatus('speaking'); await speakText(text, getVoice()); setStatus('idle');
   });
-  startBtn?.addEventListener('click', () => { liveToggle(); });
+
+  if (pttBtn) {
+    // pointer
+    pttBtn.addEventListener('pointerdown', startPTT);
+    pttBtn.addEventListener('pointerup', stopPTT);
+    pttBtn.addEventListener('pointerleave', () => mediaRecorder?.state === 'recording' && stopPTT());
+    // mouse/touch fallbacks (iOS)
+    pttBtn.addEventListener('mousedown', startPTT);
+    pttBtn.addEventListener('mouseup', stopPTT);
+    pttBtn.addEventListener('touchstart', (e) => { e.preventDefault(); startPTT(); }, { passive: false });
+    pttBtn.addEventListener('touchend',   (e) => { e.preventDefault(); stopPTT();  }, { passive: false });
+  }
 
   inputEl?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
   });
 
-  if (urlVoice && voiceSel) voiceSel.value = urlVoice;
   setStatus('idle');
-  console.log('[Keilani] chat.js ready', {
-    userId, sessionId,
-    silenceMs: DEFAULT_SILENCE_MS, vadHi: VAD_HI, vadLo: VAD_LO
-  });
+  console.log('[Keilani] chat.js ready (Edge streaming + voices + session)');
 })();
