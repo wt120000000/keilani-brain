@@ -1,132 +1,112 @@
 // netlify/functions/stt.js
-// POST { audioBase64: "<raw b64 | data URL>", language?: "en" } -> { transcript }
-// - Ignores tiny audio
-// - Normalizes mime/filename for OpenAI
-// - Retries 3x with backoff on 429/5xx
-// - PLUS: if OpenAI claims "unsupported file format", retry once with alt filename (webm<->ogg)
+// POST { audioBase64: "<base64 or data:URI>", language?: "en" } -> { transcript }
+//
+// Notes:
+// - Accepts data URLs or raw base64
+// - Sniffs content type for a good filename hint (OpenAI sniffs anyway)
+// - Rejects very small payloads before hitting OpenAI
+// - Uses gpt-4o-mini-transcribe by default with response_format "json"
+// - Bubbles up OpenAI error details for easy debugging
 
-const CORS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With",
-};
-const JSON_HEADERS = { ...CORS, "Content-Type": "application/json" };
-const json = (status, body) => ({ statusCode: status, headers: JSON_HEADERS, body: JSON.stringify(body) });
+const fetch = require("node-fetch");
+const FormData = require("form-data");
+
+function corsHeaders() {
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With",
+  };
+}
+
+function json(status, body) {
+  return {
+    statusCode: status,
+    headers: { "Content-Type": "application/json", ...corsHeaders() },
+    body: JSON.stringify(body),
+  };
+}
 
 exports.handler = async (event) => {
   try {
-    if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers: CORS, body: "" };
-    if (event.httpMethod !== "POST")  return json(405, { error: "method_not_allowed" });
+    // CORS preflight
+    if (event.httpMethod === "OPTIONS") {
+      return { statusCode: 204, headers: corsHeaders(), body: "" };
+    }
+    if (event.httpMethod !== "POST") {
+      return json(405, { error: "method_not_allowed" });
+    }
 
     const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
     const MODEL = process.env.OPENAI_STT_MODEL || "gpt-4o-mini-transcribe";
     if (!OPENAI_API_KEY) return json(500, { error: "missing_openai_key" });
 
-    let body = {};
-    try { body = JSON.parse(event.body || "{}"); }
-    catch { return json(400, { error: "invalid_json" }); }
-
-    let audioBase64 = (body.audioBase64 || "").trim();
-    const language = (body.language || "").trim() || undefined;
-    if (!audioBase64) return json(400, { error: "missing_audio" });
-
-    // Parse data URL or raw b64
-    let mime = "audio/webm";
-    if (audioBase64.startsWith("data:")) {
-      const comma = audioBase64.indexOf(",");
-      const header = audioBase64.slice(0, comma);
-      const b64 = audioBase64.slice(comma + 1);
-      audioBase64 = b64;
-      const m = header.match(/^data:([^;]+)/);
-      if (m && m[1]) mime = m[1];
+    // Parse incoming JSON
+    let body;
+    try {
+      body = JSON.parse(event.body || "{}");
+    } catch {
+      return json(400, { error: "invalid_json" });
     }
 
-    // Normalize mime to a safe filename/contentType OpenAI likes
-    const primaryExt =
-      mime.includes("wav") ? "wav" :
-      mime.includes("mp3") ? "mp3" :
-      mime.includes("m4a") ? "m4a" :
-      mime.includes("ogg") ? "ogg" : "webm";
+    const raw = String(body.audioBase64 || "").trim();
+    const language = body.language && String(body.language).trim();
+    if (!raw) return json(400, { error: "missing_audio" });
 
-    const normalizedMime =
-      mime.startsWith("audio/webm") ? "audio/webm" :
-      mime.startsWith("audio/ogg")  ? "audio/ogg"  : mime;
+    // Accept data:URI or raw base64
+    let audioBase64 = raw;
+    let mimeHint = "audio/webm";
+    if (raw.startsWith("data:")) {
+      const comma = raw.indexOf(",");
+      const header = raw.substring(0, comma);
+      audioBase64 = raw.substring(comma + 1);
+      const m = header.match(/^data:([^;]+)/);
+      if (m) mimeHint = m[1];
+    }
 
     const buf = Buffer.from(audioBase64, "base64");
     if (!buf || buf.length < 2000) {
-      // Too small = usually no speech
-      return json(200, { transcript: "" });
+      return json(400, { error: "audio_too_small", detail: { bytes: buf?.length || 0 } });
     }
 
-    // Build FormData with Node 18+ native types (undici)
-    const buildForm = (ext) => {
-      const form = new FormData();
-      const blob = new Blob([buf], { type: normalizedMime });
-      form.append("file", blob, `audio.${ext}`);
-      form.append("model", MODEL);
-      form.append("response_format", "json");
-      if (language) form.append("language", language);
-      return form;
-    };
+    // Prepare multipart form
+    const form = new FormData();
+    const fileName =
+      mimeHint.includes("wav")  ? "audio.wav"  :
+      mimeHint.includes("mp3")  ? "audio.mp3"  :
+      mimeHint.includes("m4a")  ? "audio.m4a"  :
+      mimeHint.includes("ogg")  ? "audio.ogg"  :
+      mimeHint.includes("webm") ? "audio.webm" : "audio.webm";
 
-    const backoff = (n) => new Promise((r) => setTimeout(r, 300 * Math.pow(2, n)));
+    form.append("file", buf, { filename: fileName, contentType: mimeHint });
+    form.append("model", MODEL);
+    // gpt-4o-mini-transcribe expects "json" or "text"
+    form.append("response_format", "json");
+    if (language) form.append("language", language);
 
-    async function callOpenAI(form) {
-      let resp, text, ok = false, lastErr = null;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
-            method: "POST",
-            headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
-            body: form,
-          });
-          text = await resp.text();
-          if (resp.ok) { ok = true; break; }
-          if (resp.status === 429 || (resp.status >= 500 && resp.status <= 599)) {
-            await backoff(attempt);
-            continue;
-          }
-          lastErr = text;
-          break;
-        } catch (e) {
-          lastErr = String(e?.message || e);
-          await backoff(attempt);
-        }
-      }
-      return { ok, resp, text, lastErr };
+    const resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+      method: "POST",
+      headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
+      body: form,
+    });
+
+    const text = await resp.text();
+    if (!resp.ok) {
+      // Include OpenAI error and our sniffed metadata
+      return json(resp.status, {
+        error: "openai_stt_error",
+        detail: safeParse(text) || text,
+        meta: { mimeHint, fileName, bytes: buf.length, model: MODEL },
+      });
     }
 
-    // Primary attempt
-    let { ok, resp, text, lastErr } = await callOpenAI(buildForm(primaryExt));
-
-    // If "unsupported file format", try an alternate extension without re-encoding
-    if (!ok && isUnsupportedFileError(text)) {
-      const altExt = primaryExt === "webm" ? "ogg"
-                   : primaryExt === "ogg"  ? "webm"
-                   : "webm";
-      const second = await callOpenAI(buildForm(altExt));
-      ok = second.ok; resp = second.resp; text = second.text; lastErr = second.lastErr;
-    }
-
-    if (!ok) return json(resp?.status || 500, { error: "openai_stt_error", detail: tryParse(lastErr) });
-
-    let data = {};
-    try { data = JSON.parse(text); } catch { data = { text: "" }; }
+    const data = safeParse(text) || { text: "" };
     return json(200, { transcript: data.text || "" });
   } catch (e) {
-    return json(500, { error: "stt_exception", detail: String(e?.message || e) });
+    return json(500, { error: "stt_exception", detail: String(e.message || e) });
   }
 };
 
-function isUnsupportedFileError(s) {
-  try {
-    const j = JSON.parse(s);
-    const msg = j?.error?.message || "";
-    return /unsupported file format/i.test(msg);
-  } catch {
-    return /unsupported file format/i.test(String(s || ""));
-  }
-}
-function tryParse(s) {
-  try { return JSON.parse(s); } catch { return s; }
+function safeParse(t) {
+  try { return JSON.parse(t); } catch { return null; }
 }

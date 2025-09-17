@@ -3,12 +3,12 @@
    - STT:           /.netlify/functions/stt
    - TTS:           /.netlify/functions/tts
    - Voices list:   /.netlify/functions/voices
-   - Push-to-talk with barge-in, retries on STT/Chat, voice picker + persistence
+   - Push-to-talk with barge-in, retries, voice picker + persistence
 */
 
 (() => {
   // ---------- Config ----------
-  const CHAT_STREAM_URL = "/api/chat-stream";                // Edge route
+  const CHAT_STREAM_URL = "/api/chat-stream";     // Edge route
   const STT_URL  = "/.netlify/functions/stt";
   const TTS_URL  = "/.netlify/functions/tts";
   const VOICES_URL = "/.netlify/functions/voices";
@@ -24,7 +24,7 @@
   const replyEl      = $("#reply");
   const statePill    = $("#statePill") || $("#status");
 
-  // One audio element for playback
+  // One audio element
   const player = (() => {
     let a = $("#ttsPlayer");
     if (!a) {
@@ -37,7 +37,7 @@
     return a;
   })();
 
-  // Unlock audio on first gesture (autoplay policies)
+  // Unlock audio once
   let audioUnlocked = false;
   function unlockAudioOnce() {
     if (audioUnlocked) return;
@@ -53,7 +53,7 @@
   }
   document.addEventListener("pointerdown", unlockAudioOnce, { once: true });
 
-  // ---------- Small utils ----------
+  // ---------- Utils ----------
   const setState = (s) => { if (statePill) statePill.textContent = s; };
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   const getVoice = () => (voiceSel && voiceSel.value) || "";
@@ -71,21 +71,16 @@
     try { player.pause(); player.currentTime = 0; } catch {}
   }
 
-  // ---------- Voice picker ----------
+  // ---------- Voices ----------
   async function loadVoices() {
     if (!voiceSel) return;
     try {
-      const res = await fetch(VOICES_URL, { method: "GET" });
-      if (!res.ok) throw new Error("voices_http_" + res.status);
-      const data = await res.json(); // expect { voices: [{id,name}, ...] } (id/name keys tolerated)
+      const res = await fetch(VOICES_URL);
+      const data = res.ok ? await res.json() : {};
       const list = Array.isArray(data?.voices) ? data.voices : [];
 
-      // Preserve current selection if any
       const saved = localStorage.getItem("kb_voice_id") || "";
-
-      // Clear and re-populate
       voiceSel.innerHTML = "";
-      // First option: "(default / no TTS)" – user may still hear voice if server applies default
       const opt0 = document.createElement("option");
       opt0.value = "";
       opt0.textContent = "(default / no TTS)";
@@ -93,25 +88,21 @@
 
       for (const v of list) {
         const id = v.id || v.voice_id || "";
-        const name = v.name || v.display_name || id?.slice(0, 8) || "Voice";
+        const name = v.name || v.display_name || (id ? id.slice(0, 8) : "Voice");
         if (!id) continue;
         const opt = document.createElement("option");
         opt.value = id;
-        opt.textContent = `${name}`;
+        opt.textContent = name;
         voiceSel.appendChild(opt);
       }
-
-      // Restore saved selection if present
       if (saved && [...voiceSel.options].some(o => o.value === saved)) {
         voiceSel.value = saved;
       }
-
       voiceSel.addEventListener("change", () => {
         localStorage.setItem("kb_voice_id", voiceSel.value || "");
       });
     } catch (e) {
       console.warn("[VOICES] load error", e);
-      // keep existing option; TTS will still work with server default
     }
   }
 
@@ -119,8 +110,6 @@
   async function speak(text, voiceId = getVoice()) {
     if (!text || !text.trim()) return;
     setState("speaking");
-
-    // Build body; only include voice when provided
     const body = { text };
     if (voiceId) body.voice = voiceId;
 
@@ -137,30 +126,23 @@
     const buf = await res.arrayBuffer();
     const url = URL.createObjectURL(new Blob([buf], { type: "audio/mpeg" }));
     player.src = url;
-    try { await player.play(); }
-    catch (e) { console.warn("[TTS] autoplay", e); }
+    try { await player.play(); } catch (e) { console.warn("[TTS] autoplay", e); }
     player.onended = () => setState("idle");
   }
 
-  // ---------- SSE Chat (Edge) ----------
+  // ---------- Chat SSE ----------
   async function chatStream(message, history = []) {
     setState("thinking");
-
     const response = await backoff(() => fetch(CHAT_STREAM_URL, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ message, history }),
     }));
-
-    if (!response.ok || !response.body) {
-      console.error("[chat-stream] HTTP", response.status);
-      throw new Error("chat_stream_failed");
-    }
+    if (!response.ok || !response.body) throw new Error("chat_stream_failed");
 
     const reader = response.body.getReader();
     const decoder = new TextDecoder();
     let buffer = "", finalText = "";
-
     if (replyEl) replyEl.textContent = "";
 
     while (true) {
@@ -172,10 +154,8 @@
       while ((idx = buffer.indexOf("\n")) >= 0) {
         const line = buffer.slice(0, idx).trimEnd();
         buffer = buffer.slice(idx + 1);
-
         if (!line || !line.startsWith("data:")) continue;
         const data = line.slice(5).trim();
-
         if (data === "[DONE]") continue;
 
         try {
@@ -194,21 +174,18 @@
     return finalText.trim();
   }
 
-  // ---------- Text path ----------
+  // ---------- Text send ----------
   async function handleSend() {
     try {
       unlockAudioOnce();
-      stopSpeaking(); // barge-in
+      stopSpeaking();
       const text = (inputEl?.value || "").trim();
       if (!text) return;
 
       const history = JSON.parse(localStorage.getItem("kb_history") || "[]");
       const reply = await chatStream(text, history);
-
       const next = [...history, { role: "user", text }, { role: "assistant", text: reply }].slice(-10);
       localStorage.setItem("kb_history", JSON.stringify(next));
-
-      // Always try to speak (server can apply a default voice if none selected)
       await speak(reply, getVoice());
     } catch (e) {
       console.error("[SEND] error", e);
@@ -225,15 +202,23 @@
     await speak(text, getVoice());
   }
 
-  // ---------- PTT (hold to talk) ----------
+  // ---------- PTT ----------
   let mediaStream = null;
   let mediaRecorder = null;
   let chunks = [];
 
+  const isFirefox = () => /firefox/i.test(navigator.userAgent);
+
   function bestMime() {
-    if (MediaRecorder.isTypeSupported("audio/webm;codecs=opus")) return "audio/webm;codecs=opus";
-    if (MediaRecorder.isTypeSupported("audio/ogg;codecs=opus")) return "audio/ogg;codecs=opus";
-    if (MediaRecorder.isTypeSupported("audio/webm")) return "audio/webm";
+    // Prefer OGG on Firefox (more reliable with OpenAI)
+    if (isFirefox() && MediaRecorder.isTypeSupported("audio/ogg;codecs=opus"))
+      return "audio/ogg;codecs=opus";
+    if (MediaRecorder.isTypeSupported("audio/webm;codecs=opus"))
+      return "audio/webm;codecs=opus";
+    if (MediaRecorder.isTypeSupported("audio/ogg;codecs=opus"))
+      return "audio/ogg;codecs=opus";
+    if (MediaRecorder.isTypeSupported("audio/webm"))
+      return "audio/webm";
     return "";
   }
 
@@ -256,7 +241,6 @@
 
       const mime = bestMime();
       mediaRecorder = new MediaRecorder(mediaStream, { mimeType: mime, audioBitsPerSecond: 128000 });
-
       mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
       mediaRecorder.onstop = onPTTStop;
       mediaRecorder.start(250);
@@ -286,24 +270,29 @@
         return;
       }
       const blob = new Blob(chunks, { type: mediaRecorder?.mimeType || bestMime() });
-      if (blob.size < 2000) {
+      const sizeKB = Math.round(blob.size / 1024);
+
+      // Avoid tiny blobs that produce 400s
+      if (blob.size < 8 * 1024) {
         transcriptEl && (transcriptEl.textContent = "(no speech)");
+        console.log("[PTT] blob too small:", sizeKB, "KB");
         setState("idle");
         return;
       }
+
       const ab = await blob.arrayBuffer();
       const b64 = arrayBufferToBase64(ab);
       const dataUrl = `data:${blob.type || "audio/webm"};base64,${b64}`;
 
-      // STT (with retry)
       const sttResp = await backoff(() => fetch(STT_URL, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ audioBase64: dataUrl, language: "en" }),
       }));
       const sttJson = await sttResp.json().catch(() => ({}));
+      console.log("[PTT] STT", sttResp.status, sttJson);
+
       if (!sttResp.ok) {
-        console.warn("[PTT] STT", sttResp.status, sttJson);
         transcriptEl && (transcriptEl.textContent = "(stt error)");
         setState("idle");
         return;
@@ -313,12 +302,10 @@
       transcriptEl && (transcriptEl.textContent = transcript || "(no speech)");
       if (!transcript) { setState("idle"); return; }
 
-      // Chat + TTS
       const history = JSON.parse(localStorage.getItem("kb_history") || "[]");
       const reply = await chatStream(transcript, history);
       const next = [...history, { role: "user", text: transcript }, { role: "assistant", text: reply }].slice(-10);
       localStorage.setItem("kb_history", JSON.stringify(next));
-
       await speak(reply, getVoice());
     } catch (e) {
       console.error("[PTT] flow error", e);
@@ -337,7 +324,7 @@
     return btoa(bin);
   }
 
-  // ---------- Wire UI + init ----------
+  // ---------- Wire + init ----------
   sendBtn && sendBtn.addEventListener("click", handleSend);
   speakBtn && speakBtn.addEventListener("click", handleSpeak);
 
@@ -358,7 +345,7 @@
     });
   }
 
-  loadVoices();      // populate voice dropdown
+  loadVoices();
   setState("idle");
   console.log("[Keilani] chat.js ready (Edge streaming + voices)");
 })();
