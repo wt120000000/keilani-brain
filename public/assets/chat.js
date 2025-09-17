@@ -1,6 +1,9 @@
 /* public/assets/chat.js
    Keilani Brain — Live
-   (Edge streaming + voices + PTT + barge-in + session memory + URL user/session overrides)
+   Edge streaming + voices + PTT + barge-in + session memory
+   + URL user/session/voice overrides
+   + iOS hold-to-talk fixes (audio/mp4, playsInline, touch bindings)
+   + Continuous "Start Chat" mode with simple VAD (silence detection)
 */
 
 (() => {
@@ -13,6 +16,17 @@
   const statusPill   = $('#statePill') || $('#status') || $('.status');
   const transcriptEl = $('#transcriptBox') || $('#transcript');
   const replyEl      = $('#reply');
+
+  // If no Start button exists, create one
+  let startBtn = $('#startBtn') || document.getElementById('startChatBtn');
+  if (!startBtn) {
+    startBtn = document.createElement('button');
+    startBtn.id = 'startBtn';
+    startBtn.textContent = 'Start Chat';
+    startBtn.style.marginLeft = '8px';
+    const row = document.querySelector('.row') || document.body;
+    row.appendChild(startBtn);
+  }
 
   // ---------- URL helpers ----------
   const qp = new URLSearchParams(location.search);
@@ -34,25 +48,14 @@
     try { localStorage.removeItem(SESSION_KEY); } catch {}
     try { localStorage.removeItem(USER_KEY); } catch {}
   }
-
   function getId(key, prefix, override) {
-    if (override) {
-      localStorage.setItem(key, override);
-      return override;
-    }
+    if (override) { localStorage.setItem(key, override); return override; }
     let v = localStorage.getItem(key);
     if (!v) { v = `${prefix}-${uuidv4()}`; localStorage.setItem(key, v); }
     return v;
   }
-
   const userId    = getId(USER_KEY, 'user', urlUser);
   const sessionId = getId(SESSION_KEY, 'sess', urlSession);
-
-  // Apply voice override if present
-  if (urlVoice && voiceSel) {
-    // If your <select> is populated dynamically, you may want to set this later.
-    voiceSel.value = urlVoice;
-  }
 
   // ---------- Audio / TTS ----------
   const player = (() => {
@@ -60,6 +63,7 @@
     el.id = 'ttsPlayer';
     el.preload = 'none';
     el.controls = true;
+    el.playsInline = true; // iOS
     if (!el.parentNode) document.body.appendChild(el);
     return el;
   })();
@@ -73,6 +77,7 @@
       player.muted = false;
     } catch {}
   }
+  document.addEventListener('touchstart', unlockAudioOnce, { once: true, passive: true });
   document.addEventListener('pointerdown', unlockAudioOnce, { once: true });
 
   function setStatus(s) { if (statusPill) statusPill.textContent = s; }
@@ -89,7 +94,6 @@
     bargeIn.speaking = false;
   }
 
-  // Plain TTS via Netlify function (MP3)
   async function speakText(text, voice) {
     if (!text?.trim()) return;
     const resp = await fetch('/.netlify/functions/tts', {
@@ -162,10 +166,19 @@
 
   // ---------- PTT / STT ----------
   let mediaStream = null, mediaRecorder = null, chunks = [];
+  function isiOS() {
+    return /iphone|ipad|ipod/i.test(navigator.userAgent);
+  }
+  function isFirefox() {
+    return /firefox/i.test(navigator.userAgent);
+  }
   function mimePick() {
-    if (MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) return 'audio/ogg;codecs=opus';
+    // iOS Safari prefers mp4 container
+    if (isiOS() && MediaRecorder.isTypeSupported('audio/mp4')) return 'audio/mp4';
+    if (isFirefox() && MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) return 'audio/ogg;codecs=opus';
     if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) return 'audio/webm;codecs=opus';
-    return 'audio/webm';
+    if (MediaRecorder.isTypeSupported('audio/webm')) return 'audio/webm';
+    return 'audio/mp4'; // safe fallback for iOS
   }
   function toB64(buf) {
     let bin = '', bytes = new Uint8Array(buf);
@@ -186,6 +199,7 @@
       mediaRecorder = new MediaRecorder(mediaStream, { mimeType: mime, audioBitsPerSecond: 128000 });
       mediaRecorder.ondataavailable = (e) => { if (e.data?.size) chunks.push(e.data); };
       mediaRecorder.onstop = onPTTStop;
+      // timeslice for reliable chunking on iOS/Firefox
       mediaRecorder.start(250);
       console.log('[PTT] recording… mime=', mime);
     } catch (e) {
@@ -208,7 +222,8 @@
       const blob = new Blob(chunks, { type: mediaRecorder?.mimeType || mimePick() });
       if (blob.size < 2000) { transcriptEl && (transcriptEl.textContent = '(no speech)'); setStatus('idle'); return; }
       const ab = await blob.arrayBuffer();
-      const dataUrl = `data:${blob.type || 'audio/webm'};base64,${toB64(ab)}`;
+      const mime = blob.type || 'audio/webm';
+      const dataUrl = `data:${mime};base64,${toB64(ab)}`;
 
       const stt = await fetch('/.netlify/functions/stt', {
         method: 'POST',
@@ -234,6 +249,151 @@
     }
   }
 
+  // Bind pointer + touch for iOS reliability
+  if (pttBtn) {
+    const down = (e) => { e.preventDefault?.(); startPTT(); };
+    const up   = (e) => { e.preventDefault?.(); stopPTT(); };
+    pttBtn.addEventListener('pointerdown', down);
+    pttBtn.addEventListener('pointerup', up);
+    pttBtn.addEventListener('pointerleave', up);
+    pttBtn.addEventListener('touchstart', down, { passive: false });
+    pttBtn.addEventListener('touchend', up);
+    pttBtn.addEventListener('touchcancel', up);
+    pttBtn.addEventListener('mousedown', down);
+    pttBtn.addEventListener('mouseup', up);
+    pttBtn.addEventListener('mouseleave', up);
+  }
+
+  // ---------- Continuous "Start Chat" mode ----------
+  let liveOn = false;
+  let vadTimer = null;
+  let liveStream = null;
+  let liveRecorder = null;
+  let liveChunks = [];
+  let speechActive = false;
+  const SILENCE_MS = 700;  // end of utterance threshold
+  const MIN_UTT_MS = 350;  // ignore too-short blips
+
+  async function liveToggle() {
+    if (liveOn) { await liveStop(); return; }
+    await liveStart();
+  }
+
+  async function liveStart() {
+    unlockAudioOnce();
+    stopSpeaking();
+    setStatus('listening');
+    liveChunks = [];
+    liveOn = true;
+    startBtn.textContent = 'Stop Chat';
+
+    // mic
+    liveStream = await navigator.mediaDevices.getUserMedia({
+      audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true, sampleRate: 48000 }
+    });
+
+    // VAD via analyser energy
+    const AC = window.AudioContext || window.webkitAudioContext;
+    const ac = new AC();
+    const src = ac.createMediaStreamSource(liveStream);
+    const analyser = ac.createAnalyser();
+    analyser.fftSize = 2048;
+    src.connect(analyser);
+
+    const mime = mimePick();
+    liveRecorder = new MediaRecorder(liveStream, { mimeType: mime, audioBitsPerSecond: 128000 });
+    liveRecorder.ondataavailable = (e) => { if (e.data?.size) liveChunks.push(e.data); };
+
+    let lastSpeech = 0;
+    let startedAt = 0;
+
+    function energy() {
+      const buf = new Uint8Array(analyser.frequencyBinCount);
+      analyser.getByteTimeDomainData(buf);
+      let sum = 0;
+      for (let i=0;i<buf.length;i++){
+        const v = (buf[i]-128)/128;
+        sum += v*v;
+      }
+      return Math.sqrt(sum / buf.length); // RMS
+    }
+
+    function tick() {
+      if (!liveOn) return;
+      const rms = energy();
+      const now = performance.now();
+      const speaking = rms > 0.03; // tune threshold if needed
+
+      if (speaking) {
+        if (!speechActive) { speechActive = true; startedAt = now; liveRecorder.start(250); }
+        lastSpeech = now;
+      } else {
+        if (speechActive && now - lastSpeech > SILENCE_MS) {
+          // end of utterance
+          speechActive = false;
+          try { liveRecorder.requestData?.(); liveRecorder.stop(); } catch {}
+          // process the utterance
+          const duration = now - startedAt;
+          if (duration > MIN_UTT_MS) {
+            handleLiveUtterance().catch(console.error);
+          } else {
+            liveChunks = [];
+          }
+        }
+      }
+      vadTimer = setTimeout(tick, 60);
+    }
+    tick();
+  }
+
+  async function handleLiveUtterance() {
+    try {
+      setStatus('transcribing');
+      if (!liveChunks.length) return;
+      const blob = new Blob(liveChunks, { type: liveRecorder?.mimeType || mimePick() });
+      liveChunks = [];
+
+      if (blob.size < 1800) { setStatus('listening'); return; }
+      const ab = await blob.arrayBuffer();
+      const dataUrl = `data:${blob.type || 'audio/webm'};base64,${toB64(ab)}`;
+
+      const stt = await fetch('/.netlify/functions/stt', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ audioBase64: dataUrl, language: 'en' }),
+      });
+      const sttJson = await stt.json().catch(()=> ({}));
+      console.log('[LIVE] STT', stt.status, sttJson);
+      const transcript = (sttJson?.transcript || '').trim();
+      if (transcriptEl) transcriptEl.textContent = transcript || '(no speech)';
+      if (!stt.ok || !transcript) { setStatus('listening'); return; }
+
+      setStatus('thinking');
+      const reply = await chatStream(transcript, getVoice());
+      setStatus('speaking');
+      await speakText(reply, getVoice());
+      if (liveOn) setStatus('listening');
+    } catch (e) {
+      console.error('[LIVE] error', e);
+      if (liveOn) setStatus('listening');
+    }
+  }
+
+  async function liveStop() {
+    liveOn = false;
+    startBtn.textContent = 'Start Chat';
+    if (vadTimer) { clearTimeout(vadTimer); vadTimer = null; }
+    try {
+      if (liveRecorder && liveRecorder.state === 'recording') {
+        liveRecorder.requestData?.();
+        liveRecorder.stop();
+      }
+    } catch {}
+    try { liveStream?.getTracks().forEach(t => t.stop()); } catch {}
+    liveRecorder = null; liveStream = null; liveChunks = [];
+    setStatus('idle');
+  }
+
   // ---------- Wire UI ----------
   sendBtn?.addEventListener('click', handleSend);
   speakBtn?.addEventListener('click', async () => {
@@ -242,29 +402,15 @@
     if (!text) return;
     setStatus('speaking'); await speakText(text, getVoice()); setStatus('idle');
   });
-  if (pttBtn) {
-    pttBtn.addEventListener('pointerdown', startPTT);
-    pttBtn.addEventListener('pointerup', stopPTT);
-    pttBtn.addEventListener('pointerleave', () => mediaRecorder?.state === 'recording' && stopPTT());
-  }
+  startBtn?.addEventListener('click', () => { liveToggle(); });
+
   inputEl?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
   });
 
-  // ---------- UX: show IDs in console & a tiny hint ----------
-  setStatus('idle');
-  console.log('[Keilani] chat.js ready (Edge streaming + voices + session)', { userId, sessionId, voice: getVoice() });
+  // iOS voice override (if present)
+  if (urlVoice && voiceSel) voiceSel.value = urlVoice;
 
-  // Optional: show IDs in UI if you have a status pill
-  try {
-    const hintId = 'whoamiHint';
-    if (!document.getElementById(hintId)) {
-      const hint = document.createElement('div');
-      hint.id = hintId;
-      hint.className = 'mono muted';
-      hint.style.cssText = 'margin-top:8px;font-size:12px;opacity:.7;';
-      hint.textContent = `userId=${userId}  sessionId=${sessionId}`;
-      (document.querySelector('.wrap') || document.body).appendChild(hint);
-    }
-  } catch {}
+  setStatus('idle');
+  console.log('[Keilani] chat.js ready (Edge streaming + voices + session + iOS + live)', { userId, sessionId, voice: getVoice() });
 })();

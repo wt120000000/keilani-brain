@@ -1,4 +1,8 @@
-// Edge streaming + resilient memory via Supabase REST (role='note', short timeouts)
+// Edge streaming chat with:
+// - memory recall/inject
+// - explicit remember/save
+// - auto-memory for preference statements ("I like ...", "my favorite is ...")
+// - fast SSE streaming
 
 export default async (request) => {
   if (request.method === "OPTIONS") {
@@ -16,39 +20,31 @@ export default async (request) => {
 
     const low = message.trim().toLowerCase();
 
-    // ---- remember/save -> immediate response, background insert
+    // --- Explicit remember/save
     if (low.startsWith("remember ") || low.startsWith("save ")) {
       const content = message.replace(/^(\s*remember|\s*save)\s*/i, "").trim();
-      const immediate = streamText(content ? "Saved to memory." : "I didn't catch what to remember.");
       if (content && SUPABASE_URL && SUPABASE_SERVICE) {
         try {
-		  await persistMemory({
-			SUPABASE_URL,
-			SUPABASE_SERVICE,
-			userId,
-			sessionId,
-			role: "note",
-			content,
-			meta: { source: "edge", ts: new Date().toISOString() },
-  });
-  return streamText("Saved to memory.");
-} catch (e) {
-  return streamText("I tried to save that but hit a database hiccup.");
-}
-
+          await persistMemory({
+            SUPABASE_URL, SUPABASE_SERVICE, userId, sessionId,
+            role: "note", content,
+            meta: { source: "edge-explicit", ts: new Date().toISOString() },
+          });
+          return streamText("Saved to memory.");
+        } catch {
+          return streamText("I tried to save that but ran into a hiccup.");
+        }
+      }
+      return streamText(content ? "Saved to memory." : "I didn't catch what to remember.");
     }
 
-    // ---- recall
+    // --- Recall
     if (/^(recall|what do you remember|show memories|list memories)\b/i.test(low)) {
       let items = [];
       if (SUPABASE_URL && SUPABASE_SERVICE) {
         items = await loadMemories({
-          SUPABASE_URL,
-          SUPABASE_SERVICE,
-          userId,
-          limit: 10,
-          timeoutMs: 1500,
-          role: "note",
+          SUPABASE_URL, SUPABASE_SERVICE, userId,
+          limit: 12, timeoutMs: 1500, role: "note",
         }).catch(() => []);
       }
       const text = items.length
@@ -57,17 +53,32 @@ export default async (request) => {
       return streamText(text);
     }
 
-    // ---- normal chat: best-effort note injection (non-blocking)
+    // --- Auto-memory extraction (preferences / simple facts)
+    // Trigger on patterns like "i like ...", "i love ...", "my favorite ... is ...", "i prefer ..."
+    let autoNote = extractNote(message);
+    if (autoNote && SUPABASE_URL && SUPABASE_SERVICE) {
+      // dedupe against recent notes (basic)
+      try {
+        const recent = await loadMemories({
+          SUPABASE_URL, SUPABASE_SERVICE, userId, limit: 10, timeoutMs: 1000, role: "note",
+        });
+        const dup = recent.some((r) => normalize(r.content) === normalize(autoNote));
+        if (!dup) {
+          persistMemory({
+            SUPABASE_URL, SUPABASE_SERVICE, userId, sessionId,
+            role: "note", content: autoNote,
+            meta: { source: "edge-auto", ts: new Date().toISOString() },
+          }).catch(() => {});
+        }
+      } catch {}
+    }
+
+    // --- Build memory injection (best-effort)
     let memoryBlock = "";
     if (SUPABASE_URL && SUPABASE_SERVICE) {
       try {
         const mems = await loadMemories({
-          SUPABASE_URL,
-          SUPABASE_SERVICE,
-          userId,
-          limit: 8,
-          timeoutMs: 1200,
-          role: "note",
+          SUPABASE_URL, SUPABASE_SERVICE, userId, limit: 8, timeoutMs: 1200, role: "note",
         });
         if (mems.length) {
           memoryBlock = `Relevant notes for this user:\n${mems
@@ -77,7 +88,7 @@ export default async (request) => {
       } catch {}
     }
 
-    // ---- OpenAI stream
+    // --- Stream OpenAI
     const upstream = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -151,7 +162,7 @@ export default async (request) => {
 
 export const config = { path: "/api/chat-stream" };
 
-/* --------------- helpers --------------- */
+/* ---------------- helpers ---------------- */
 
 function cors() {
   return {
@@ -191,11 +202,13 @@ function streamText(text) {
 }
 function* chunks(str, n) { let i=0; while (i<str.length) { yield str.slice(i,i+n); i+=n; } }
 
-/* ---- Supabase (role=note) with deadlines ---- */
-async function withTimeout(promise, ms) {
+function normalize(s=""){ return s.trim().toLowerCase().replace(/\s+/g," "); }
+
+/* ---- Supabase helpers ---- */
+async function withTimeout(promiseFactory, ms) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort("timeout"), ms);
-  try { return await promise(ctrl.signal); } finally { clearTimeout(t); }
+  try { return await promiseFactory(ctrl.signal); } finally { clearTimeout(t); }
 }
 async function persistMemory({ SUPABASE_URL, SUPABASE_SERVICE, userId, sessionId, role, content, meta }) {
   const run = (signal) =>
@@ -210,7 +223,8 @@ async function persistMemory({ SUPABASE_URL, SUPABASE_SERVICE, userId, sessionId
       body: JSON.stringify([{ user_id: userId, session_id: sessionId || null, role, content, meta }]),
       signal,
     });
-  try { await withTimeout(run, 1500); } catch {}
+  const r = await withTimeout(run, 2000);
+  if (!r.ok) throw new Error(`supabase_insert_${r.status}`);
 }
 async function loadMemories({ SUPABASE_URL, SUPABASE_SERVICE, userId, limit = 8, timeoutMs = 1200, role = "note" }) {
   const q = new URLSearchParams({
@@ -230,3 +244,24 @@ async function loadMemories({ SUPABASE_URL, SUPABASE_SERVICE, userId, limit = 8,
     }).then((r) => (r.ok ? r.json() : []));
   return withTimeout(run, timeoutMs);
 }
+
+/* ---- Very simple auto-memory extractor ---- */
+function extractNote(text="") {
+  const s = text.trim();
+  const lower = s.toLowerCase();
+
+  // "i like/love/hate/prefer X"
+  const like = lower.match(/\b(i\s+(like|love|hate|prefer)\s+)(.+)$/i);
+  if (like && like[3]) return titleCase(`User ${like[2]}s ${s.slice(like.index + like[1].length)}`);
+
+  // "my favorite X is Y"
+  const fav = lower.match(/\bmy\s+favorite\s+([^]+?)\s+is\s+([^]+)$/i);
+  if (fav && fav[1] && fav[2]) return titleCase(`Favorite ${fav[1]} is ${fav[2]}`);
+
+  // "i am/i'm called/named NAME"
+  const name = lower.match(/\b(i\s+am|i'm)\s+([a-z][a-z\s'-]{1,40})$/i);
+  if (name && name[2]) return titleCase(`User name is ${name[2]}`);
+
+  return null;
+}
+function titleCase(s){ return s.replace(/\b\w/g, c=>c.toUpperCase()); }
