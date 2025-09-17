@@ -1,216 +1,199 @@
 // netlify/edge-functions/chat-stream.js
-// Route(s) in netlify.toml:
-//   [[edge_functions]] path="/api/chat-stream" function="chat-stream"
-//   [[edge_functions]] path="/.netlify/functions/chat-stream" function="chat-stream"   # compat
+// Edge streaming + lightweight memory (remember/recall) via Supabase REST
 
-export default async (req, ctx) => {
+export default async (request, context) => {
+  const { searchParams } = new URL(request.url);
+  // CORS preflight
+  if (request.method === 'OPTIONS') {
+    return new Response(null, {
+      status: 204,
+      headers: corsHeaders(),
+    });
+  }
+
   try {
-    const { userId = null, sessionId = null, message = "", voice = "", history = [] } =
-      await req.json().catch(() => ({}));
+    const { message, voice, sessionId, userId } = await request.json();
 
-    if (!message || !sessionId) {
-      return json({ error: "missing_params" }, 400);
+    if (!message || !userId) {
+      return json({ error: 'missing_params', detail: 'message and userId required' }, 400);
     }
 
-    const OPENAI_API_KEY = env("OPENAI_API_KEY");
-    const SB_URL = env("SUPABASE_URL");
-    const SB_SERVICE = env("SUPABASE_SERVICE_ROLE");
-    if (!OPENAI_API_KEY) return json({ error: "missing_openai_key" }, 500);
-    if (!SB_URL || !SB_SERVICE) return json({ error: "missing_supabase_env" }, 500);
+    // Handle memory commands early
+    const low = message.trim().toLowerCase();
+    if (low.startsWith('remember ') || low.startsWith('save ')) {
+      const content = message.replace(/^(\s*remember|\s*save)\s*/i, '').trim();
+      if (!content) return streamSimple("I didn't catch what to remember.");
+      const ok = await saveMemory(userId, sessionId, content);
+      return streamSimple(ok ? 'Saved to memory.' : 'I could not save that to memory.');
+    }
+    if (
+      /^(recall|what do you remember|show memories|list memories)\b/i.test(low)
+    ) {
+      const items = await loadMemories(userId, 10);
+      if (!items.length) return streamSimple('I have no memories yet.');
+      const text = items.map(i => `• ${i.content}`).join('\n');
+      return streamSimple(text);
+    }
 
-    // 1) Load last N from Supabase (user takes precedence, else session)
-    const past = await loadMemory({ SB_URL, SB_SERVICE, userId, sessionId, limit: 24 });
+    // Normal chat: load memories to prime the model
+    const memories = await loadMemories(userId, 8);
+    const memoryBlock = memories.length
+      ? `Relevant notes for this user:\n${memories.map(m => `- ${m.content}`).join('\n')}`
+      : '';
 
-    // Optionally merge in client-provided 'history' (we keep it last to prefer server truth)
-    const prior = [...past, ...normalizeHistory(history)];
-
-    // 2) Build messages for OpenAI
-    const messages = [
-      {
-        role: "system",
-        content:
-          "You are Keilani. Be helpful, warm, concise. If the user sounds casual, match their vibe.",
-      },
-      ...prior,
-      { role: "user", content: message },
-    ];
-
-    // 3) Stream from OpenAI and tee to client while accumulating reply
-    const body = JSON.stringify({
-      model: "gpt-4o-mini",
-      stream: true,
-      messages,
-    });
-
-    const upstream = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
+    // Stream OpenAI chat completion
+    const res = await fetch('https://api.openai.com/v1/chat/completions', {
+      method: 'POST',
       headers: {
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
-        "Content-Type": "application/json",
+        'Authorization': `Bearer ${env('OPENAI_API_KEY')}`,
+        'Content-Type': 'application/json'
       },
-      body,
+      body: JSON.stringify({
+        model: 'gpt-4o-mini',
+        stream: true,
+        messages: [
+          {
+            role: 'system',
+            content:
+              `You are Keilani. Be helpful and friendly.\n` +
+              (memoryBlock ? `${memoryBlock}\n` : '') +
+              `If the user asks you to remember/recall we already handled it server-side.`
+          },
+          { role: 'user', content: message }
+        ]
+      })
     });
 
-    if (!upstream.ok || !upstream.body) {
-      const raw = await upstream.text().catch(() => "");
-      return json({ error: "openai_upstream_error", detail: raw }, upstream.status);
+    if (!res.ok || !res.body) {
+      const raw = await res.text().catch(() => '');
+      return json({ error: 'openai_error', detail: raw || res.statusText }, 500);
     }
 
-    const encoder = new TextEncoder();
-    const decoder = new TextDecoder();
+    const transform = new TransformStream();
+    const writer = transform.writable.getWriter();
+    const reader = res.body.getReader();
+    const enc = (s) => writer.write(new TextEncoder().encode(s));
 
-    let assistantText = "";
-
-    const stream = new ReadableStream({
-      start(controller) {
-        const send = (obj) => {
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify(obj)}\n\n`));
-        };
-
-        const reader = upstream.body.getReader();
-        const pump = async () => {
-          while (true) {
-            const { done, value } = await reader.read();
-            if (done) break;
-
-            const chunk = decoder.decode(value, { stream: true });
-
-            // Parse OpenAI's SSE (lines starting with "data:")
-            for (const line of chunk.split("\n")) {
-              const trimmed = line.trim();
-              if (!trimmed.startsWith("data:")) continue;
-              const data = trimmed.slice(5).trim();
-              if (data === "[DONE]") continue;
-
-              try {
-                const ev = JSON.parse(data);
-                const delta =
-                  ev.choices?.[0]?.delta?.content ??
-                  ev.choices?.[0]?.text ??
-                  "";
-                if (delta) {
-                  assistantText += delta;
-                  send({ delta });
-                }
-              } catch {
-                // Pass-through unknown lines
-                send({ delta: data });
-              }
+    // relay OpenAI SSE as `data: {delta}` lines
+    (async () => {
+      try {
+        enc(''); // flush headers
+        while (true) {
+          const { value, done } = await reader.read();
+          if (done) break;
+          const chunk = new TextDecoder().decode(value);
+          for (const line of chunk.split(/\r?\n/)) {
+            if (!line.startsWith('data:')) continue;
+            const data = line.slice(5).trim();
+            if (!data || data === '[DONE]') continue;
+            try {
+              const j = JSON.parse(data);
+              const d = j.choices?.[0]?.delta?.content || '';
+              if (d) await enc(`data: ${JSON.stringify({ delta: d })}\n\n`);
+            } catch {
+              // pass raw
+              await enc(`data: ${JSON.stringify({ delta: data })}\n\n`);
             }
           }
-          // Done
-          controller.enqueue(encoder.encode(`data: ${JSON.stringify({ done: true })}\n\n`));
-          controller.close();
-        };
+        }
+      } catch (e) {
+        await enc(`data: ${JSON.stringify({ delta: '\n[stream ended]' })}\n\n`);
+      } finally {
+        await writer.close();
+      }
+    })();
 
-        pump().catch((e) => {
-          controller.enqueue(
-            encoder.encode(
-              `data: ${JSON.stringify({ error: "stream_exception", detail: String(e) })}\n\n`
-            )
-          );
-          controller.close();
-        });
-      },
-      async cancel() {},
-    });
-
-    // 4) Persist to Supabase (fire-and-forget)
-    persistMemory({
-      SB_URL,
-      SB_SERVICE,
-      userId,
-      sessionId,
-      userMsg: message,
-      assistantMsg: assistantText,
-    }).catch(() => {});
-
-    return new Response(stream, {
+    return new Response(transform.readable, {
       status: 200,
       headers: {
-        "Content-Type": "text/event-stream",
-        "Cache-Control": "no-cache, no-transform",
-        Connection: "keep-alive",
-        "Access-Control-Allow-Origin": "*",
-      },
+        ...corsHeaders(),
+        'Content-Type': 'text/event-stream; charset=utf-8',
+        'Cache-Control': 'no-cache, no-transform',
+        'X-Accel-Buffering': 'no'
+      }
     });
-  } catch (e) {
-    return json({ error: "chat_stream_exception", detail: String(e) }, 500);
+  } catch (err) {
+    return json({ error: 'chat_stream_exception', detail: String(err?.message || err) }, 500);
   }
 };
 
-/* ---------------- helpers ---------------- */
+export const config = { path: '/api/chat-stream' };
 
-const json = (obj, status = 200) =>
-  new Response(JSON.stringify(obj), {
-    status,
-    headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
-  });
-
-// Netlify Edge allows Deno.env.get; on other variants Netlify.env.get()
+/* ---------- Helpers ---------- */
 function env(k) {
-  try {
-    return (globalThis.Netlify?.env?.get?.(k) ?? Deno.env.get(k)) || "";
-  } catch {
-    return "";
+  const v = Deno.env.get(k);
+  if (!v) throw new Error(`missing env: ${k}`);
+  return v;
+}
+
+function corsHeaders() {
+  return {
+    'Access-Control-Allow-Origin': '*',
+    'Access-Control-Allow-Methods': 'POST, OPTIONS',
+    'Access-Control-Allow-Headers': 'Content-Type, Authorization'
+  };
+}
+
+function json(obj, status = 200) {
+  return new Response(JSON.stringify(obj), {
+    status,
+    headers: { ...corsHeaders(), 'Content-Type': 'application/json' }
+  });
+}
+
+async function streamSimple(text) {
+  const ts = new TransformStream();
+  const w = ts.writable.getWriter();
+  const enc = new TextEncoder();
+  // break into small chunks for a nice streamy feel
+  for (const piece of chunker(text, 60)) {
+    await w.write(enc.encode(`data: ${JSON.stringify({ delta: piece })}\n\n`));
+  }
+  await w.close();
+  return new Response(ts.readable, {
+    status: 200,
+    headers: {
+      ...corsHeaders(),
+      'Content-Type': 'text/event-stream; charset=utf-8',
+      'Cache-Control': 'no-cache, no-transform',
+      'X-Accel-Buffering': 'no'
+    }
+  });
+}
+
+function* chunker(str, n) {
+  let i = 0;
+  while (i < str.length) {
+    yield str.slice(i, i + n);
+    i += n;
   }
 }
 
-function normalizeHistory(h = []) {
-  // Expect array like [{role:"user","content":"..."}]
-  return (Array.isArray(h) ? h : []).filter(
-    (m) => m && typeof m.content === "string" && (m.role === "user" || m.role === "assistant")
-  );
-}
-
-async function sbFetch({ SB_URL, SB_SERVICE, path, method = "GET", body, query }) {
-  const url = new URL(`${SB_URL}/rest/v1/${path}`);
-  if (query) Object.entries(query).forEach(([k, v]) => url.searchParams.set(k, v));
-  return fetch(url, {
-    method,
+/* ---------- Supabase minimal REST helpers ---------- */
+async function saveMemory(userId, sessionId, content) {
+  const url = `${env('SUPABASE_URL')}/rest/v1/memory`;
+  const r = await fetch(url, {
+    method: 'POST',
     headers: {
-      apikey: SB_SERVICE,
-      Authorization: `Bearer ${SB_SERVICE}`,
-      "Content-Type": "application/json",
-      Prefer: "return=representation",
+      'apikey': env('SUPABASE_SERVICE_ROLE'),
+      'Authorization': `Bearer ${env('SUPABASE_SERVICE_ROLE')}`,
+      'Content-Type': 'application/json',
+      'Prefer': 'return=minimal'
     },
-    body: body ? JSON.stringify(body) : undefined,
+    body: JSON.stringify([{ user_id: userId, session_id: sessionId || null, type: 'note', content }])
   });
+  return r.ok;
 }
 
-async function loadMemory({ SB_URL, SB_SERVICE, userId, sessionId, limit = 24 }) {
-  // Prefer user thread if provided; otherwise session thread
-  const filter = userId
-    ? { select: "*", order: "created_at.desc", limit, user_id: `eq.${userId}` }
-    : { select: "*", order: "created_at.desc", limit, session_id: `eq.${sessionId}` };
-
-  const q = {
-    select: filter.select,
-    order: filter.order,
-    limit: String(limit),
-    ...(userId ? { user_id: filter.user_id } : { session_id: filter.session_id }),
-  };
-
-  const resp = await sbFetch({
-    SB_URL,
-    SB_SERVICE,
-    path: "memory",
-    query: q,
+async function loadMemories(userId, limit = 8) {
+  const url = `${env('SUPABASE_URL')}/rest/v1/memory?user_id=eq.${encodeURIComponent(userId)}&order=created_at.desc&limit=${limit}`;
+  const r = await fetch(url, {
+    headers: {
+      'apikey': env('SUPABASE_SERVICE_ROLE'),
+      'Authorization': `Bearer ${env('SUPABASE_SERVICE_ROLE')}`,
+      'Accept': 'application/json'
+    }
   });
-
-  if (!resp.ok) return [];
-  const rows = await resp.json().catch(() => []);
-  // Reverse back to chronological order and convert to OpenAI format
-  return rows
-    .reverse()
-    .map((r) => ({ role: r.role, content: r.content }))
-    .filter((m) => m.role === "user" || m.role === "assistant");
-}
-
-async function persistMemory({ SB_URL, SB_SERVICE, userId, sessionId, userMsg, assistantMsg }) {
-  const rows = [
-    { user_id: userId, session_id: sessionId, role: "user", content: userMsg },
-    { user_id: userId, session_id: sessionId, role: "assistant", content: assistantMsg ?? "" },
-  ];
-  await sbFetch({ SB_URL, SB_SERVICE, path: "memory", method: "POST", body: rows });
+  if (!r.ok) return [];
+  return await r.json();
 }
