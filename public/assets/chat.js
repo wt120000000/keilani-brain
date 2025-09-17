@@ -1,5 +1,6 @@
 /* public/assets/chat.js
-   Keilani Brain — Live (Edge streaming + voices + PTT + barge-in + session + userId)
+   Keilani Brain — Live
+   (Edge streaming + voices + PTT + barge-in + session memory + URL user/session overrides)
 */
 
 (() => {
@@ -13,20 +14,45 @@
   const transcriptEl = $('#transcriptBox') || $('#transcript');
   const replyEl      = $('#reply');
 
+  // ---------- URL helpers ----------
+  const qp = new URLSearchParams(location.search);
+  const urlUser    = qp.get('user') || '';
+  const urlSession = qp.get('session') || '';
+  const urlVoice   = qp.get('voice') || '';
+  const doReset    = qp.has('reset');
+
   // ---------- IDs ----------
   function uuidv4() {
     return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
       (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (c / 4))).toString(16)
     );
   }
-  const SESSION_KEY = 'kb_session', USER_KEY = 'kb_user';
-  function getId(key, fallbackPrefix) {
+  const SESSION_KEY = 'kb_session';
+  const USER_KEY    = 'kb_user';
+
+  if (doReset) {
+    try { localStorage.removeItem(SESSION_KEY); } catch {}
+    try { localStorage.removeItem(USER_KEY); } catch {}
+  }
+
+  function getId(key, prefix, override) {
+    if (override) {
+      localStorage.setItem(key, override);
+      return override;
+    }
     let v = localStorage.getItem(key);
-    if (!v) { v = `${fallbackPrefix}-${uuidv4()}`; localStorage.setItem(key, v); }
+    if (!v) { v = `${prefix}-${uuidv4()}`; localStorage.setItem(key, v); }
     return v;
   }
-  const sessionId = getId(SESSION_KEY, 'sess');
-  const userId    = getId(USER_KEY, 'user');
+
+  const userId    = getId(USER_KEY, 'user', urlUser);
+  const sessionId = getId(SESSION_KEY, 'sess', urlSession);
+
+  // Apply voice override if present
+  if (urlVoice && voiceSel) {
+    // If your <select> is populated dynamically, you may want to set this later.
+    voiceSel.value = urlVoice;
+  }
 
   // ---------- Audio / TTS ----------
   const player = (() => {
@@ -63,7 +89,7 @@
     bargeIn.speaking = false;
   }
 
-  // Non-streamed TTS via your Netlify function
+  // Plain TTS via Netlify function (MP3)
   async function speakText(text, voice) {
     if (!text?.trim()) return;
     const resp = await fetch('/.netlify/functions/tts', {
@@ -150,7 +176,7 @@
   async function startPTT() {
     try {
       unlockAudioOnce();
-      stopSpeaking();
+      stopSpeaking(); // barge-in
       setStatus('listening');
       chunks = [];
       mediaStream = await navigator.mediaDevices.getUserMedia({
@@ -225,6 +251,20 @@
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
   });
 
+  // ---------- UX: show IDs in console & a tiny hint ----------
   setStatus('idle');
-  console.log('[Keilani] chat.js ready (Edge streaming + voices + session)', { sessionId, userId });
+  console.log('[Keilani] chat.js ready (Edge streaming + voices + session)', { userId, sessionId, voice: getVoice() });
+
+  // Optional: show IDs in UI if you have a status pill
+  try {
+    const hintId = 'whoamiHint';
+    if (!document.getElementById(hintId)) {
+      const hint = document.createElement('div');
+      hint.id = hintId;
+      hint.className = 'mono muted';
+      hint.style.cssText = 'margin-top:8px;font-size:12px;opacity:.7;';
+      hint.textContent = `userId=${userId}  sessionId=${sessionId}`;
+      (document.querySelector('.wrap') || document.body).appendChild(hint);
+    }
+  } catch {}
 })();
