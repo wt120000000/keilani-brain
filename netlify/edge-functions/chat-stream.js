@@ -1,8 +1,9 @@
-// Edge streaming chat with:
-// - memory recall/inject
-// - explicit remember/save
-// - auto-memory for preference statements ("I like ...", "my favorite is ...")
-// - fast SSE streaming
+// Edge streaming chat with memory + persona + style rules
+// Fast SSE, small fixed system prompt, dynamic inserts.
+// Roles in Supabase `memory` table:
+//   - persona : long-form background/identity
+//   - rule    : short style directives
+//   - note    : user facts/preferences
 
 export default async (request) => {
   if (request.method === "OPTIONS") {
@@ -18,9 +19,8 @@ export default async (request) => {
     const SUPABASE_URL     = env("SUPABASE_URL");
     const SUPABASE_SERVICE = env("SUPABASE_SERVICE_ROLE");
 
+    // -------- explicit remember/save --------
     const low = message.trim().toLowerCase();
-
-    // --- Explicit remember/save
     if (low.startsWith("remember ") || low.startsWith("save ")) {
       const content = message.replace(/^(\s*remember|\s*save)\s*/i, "").trim();
       if (content && SUPABASE_URL && SUPABASE_SERVICE) {
@@ -38,13 +38,38 @@ export default async (request) => {
       return streamText(content ? "Saved to memory." : "I didn't catch what to remember.");
     }
 
-    // --- Recall
+    // -------- explicit persona/rule updates --------
+    // "set persona: ...", "set rule: ..."
+    if (/^\s*set\s+persona\s*:/i.test(message)) {
+      const content = message.replace(/^\s*set\s+persona\s*:/i, "").trim();
+      if (content && SUPABASE_URL && SUPABASE_SERVICE) {
+        await persistMemory({
+          SUPABASE_URL, SUPABASE_SERVICE, userId, sessionId,
+          role: "persona", content, meta: { source: "edge-persona", ts: new Date().toISOString() },
+        }).catch(() => {});
+        return streamText("Persona updated.");
+      }
+      return streamText("Give me the persona text after “set persona:”.");
+    }
+    if (/^\s*set\s+rule\s*:/i.test(message)) {
+      const content = message.replace(/^\s*set\s+rule\s*:/i, "").trim();
+      if (content && SUPABASE_URL && SUPABASE_SERVICE) {
+        await persistMemory({
+          SUPABASE_URL, SUPABASE_SERVICE, userId, sessionId,
+          role: "rule", content, meta: { source: "edge-rule", ts: new Date().toISOString() },
+        }).catch(() => {});
+        return streamText("Style rule added.");
+      }
+      return streamText("Give me the rule after “set rule:”. Keep rules short.");
+    }
+
+    // -------- recall --------
     if (/^(recall|what do you remember|show memories|list memories)\b/i.test(low)) {
       let items = [];
       if (SUPABASE_URL && SUPABASE_SERVICE) {
         items = await loadMemories({
           SUPABASE_URL, SUPABASE_SERVICE, userId,
-          limit: 12, timeoutMs: 1500, role: "note",
+          limit: 24, timeoutMs: 1500, role: "note",
         }).catch(() => []);
       }
       const text = items.length
@@ -53,14 +78,12 @@ export default async (request) => {
       return streamText(text);
     }
 
-    // --- Auto-memory extraction (preferences / simple facts)
-    // Trigger on patterns like "i like ...", "i love ...", "my favorite ... is ...", "i prefer ..."
-    let autoNote = extractNote(message);
+    // -------- auto-memory extraction (preferences / facts) --------
+    const autoNote = extractNote(message);
     if (autoNote && SUPABASE_URL && SUPABASE_SERVICE) {
-      // dedupe against recent notes (basic)
       try {
         const recent = await loadMemories({
-          SUPABASE_URL, SUPABASE_SERVICE, userId, limit: 10, timeoutMs: 1000, role: "note",
+          SUPABASE_URL, SUPABASE_SERVICE, userId, limit: 12, timeoutMs: 1000, role: "note",
         });
         const dup = recent.some((r) => normalize(r.content) === normalize(autoNote));
         if (!dup) {
@@ -73,22 +96,32 @@ export default async (request) => {
       } catch {}
     }
 
-    // --- Build memory injection (best-effort)
-    let memoryBlock = "";
+    // -------- fetch persona + rules + recent user notes --------
+    let persona = "", rules = [], userNotes = [];
     if (SUPABASE_URL && SUPABASE_SERVICE) {
       try {
-        const mems = await loadMemories({
-          SUPABASE_URL, SUPABASE_SERVICE, userId, limit: 8, timeoutMs: 1200, role: "note",
-        });
-        if (mems.length) {
-          memoryBlock = `Relevant notes for this user:\n${mems
-            .map((m) => `- ${m.content}`)
-            .join("\n")}`;
-        }
+        const [p, r, n] = await Promise.all([
+          loadMemories({ SUPABASE_URL, SUPABASE_SERVICE, userId, limit: 1,  timeoutMs: 800,  role: "persona" }),
+          loadMemories({ SUPABASE_URL, SUPABASE_SERVICE, userId, limit: 8,  timeoutMs: 800,  role: "rule" }),
+          loadMemories({ SUPABASE_URL, SUPABASE_SERVICE, userId, limit: 8,  timeoutMs: 800,  role: "note" }),
+        ]);
+        persona = p?.[0]?.content || "";
+        rules = r?.map((x) => x.content) || [];
+        userNotes = n?.map((x) => `- ${x.content}`) || [];
       } catch {}
     }
 
-    // --- Stream OpenAI
+    // -------- build compact prelude (low latency) --------
+    // Keep the system prompt tiny; stream does the heavy lifting.
+    const systemPrelude = [
+      "You are Keilani—warm, witty, sharp. Be brief unless asked.",
+      persona ? `Persona:\n${persona}` : "",
+      rules.length ? `Style rules:\n${rules.map((x)=>`• ${x}`).join("\n")}` : "",
+      userNotes.length ? `User notes:\n${userNotes.join("\n")}` : "",
+      "If unsure, ask a short clarifying question.",
+    ].filter(Boolean).join("\n\n");
+
+    // -------- stream OpenAI --------
     const upstream = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -98,14 +131,10 @@ export default async (request) => {
       body: JSON.stringify({
         model: "gpt-4o-mini",
         stream: true,
+        // Lower token prefill to reduce first-token latency
+        temperature: 0.6,
         messages: [
-          {
-            role: "system",
-            content:
-              `You are Keilani. Be helpful, warm, concise.\n` +
-              (memoryBlock ? `${memoryBlock}\n` : "") +
-              `If the user tries to save/recall memories, it's handled server-side already.`,
-          },
+          { role: "system", content: systemPrelude },
           { role: "user", content: message },
         ],
       }),
@@ -201,7 +230,6 @@ function streamText(text) {
   });
 }
 function* chunks(str, n) { let i=0; while (i<str.length) { yield str.slice(i,i+n); i+=n; } }
-
 function normalize(s=""){ return s.trim().toLowerCase().replace(/\s+/g," "); }
 
 /* ---- Supabase helpers ---- */
@@ -226,7 +254,7 @@ async function persistMemory({ SUPABASE_URL, SUPABASE_SERVICE, userId, sessionId
   const r = await withTimeout(run, 2000);
   if (!r.ok) throw new Error(`supabase_insert_${r.status}`);
 }
-async function loadMemories({ SUPABASE_URL, SUPABASE_SERVICE, userId, limit = 8, timeoutMs = 1200, role = "note" }) {
+async function loadMemories({ SUPABASE_URL, SUPABASE_SERVICE, userId, limit = 8, timeoutMs = 1200, role }) {
   const q = new URLSearchParams({
     user_id: `eq.${userId}`,
     order: "created_at.desc",
@@ -245,7 +273,7 @@ async function loadMemories({ SUPABASE_URL, SUPABASE_SERVICE, userId, limit = 8,
   return withTimeout(run, timeoutMs);
 }
 
-/* ---- Very simple auto-memory extractor ---- */
+/* ---- Simple auto-memory extractor ---- */
 function extractNote(text="") {
   const s = text.trim();
   const lower = s.toLowerCase();

@@ -1,9 +1,8 @@
 /* public/assets/chat.js
    Keilani Brain — Live
    Edge streaming + voices + PTT + barge-in + session memory
-   + URL user/session/voice overrides
-   + iOS hold-to-talk fixes (audio/mp4, playsInline, touch bindings)
-   + Continuous "Start Chat" mode with simple VAD (silence detection)
+   iOS PTT (audio/mp4), VAD with hysteresis, tunable via URL (?silence=, ?vad=, ?vadLow=)
+   Optional Start Chat (continuous) button with auto-chunking
 */
 
 (() => {
@@ -17,7 +16,7 @@
   const transcriptEl = $('#transcriptBox') || $('#transcript');
   const replyEl      = $('#reply');
 
-  // If no Start button exists, create one
+  // Add Start Chat if missing
   let startBtn = $('#startBtn') || document.getElementById('startChatBtn');
   if (!startBtn) {
     startBtn = document.createElement('button');
@@ -28,14 +27,17 @@
     row.appendChild(startBtn);
   }
 
-  // ---------- URL helpers ----------
+  // ---------- URL + IDs ----------
   const qp = new URLSearchParams(location.search);
   const urlUser    = qp.get('user') || '';
   const urlSession = qp.get('session') || '';
   const urlVoice   = qp.get('voice') || '';
   const doReset    = qp.has('reset');
+  // VAD knobs
+  const urlSilence = Number(qp.get('silence')) || NaN;
+  const urlVadHi   = Number(qp.get('vad'))     || NaN;
+  const urlVadLo   = Number(qp.get('vadLow'))  || NaN;
 
-  // ---------- IDs ----------
   function uuidv4() {
     return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
       (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (c / 4))).toString(16)
@@ -43,11 +45,7 @@
   }
   const SESSION_KEY = 'kb_session';
   const USER_KEY    = 'kb_user';
-
-  if (doReset) {
-    try { localStorage.removeItem(SESSION_KEY); } catch {}
-    try { localStorage.removeItem(USER_KEY); } catch {}
-  }
+  if (doReset) { try { localStorage.removeItem(SESSION_KEY); } catch {}; try { localStorage.removeItem(USER_KEY); } catch {}; }
   function getId(key, prefix, override) {
     if (override) { localStorage.setItem(key, override); return override; }
     let v = localStorage.getItem(key);
@@ -63,7 +61,7 @@
     el.id = 'ttsPlayer';
     el.preload = 'none';
     el.controls = true;
-    el.playsInline = true; // iOS
+    el.playsInline = true;
     if (!el.parentNode) document.body.appendChild(el);
     return el;
   })();
@@ -108,7 +106,7 @@
     try { bargeIn.speaking = true; await player.play(); } catch (e) { console.warn('[TTS] autoplay?', e); }
   }
 
-  // ---------- Chat Stream (Edge) ----------
+  // ---------- Chat (Edge SSE) ----------
   async function chatStream(message, voice) {
     const resp = await fetch('/api/chat-stream', {
       method: 'POST',
@@ -120,12 +118,10 @@
       console.error('[chat-stream] HTTP', resp.status, 'raw=', raw);
       throw new Error('chat_stream_failed');
     }
-
     const reader = resp.body.getReader();
     const dec = new TextDecoder();
     let finalText = '';
     clear(replyEl);
-
     while (true) {
       const { value, done } = await reader.read();
       if (done) break;
@@ -165,20 +161,14 @@
   }
 
   // ---------- PTT / STT ----------
-  let mediaStream = null, mediaRecorder = null, chunks = [];
-  function isiOS() {
-    return /iphone|ipad|ipod/i.test(navigator.userAgent);
-  }
-  function isFirefox() {
-    return /firefox/i.test(navigator.userAgent);
-  }
+  function isiOS() { return /iphone|ipad|ipod/i.test(navigator.userAgent); }
+  function isFirefox() { return /firefox/i.test(navigator.userAgent); }
   function mimePick() {
-    // iOS Safari prefers mp4 container
     if (isiOS() && MediaRecorder.isTypeSupported('audio/mp4')) return 'audio/mp4';
     if (isFirefox() && MediaRecorder.isTypeSupported('audio/ogg;codecs=opus')) return 'audio/ogg;codecs=opus';
     if (MediaRecorder.isTypeSupported('audio/webm;codecs=opus')) return 'audio/webm;codecs=opus';
     if (MediaRecorder.isTypeSupported('audio/webm')) return 'audio/webm';
-    return 'audio/mp4'; // safe fallback for iOS
+    return 'audio/mp4';
   }
   function toB64(buf) {
     let bin = '', bytes = new Uint8Array(buf);
@@ -186,10 +176,11 @@
     return btoa(bin);
   }
 
+  let mediaStream = null, mediaRecorder = null, chunks = [];
   async function startPTT() {
     try {
       unlockAudioOnce();
-      stopSpeaking(); // barge-in
+      stopSpeaking();
       setStatus('listening');
       chunks = [];
       mediaStream = await navigator.mediaDevices.getUserMedia({
@@ -199,7 +190,6 @@
       mediaRecorder = new MediaRecorder(mediaStream, { mimeType: mime, audioBitsPerSecond: 128000 });
       mediaRecorder.ondataavailable = (e) => { if (e.data?.size) chunks.push(e.data); };
       mediaRecorder.onstop = onPTTStop;
-      // timeslice for reliable chunking on iOS/Firefox
       mediaRecorder.start(250);
       console.log('[PTT] recording… mime=', mime);
     } catch (e) {
@@ -207,14 +197,12 @@
       setStatus('idle');
     }
   }
-
   async function stopPTT() {
     try {
       if (mediaRecorder?.state === 'recording') { mediaRecorder.requestData?.(); mediaRecorder.stop(); }
       mediaStream?.getTracks().forEach(t => t.stop());
     } catch {}
   }
-
   async function onPTTStop() {
     try {
       setStatus('transcribing');
@@ -222,8 +210,7 @@
       const blob = new Blob(chunks, { type: mediaRecorder?.mimeType || mimePick() });
       if (blob.size < 2000) { transcriptEl && (transcriptEl.textContent = '(no speech)'); setStatus('idle'); return; }
       const ab = await blob.arrayBuffer();
-      const mime = blob.type || 'audio/webm';
-      const dataUrl = `data:${mime};base64,${toB64(ab)}`;
+      const dataUrl = `data:${blob.type || 'audio/webm'};base64,${toB64(ab)}`;
 
       const stt = await fetch('/.netlify/functions/stt', {
         method: 'POST',
@@ -249,7 +236,7 @@
     }
   }
 
-  // Bind pointer + touch for iOS reliability
+  // Pointer + touch bindings (iOS safe)
   if (pttBtn) {
     const down = (e) => { e.preventDefault?.(); startPTT(); };
     const up   = (e) => { e.preventDefault?.(); stopPTT(); };
@@ -264,20 +251,20 @@
     pttBtn.addEventListener('mouseleave', up);
   }
 
-  // ---------- Continuous "Start Chat" mode ----------
+  // ---------- Continuous Start Chat (VAD with hysteresis) ----------
   let liveOn = false;
   let vadTimer = null;
   let liveStream = null;
   let liveRecorder = null;
   let liveChunks = [];
   let speechActive = false;
-  const SILENCE_MS = 700;  // end of utterance threshold
-  const MIN_UTT_MS = 350;  // ignore too-short blips
 
-  async function liveToggle() {
-    if (liveOn) { await liveStop(); return; }
-    await liveStart();
-  }
+  const DEFAULT_SILENCE_MS = !Number.isNaN(urlSilence) ? urlSilence : 1200; // was 700
+  const VAD_HI = !Number.isNaN(urlVadHi) ? urlVadHi : 0.035;               // start talking threshold
+  const VAD_LO = !Number.isNaN(urlVadLo) ? urlVadLo : 0.020;               // stop talking threshold
+  const MIN_UTT_MS = 400; // ignore super-short blips
+
+  async function liveToggle() { if (liveOn) await liveStop(); else await liveStart(); }
 
   async function liveStart() {
     unlockAudioOnce();
@@ -287,12 +274,10 @@
     liveOn = true;
     startBtn.textContent = 'Stop Chat';
 
-    // mic
     liveStream = await navigator.mediaDevices.getUserMedia({
       audio: { channelCount: 1, echoCancellation: true, noiseSuppression: true, autoGainControl: true, sampleRate: 48000 }
     });
 
-    // VAD via analyser energy
     const AC = window.AudioContext || window.webkitAudioContext;
     const ac = new AC();
     const src = ac.createMediaStreamSource(liveStream);
@@ -315,32 +300,34 @@
         const v = (buf[i]-128)/128;
         sum += v*v;
       }
-      return Math.sqrt(sum / buf.length); // RMS
+      return Math.sqrt(sum / buf.length);
     }
 
     function tick() {
       if (!liveOn) return;
       const rms = energy();
       const now = performance.now();
-      const speaking = rms > 0.03; // tune threshold if needed
 
-      if (speaking) {
-        if (!speechActive) { speechActive = true; startedAt = now; liveRecorder.start(250); }
-        lastSpeech = now;
+      if (!speechActive) {
+        if (rms > VAD_HI) {
+          speechActive = true;
+          startedAt = now;
+          try { liveRecorder.start(250); } catch {}
+          lastSpeech = now;
+        }
       } else {
-        if (speechActive && now - lastSpeech > SILENCE_MS) {
-          // end of utterance
+        if (rms > VAD_LO) {
+          lastSpeech = now;
+        } else if (now - lastSpeech > DEFAULT_SILENCE_MS) {
+          // end utterance
           speechActive = false;
           try { liveRecorder.requestData?.(); liveRecorder.stop(); } catch {}
-          // process the utterance
-          const duration = now - startedAt;
-          if (duration > MIN_UTT_MS) {
-            handleLiveUtterance().catch(console.error);
-          } else {
-            liveChunks = [];
-          }
+          const dur = now - startedAt;
+          if (dur > MIN_UTT_MS) handleLiveUtterance().catch(console.error);
+          else liveChunks = [];
         }
       }
+
       vadTimer = setTimeout(tick, 60);
     }
     tick();
@@ -352,7 +339,6 @@
       if (!liveChunks.length) return;
       const blob = new Blob(liveChunks, { type: liveRecorder?.mimeType || mimePick() });
       liveChunks = [];
-
       if (blob.size < 1800) { setStatus('listening'); return; }
       const ab = await blob.arrayBuffer();
       const dataUrl = `data:${blob.type || 'audio/webm'};base64,${toB64(ab)}`;
@@ -408,9 +394,10 @@
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
   });
 
-  // iOS voice override (if present)
   if (urlVoice && voiceSel) voiceSel.value = urlVoice;
-
   setStatus('idle');
-  console.log('[Keilani] chat.js ready (Edge streaming + voices + session + iOS + live)', { userId, sessionId, voice: getVoice() });
+  console.log('[Keilani] chat.js ready', {
+    userId, sessionId,
+    silenceMs: DEFAULT_SILENCE_MS, vadHi: VAD_HI, vadLo: VAD_LO
+  });
 })();
