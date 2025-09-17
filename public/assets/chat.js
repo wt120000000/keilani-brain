@@ -1,9 +1,8 @@
 /* public/assets/chat.js
-   Keilani Brain — Live (Edge streaming + voices + PTT + barge-in + session memory)
+   Keilani Brain — Live (Edge streaming + voices + PTT + barge-in + session + userId)
 */
 
 (() => {
-  // ---------- DOM ----------
   const $ = (s) => document.querySelector(s);
   const inputEl      = $('#textIn')    || $('#input')  || $('textarea');
   const sendBtn      = $('#sendBtn')   || $('#send');
@@ -14,19 +13,20 @@
   const transcriptEl = $('#transcriptBox') || $('#transcript');
   const replyEl      = $('#reply');
 
-  // ---------- Session ID (persist in localStorage) ----------
-  const SESSION_KEY = 'kb_session';
+  // ---------- IDs ----------
   function uuidv4() {
     return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
       (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (c / 4))).toString(16)
     );
   }
-  function getSessionId() {
-    let id = localStorage.getItem(SESSION_KEY);
-    if (!id) { id = uuidv4(); localStorage.setItem(SESSION_KEY, id); }
-    return id;
+  const SESSION_KEY = 'kb_session', USER_KEY = 'kb_user';
+  function getId(key, fallbackPrefix) {
+    let v = localStorage.getItem(key);
+    if (!v) { v = `${fallbackPrefix}-${uuidv4()}`; localStorage.setItem(key, v); }
+    return v;
   }
-  const sessionId = getSessionId();
+  const sessionId = getId(SESSION_KEY, 'sess');
+  const userId    = getId(USER_KEY, 'user');
 
   // ---------- Audio / TTS ----------
   const player = (() => {
@@ -38,11 +38,11 @@
     return el;
   })();
 
-  let ac, analyser, bargeIn = { speaking: false };
+  let bargeIn = { speaking: false };
   function unlockAudioOnce() {
     try {
       const Ctx = window.AudioContext || window.webkitAudioContext;
-      if (!ac && Ctx) ac = new Ctx();
+      const ac = Ctx ? new Ctx() : null;
       if (ac?.state === 'suspended') ac.resume();
       player.muted = false;
     } catch {}
@@ -58,14 +58,12 @@
     span.textContent = t;
     el.appendChild(span);
   }
-
-  // Stop current TTS (barge-in)
   function stopSpeaking() {
     try { player.pause(); player.currentTime = 0; } catch {}
     bargeIn.speaking = false;
   }
 
-  // Non-streamed TTS (your existing Netlify function)
+  // Non-streamed TTS via your Netlify function
   async function speakText(text, voice) {
     if (!text?.trim()) return;
     const resp = await fetch('/.netlify/functions/tts', {
@@ -85,7 +83,7 @@
     const resp = await fetch('/api/chat-stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message, voice, sessionId }),
+      body: JSON.stringify({ message, voice, sessionId, userId }),
     });
     if (!resp.ok || !resp.body) {
       const raw = await resp.text().catch(()=> '');
@@ -102,7 +100,6 @@
       const { value, done } = await reader.read();
       if (done) break;
       const chunk = dec.decode(value, { stream: true });
-      // SSE lines
       for (const line of chunk.split(/\r?\n/)) {
         if (!line.startsWith('data:')) continue;
         const data = line.slice(5).trim();
@@ -198,7 +195,6 @@
       if (transcriptEl) transcriptEl.textContent = transcript || '(no speech)';
       if (!stt.ok || !transcript) { setStatus('idle'); return; }
 
-      // Chat + TTS
       setStatus('thinking');
       const reply = await chatStream(transcript, getVoice());
       setStatus('speaking');
@@ -220,17 +216,15 @@
     if (!text) return;
     setStatus('speaking'); await speakText(text, getVoice()); setStatus('idle');
   });
-
   if (pttBtn) {
     pttBtn.addEventListener('pointerdown', startPTT);
     pttBtn.addEventListener('pointerup', stopPTT);
     pttBtn.addEventListener('pointerleave', () => mediaRecorder?.state === 'recording' && stopPTT());
   }
-
   inputEl?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
   });
 
   setStatus('idle');
-  console.log('[Keilani] chat.js ready (Edge streaming + voices + session)', { sessionId });
+  console.log('[Keilani] chat.js ready (Edge streaming + voices + session)', { sessionId, userId });
 })();

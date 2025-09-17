@@ -1,5 +1,4 @@
-// netlify/edge-functions/chat-stream.js
-// Edge streaming + resilient memory via Supabase REST (role/meta schema)
+// Edge streaming + resilient memory via Supabase REST (role='note', short timeouts)
 
 export default async (request) => {
   if (request.method === "OPTIONS") {
@@ -17,7 +16,7 @@ export default async (request) => {
 
     const low = message.trim().toLowerCase();
 
-    // ---- remember/save -> respond immediately and persist in background
+    // ---- remember/save -> immediate response, background insert
     if (low.startsWith("remember ") || low.startsWith("save ")) {
       const content = message.replace(/^(\s*remember|\s*save)\s*/i, "").trim();
       const immediate = streamText(content ? "Saved to memory." : "I didn't catch what to remember.");
@@ -29,13 +28,14 @@ export default async (request) => {
           sessionId,
           role: "note",
           content,
-          meta: { source: "edge" },
+          // meta is optional; safe to send now that it's jsonb
+          meta: { source: "edge", ts: new Date().toISOString() },
         }).catch(() => {});
       }
       return immediate;
     }
 
-    // ---- recall / what do you remember
+    // ---- recall
     if (/^(recall|what do you remember|show memories|list memories)\b/i.test(low)) {
       let items = [];
       if (SUPABASE_URL && SUPABASE_SERVICE) {
@@ -45,7 +45,7 @@ export default async (request) => {
           userId,
           limit: 10,
           timeoutMs: 1500,
-          role: "note", // only show saved notes, not chat turns
+          role: "note",
         }).catch(() => []);
       }
       const text = items.length
@@ -54,7 +54,7 @@ export default async (request) => {
       return streamText(text);
     }
 
-    // ---- normal chat: best-effort note injection
+    // ---- normal chat: best-effort note injection (non-blocking)
     let memoryBlock = "";
     if (SUPABASE_URL && SUPABASE_SERVICE) {
       try {
@@ -74,6 +74,7 @@ export default async (request) => {
       } catch {}
     }
 
+    // ---- OpenAI stream
     const upstream = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
@@ -147,7 +148,8 @@ export default async (request) => {
 
 export const config = { path: "/api/chat-stream" };
 
-/* ---------------- helpers ---------------- */
+/* --------------- helpers --------------- */
+
 function cors() {
   return {
     "Access-Control-Allow-Origin": "*",
@@ -186,7 +188,7 @@ function streamText(text) {
 }
 function* chunks(str, n) { let i=0; while (i<str.length) { yield str.slice(i,i+n); i+=n; } }
 
-/* ---- Supabase (role/meta) with deadlines ---- */
+/* ---- Supabase (role=note) with deadlines ---- */
 async function withTimeout(promise, ms) {
   const ctrl = new AbortController();
   const t = setTimeout(() => ctrl.abort("timeout"), ms);
