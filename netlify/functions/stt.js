@@ -1,15 +1,5 @@
 // netlify/functions/stt.js
 // POST { audioBase64: "<base64 or data:URI>", language?: "en" } -> { transcript }
-//
-// Notes:
-// - Accepts data URLs or raw base64
-// - Sniffs content type for a good filename hint (OpenAI sniffs anyway)
-// - Rejects very small payloads before hitting OpenAI
-// - Uses gpt-4o-mini-transcribe by default with response_format "json"
-// - Bubbles up OpenAI error details for easy debugging
-
-const fetch = require("node-fetch");
-const FormData = require("form-data");
 
 function corsHeaders() {
   return {
@@ -41,7 +31,7 @@ exports.handler = async (event) => {
     const MODEL = process.env.OPENAI_STT_MODEL || "gpt-4o-mini-transcribe";
     if (!OPENAI_API_KEY) return json(500, { error: "missing_openai_key" });
 
-    // Parse incoming JSON
+    // Parse body
     let body;
     try {
       body = JSON.parse(event.body || "{}");
@@ -69,7 +59,7 @@ exports.handler = async (event) => {
       return json(400, { error: "audio_too_small", detail: { bytes: buf?.length || 0 } });
     }
 
-    // Prepare multipart form
+    // Build multipart with native FormData / Blob (Node 18+)
     const form = new FormData();
     const fileName =
       mimeHint.includes("wav")  ? "audio.wav"  :
@@ -78,21 +68,20 @@ exports.handler = async (event) => {
       mimeHint.includes("ogg")  ? "audio.ogg"  :
       mimeHint.includes("webm") ? "audio.webm" : "audio.webm";
 
-    form.append("file", buf, { filename: fileName, contentType: mimeHint });
+    // Blob takes a TypedArray; Content-Type comes from the part’s options
+    form.append("file", new Blob([buf], { type: mimeHint }), fileName);
     form.append("model", MODEL);
-    // gpt-4o-mini-transcribe expects "json" or "text"
-    form.append("response_format", "json");
+    form.append("response_format", "json"); // required for 4o-mini-transcribe
     if (language) form.append("language", language);
 
     const resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
       method: "POST",
       headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
-      body: form,
+      body: form, // DO NOT set Content-Type; fetch sets the proper multipart boundary
     });
 
     const text = await resp.text();
     if (!resp.ok) {
-      // Include OpenAI error and our sniffed metadata
       return json(resp.status, {
         error: "openai_stt_error",
         detail: safeParse(text) || text,
@@ -107,6 +96,4 @@ exports.handler = async (event) => {
   }
 };
 
-function safeParse(t) {
-  try { return JSON.parse(t); } catch { return null; }
-}
+function safeParse(t) { try { return JSON.parse(t); } catch { return null; } }
