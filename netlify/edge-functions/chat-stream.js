@@ -1,9 +1,15 @@
 // Edge streaming chat with memory + persona + style rules
-// Fast SSE, small fixed system prompt, dynamic inserts.
-// Roles in Supabase `memory` table:
-//   - persona : long-form background/identity
-//   - rule    : short style directives
-//   - note    : user facts/preferences
+// Merges GLOBAL + USER persona/rules each request.
+//   persona: user persona if present, else global persona
+//   rules  : global rules first, then user rules (user can override vibe)
+//   notes  : only user's own notes/preferences
+//
+// Env required (Netlify -> Site settings -> Environment variables):
+//   OPENAI_API_KEY
+//   SUPABASE_URL
+//   SUPABASE_SERVICE_ROLE
+//
+// Route: /api/chat-stream
 
 export default async (request) => {
   if (request.method === "OPTIONS") {
@@ -18,9 +24,11 @@ export default async (request) => {
     const OPENAI_API_KEY   = env("OPENAI_API_KEY");
     const SUPABASE_URL     = env("SUPABASE_URL");
     const SUPABASE_SERVICE = env("SUPABASE_SERVICE_ROLE");
+    if (!OPENAI_API_KEY) return json({ error: "missing_openai_key" }, 500);
 
-    // -------- explicit remember/save --------
     const low = message.trim().toLowerCase();
+
+    // -------- explicit remember/save (user note) --------
     if (low.startsWith("remember ") || low.startsWith("save ")) {
       const content = message.replace(/^(\s*remember|\s*save)\s*/i, "").trim();
       if (content && SUPABASE_URL && SUPABASE_SERVICE) {
@@ -38,8 +46,7 @@ export default async (request) => {
       return streamText(content ? "Saved to memory." : "I didn't catch what to remember.");
     }
 
-    // -------- explicit persona/rule updates --------
-    // "set persona: ...", "set rule: ..."
+    // -------- explicit persona/rule updates (user-scoped) --------
     if (/^\s*set\s+persona\s*:/i.test(message)) {
       const content = message.replace(/^\s*set\s+persona\s*:/i, "").trim();
       if (content && SUPABASE_URL && SUPABASE_SERVICE) {
@@ -63,7 +70,7 @@ export default async (request) => {
       return streamText("Give me the rule after “set rule:”. Keep rules short.");
     }
 
-    // -------- recall --------
+    // -------- recall (user notes only) --------
     if (/^(recall|what do you remember|show memories|list memories)\b/i.test(low)) {
       let items = [];
       if (SUPABASE_URL && SUPABASE_SERVICE) {
@@ -96,23 +103,41 @@ export default async (request) => {
       } catch {}
     }
 
-    // -------- fetch persona + rules + recent user notes --------
-    let persona = "", rules = [], userNotes = [];
+    // -------- fetch GLOBAL + USER persona/rules; USER notes --------
+    let personaUser = "", personaGlobal = "";
+    let rulesUser = [], rulesGlobal = [];
+    let userNotes = [];
+
     if (SUPABASE_URL && SUPABASE_SERVICE) {
       try {
-        const [p, r, n] = await Promise.all([
-          loadMemories({ SUPABASE_URL, SUPABASE_SERVICE, userId, limit: 1,  timeoutMs: 800,  role: "persona" }),
-          loadMemories({ SUPABASE_URL, SUPABASE_SERVICE, userId, limit: 8,  timeoutMs: 800,  role: "rule" }),
-          loadMemories({ SUPABASE_URL, SUPABASE_SERVICE, userId, limit: 8,  timeoutMs: 800,  role: "note" }),
+        // persona (user + global)
+        const [pUser, pGlobal] = await Promise.all([
+          loadExactOne({ SUPABASE_URL, SUPABASE_SERVICE, lookupUserId: userId, role: "persona" }),
+          loadExactOne({ SUPABASE_URL, SUPABASE_SERVICE, lookupUserId: "global", role: "persona" }),
         ]);
-        persona = p?.[0]?.content || "";
-        rules = r?.map((x) => x.content) || [];
-        userNotes = n?.map((x) => `- ${x.content}`) || [];
+        personaUser   = pUser || "";
+        personaGlobal = pGlobal || "";
+
+        // rules (global then user)
+        const [rGlobal, rUser] = await Promise.all([
+          loadRules({ SUPABASE_URL, SUPABASE_SERVICE, lookupUserId: "global", limit: 32 }),
+          loadRules({ SUPABASE_URL, SUPABASE_SERVICE, lookupUserId: userId,    limit: 32 }),
+        ]);
+        rulesGlobal = rGlobal;
+        rulesUser   = rUser;
+
+        // user notes only
+        userNotes = (await loadMemories({
+          SUPABASE_URL, SUPABASE_SERVICE, userId, role: "note", limit: 8, timeoutMs: 800,
+        })).map((x) => `- ${x.content}`);
       } catch {}
     }
 
-    // -------- build compact prelude (low latency) --------
-    // Keep the system prompt tiny; stream does the heavy lifting.
+    // merge persona/rules
+    const persona = personaUser || personaGlobal || "";
+    const rules = [...rulesGlobal, ...rulesUser];
+
+    // -------- compact system prelude --------
     const systemPrelude = [
       "You are Keilani—warm, witty, sharp. Be brief unless asked.",
       persona ? `Persona:\n${persona}` : "",
@@ -131,7 +156,6 @@ export default async (request) => {
       body: JSON.stringify({
         model: "gpt-4o-mini",
         stream: true,
-        // Lower token prefill to reduce first-token latency
         temperature: 0.6,
         messages: [
           { role: "system", content: systemPrelude },
@@ -214,7 +238,7 @@ function streamText(text) {
   const writer = ts.writable.getWriter();
   const enc = new TextEncoder();
   (async () => {
-    for (const piece of chunks(text, 64)) {
+    for (const piece of chunker(text, 64)) {
       await writer.write(enc.encode(`data: ${JSON.stringify({ delta: piece })}\n\n`));
     }
     writer.close();
@@ -229,7 +253,7 @@ function streamText(text) {
     },
   });
 }
-function* chunks(str, n) { let i=0; while (i<str.length) { yield str.slice(i,i+n); i+=n; } }
+function* chunker(str, n) { let i=0; while (i<str.length) { yield str.slice(i,i+n); i+=n; } }
 function normalize(s=""){ return s.trim().toLowerCase().replace(/\s+/g," "); }
 
 /* ---- Supabase helpers ---- */
@@ -271,6 +295,46 @@ async function loadMemories({ SUPABASE_URL, SUPABASE_SERVICE, userId, limit = 8,
       signal,
     }).then((r) => (r.ok ? r.json() : []));
   return withTimeout(run, timeoutMs);
+}
+
+// Return one content string for a given userId+role (latest)
+async function loadExactOne({ SUPABASE_URL, SUPABASE_SERVICE, lookupUserId, role }) {
+  const q = new URLSearchParams({
+    user_id: `eq.${lookupUserId}`,
+    role: `eq.${role}`,
+    order: "created_at.desc",
+    limit: "1",
+  });
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/memory?${q.toString()}`, {
+    headers: {
+      apikey: SUPABASE_SERVICE,
+      Authorization: `Bearer ${SUPABASE_SERVICE}`,
+      Accept: "application/json",
+    },
+  });
+  if (!r.ok) return "";
+  const arr = await r.json();
+  return arr?.[0]?.content || "";
+}
+
+// Return rule contents (array) for a userId
+async function loadRules({ SUPABASE_URL, SUPABASE_SERVICE, lookupUserId, limit = 32 }) {
+  const q = new URLSearchParams({
+    user_id: `eq.${lookupUserId}`,
+    role: "eq.rule",
+    order: "created_at.desc",
+    limit: String(limit),
+  });
+  const r = await fetch(`${SUPABASE_URL}/rest/v1/memory?${q.toString()}`, {
+    headers: {
+      apikey: SUPABASE_SERVICE,
+      Authorization: `Bearer ${SUPABASE_SERVICE}`,
+      Accept: "application/json",
+    },
+  });
+  if (!r.ok) return [];
+  const arr = await r.json();
+  return arr.map((x) => x.content).filter(Boolean);
 }
 
 /* ---- Simple auto-memory extractor ---- */
