@@ -59,7 +59,7 @@ exports.handler = async (event) => {
       return json(400, { error: "audio_too_small", detail: { bytes: buf?.length || 0 } });
     }
 
-    // Build multipart with native FormData / Blob (Node 18+)
+    // Build multipart with native FormData / File (Node 18+)
     const form = new FormData();
     const fileName =
       mimeHint.includes("wav")  ? "audio.wav"  :
@@ -68,30 +68,43 @@ exports.handler = async (event) => {
       mimeHint.includes("ogg")  ? "audio.ogg"  :
       mimeHint.includes("webm") ? "audio.webm" : "audio.webm";
 
-    // Blob takes a TypedArray; Content-Type comes from the part’s options
-    form.append("file", new Blob([buf], { type: mimeHint }), fileName);
+    // IMPORTANT: Use File not just Blob; OpenAI is picky with undici
+    const file = new File([buf], fileName, { type: mimeHint });
+    form.append("file", file);
     form.append("model", MODEL);
-    form.append("response_format", "json"); // required for 4o-mini-transcribe
+    form.append("response_format", "json"); // required for gpt-4o-mini-transcribe
     if (language) form.append("language", language);
 
     const resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
       method: "POST",
       headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
-      body: form, // DO NOT set Content-Type; fetch sets the proper multipart boundary
+      body: form, // let fetch set the multipart boundary
     });
 
     const text = await resp.text();
+
     if (!resp.ok) {
+      // Log what OpenAI responded with so we can see the reason in 'netlify logs:function stt'
+      const detail = safeParse(text) || text;
+      console.log("[STT] OpenAI error", {
+        status: resp.status,
+        message: detail?.error?.message,
+        param: detail?.error?.param,
+        code: detail?.error?.code,
+        mimeHint, fileName, bytes: buf.length, model: MODEL,
+      });
       return json(resp.status, {
         error: "openai_stt_error",
-        detail: safeParse(text) || text,
+        detail,
         meta: { mimeHint, fileName, bytes: buf.length, model: MODEL },
       });
     }
 
     const data = safeParse(text) || { text: "" };
+    console.log("[STT] OK", { bytes: buf.length, mimeHint, model: MODEL });
     return json(200, { transcript: data.text || "" });
   } catch (e) {
+    console.log("[STT] exception", e);
     return json(500, { error: "stt_exception", detail: String(e.message || e) });
   }
 };
