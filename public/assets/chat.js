@@ -1,5 +1,6 @@
 /* public/assets/chat.js
-   Keilani Brain — Turn-based voice chat (state machine, userId+session, anti-loop)
+   Keilani Brain — Turn-based voice chat (state machine, userId+session)
+   STT reliability tweaks: proper recorder stop + relaxed VAD/size gates
 */
 
 (() => {
@@ -74,9 +75,7 @@
   const clear     = (el) => { if (el) el.textContent = ''; };
   const append    = (el, t) => { if (!el || !t) return; const s=document.createElement('span'); s.textContent=t; el.appendChild(s); };
 
-  function stopSpeaking() {
-    try { player.pause(); player.currentTime = 0; } catch {}
-  }
+  function stopSpeaking() { try { player.pause(); player.currentTime = 0; } catch {} }
   async function speakText(text, voice) {
     if (!text?.trim()) return;
     const resp = await fetch('/.netlify/functions/tts', {
@@ -88,7 +87,7 @@
     const ab = await resp.arrayBuffer();
     const url = URL.createObjectURL(new Blob([ab], { type: 'audio/mpeg' }));
     player.src = url;
-    await player.play().catch(() => {}); // autoplay may fail silently
+    await player.play().catch(() => {});
   }
 
   // ---------- Helpers ----------
@@ -165,11 +164,12 @@
   }
 
   // ---------- Mic (universal) ----------
+  // Relaxed a bit to avoid over-clipping short phrases
   const TIMESLICE_MS     = 450;
-  const RELEASE_TAIL_MS  = 420;
-  const SILENCE_DB       = -48;
-  const MAX_TAIL_MS      = 1200;
-  const MIN_SPEECH_MS    = 600;
+  const RELEASE_TAIL_MS  = 350;
+  const SILENCE_DB       = -56;
+  const MAX_TAIL_MS      = 1500;
+  const MIN_SPEECH_MS    = 400;
   const PCM_SAMPLE_RATE  = 16000;
 
   let mediaStream = null, mediaRecorder = null, chunks = [];
@@ -191,16 +191,6 @@
       const alt = { audio: { channelCount: 1, sampleRate: 48000, echoCancellation: false, noiseSuppression: false, autoGainControl: true } };
       return await navigator.mediaDevices.getUserMedia(alt);
     }
-  }
-  function rmsDb(samples) {
-    let sum = 0;
-    for (let i = 0; i < samples.length; i++) {
-      const v = (samples[i] - 128) / 128.0;
-      sum += v * v;
-    }
-    const mean = sum / samples.length;
-    const rms = Math.sqrt(mean);
-    return 20 * Math.log10(rms + 1e-6);
   }
 
   // WAV fallback
@@ -296,16 +286,11 @@
 
     while (true) {
       analyser.getByteTimeDomainData(buf);
-      const db = (() => {
-        let sum = 0;
-        for (let i=0;i<buf.length;i++) { const v = (buf[i]-128)/128; sum += v*v; }
-        const mean = sum / buf.length;
-        return 20*Math.log10(Math.sqrt(mean)+1e-6);
-      })();
+      // quick RMS
+      let sum=0; for (let i=0;i<buf.length;i++){ const v=(buf[i]-128)/128; sum+=v*v; }
+      const db = 20*Math.log10(Math.sqrt(sum/buf.length)+1e-6);
       const now = performance.now();
-      const passedMinTail = now >= minTailAt;
-      const exceededMax   = now - tailStart >= MAX_TAIL_MS;
-      if (passedMinTail && (db < SILENCE_DB || exceededMax)) break;
+      if ((now >= minTailAt && db < SILENCE_DB) || (now - tailStart) >= MAX_TAIL_MS) break;
       await sleep(45);
     }
   }
@@ -323,6 +308,15 @@
   async function captureAndTranscribe() {
     await waitTail();
 
+    // Flush/stop the recorder so browsers deliver the final chunk
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
+      const stopped = new Promise((res) => {
+        mediaRecorder.onstop = () => res();
+      });
+      try { mediaRecorder.stop(); } catch {}
+      await stopped;
+    }
+
     if (startTimeMs && performance.now() - startTimeMs < MIN_SPEECH_MS) {
       cleanupMic();
       transcriptEl && (transcriptEl.textContent = '(no speech)');
@@ -330,15 +324,16 @@
     }
 
     let blob;
-    if (mediaRecorder && mediaRecorder.state === 'recording') {
-      try { mediaRecorder.requestData?.(); } catch {}
-      await sleep(60);
-      blob = chunks.length ? new Blob(chunks, { type: mediaRecorder?.mimeType || 'audio/webm' }) : null;
+    if (chunks.length) {
+      blob = new Blob(chunks, { type: mediaRecorder?.mimeType || 'audio/webm' });
     } else {
+      // Fallback WAV path
       blob = encodeWavFromFloat32(waBuffers, waInputSampleRate, PCM_SAMPLE_RATE);
     }
 
-    if (!blob || blob.size < 2000) {
+    // Slightly lower the minimum-size gate
+    if (!blob || blob.size < 800) {
+      console.warn('[STT] tiny blob, size=', blob?.size || 0);
       cleanupMic();
       transcriptEl && (transcriptEl.textContent = '(no speech)');
       return '';
@@ -349,6 +344,7 @@
     const b64  = toB64(ab);
     const mime = blob.type || 'audio/wav';
     const fileExt = mimeToExt(mime);
+    console.log('[STT] mime=', mime, 'bytes=', ab.byteLength);
 
     let sttJson = {};
     let ok = false;
@@ -373,7 +369,6 @@
   }
 
   // ---------- State machine ----------
-  // 'idle' → 'listening' → 'thinking' → 'speaking' → (audio ended) → 'listening'
   let phase = 'idle';
   let running = false;
 
@@ -386,10 +381,7 @@
     await startMic();
     const transcript = await captureAndTranscribe();
     if (!running) return;
-    if (!transcript) { // no speech → keep listening
-      await sleep(120);
-      return nextTurn();
-    }
+    if (!transcript) { await sleep(120); return nextTurn(); }
 
     // 2) think
     phase = 'thinking';
@@ -399,34 +391,27 @@
       reply = await chatStream(transcript, getVoice());
     } catch (e) {
       console.error('[chat] error', e);
-      phase = 'idle';
-      setStatus('idle');
-      return;
+      phase = 'idle'; setStatus('idle'); return;
     }
-
     if (!running) return;
 
-    // 3) speak, then resume listening only after audio ends
+    // 3) speak → wait end → listen
     const voice = getVoice();
     const useTTS = !!voice && voice !== 'default' && voice !== '(default / no TTS)';
-
     if (useTTS) {
-      phase = 'speaking';
-      setStatus('speaking');
+      phase = 'speaking'; setStatus('speaking');
       stopSpeaking();
       const ended = new Promise(res => {
         const onend = () => { player.removeEventListener('ended', onend); res(); };
         player.addEventListener('ended', onend, { once: true });
       });
       await speakText(reply, voice);
-      await ended;                        // ← wait until the audio fully finishes
+      await ended;
       if (!running) return;
-      await sleep(120);                   // small gap so the mic doesn’t catch the player tail
+      await sleep(150); // tiny gap so mic doesn’t pick the tail
       return nextTurn();
     } else {
-      // No TTS → show text and immediately listen again
-      phase = 'idle';
-      setStatus('idle');
+      phase = 'idle'; setStatus('idle');
       await sleep(120);
       return nextTurn();
     }
@@ -460,7 +445,7 @@
     if (!running) {
       running = true;
       chatBtn.textContent = 'Stop chat';
-      nextTurn();             // kick off the first turn
+      nextTurn();
     } else {
       running = false;
       chatBtn.textContent = 'Start chat';
