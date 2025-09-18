@@ -1,5 +1,5 @@
 // netlify/functions/stt.js
-// POST { audioBase64: "<base64 or data URL>", language?: "en", mime?: "audio/webm;codecs=opus", filename?: "audio.webm" }
+// POST { audioBase64: "<base64 or data URL>", language?: "en", mime?: "audio/webm;codecs=opus"|"audio/mpeg", filename?: "audio.webm"|... }
 // -> { transcript, meta? }
 
 function json(status, body) {
@@ -86,13 +86,22 @@ exports.handler = async (event) => {
 
   const isWav = magic.toString("ascii", 0, 4) === "RIFF" && magic.toString("ascii", 8, 12) === "WAVE";
   const isOgg = magic.toString("ascii", 0, 4) === "OggS";
-  const isWebm = hex.startsWith("1a45dfa3");  // EBML
+  const isWebm = hex.startsWith("1a45dfa3"); // EBML
   const isMp4 = magic.toString("ascii", 4, 8) === "ftyp"; // mp4/m4a/iso-bmff
+
+  // MP3 detection:
+  // - ID3 tagged files start "ID3"
+  // - raw MPEG frames start with 0xFF 0xFB (or 0xF3/0xF2 for MPEG2/2.5)
+  const b0 = buf[0], b1 = buf[1];
+  const hasID3 = magic.toString("ascii", 0, 3) === "ID3";
+  const hasMpegSync = b0 === 0xff && (b1 === 0xfb || b1 === 0xf3 || b1 === 0xf2);
+  const isMp3 = hasID3 || hasMpegSync;
 
   let inferredMime =
     isWav ? "audio/wav" :
     isOgg ? "audio/ogg" :
     isWebm ? "audio/webm" :
+    isMp3 ? "audio/mpeg" :
     isMp4 ? "audio/m4a" : "";
 
   // Normalize mimeHint like "audio/webm;codecs=opus" -> "audio/webm"
@@ -106,7 +115,7 @@ exports.handler = async (event) => {
   const fileName =
     filenameHint ||
     (finalMime.includes("wav") ? "audio.wav" :
-     finalMime.includes("mp3") ? "audio.mp3" :
+     finalMime.includes("mpeg") || finalMime.includes("mp3") ? "audio.mp3" :
      finalMime.includes("m4a") || finalMime.includes("mp4") ? "audio.m4a" :
      finalMime.includes("ogg") ? "audio.ogg" :
      finalMime.includes("webm") ? "audio.webm" :
@@ -128,7 +137,6 @@ exports.handler = async (event) => {
     const blob = new Blob([buf], { type: finalMime });
     form.append("file", blob, fileName);
     form.append("model", MODEL);
-    // Whisper supports these fields; harmless for 4o transcribe too
     form.append("response_format", "json");
     if (language) form.append("language", String(language));
     return form;
