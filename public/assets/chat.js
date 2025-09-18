@@ -1,5 +1,5 @@
 /* public/assets/chat.js
-   Keilani Brain — Universal mic + Continuous loop (anti-loop guards)
+   Keilani Brain — Single-button voice chat (universal mic, anti-loop, no PTT/Speak)
 */
 
 (() => {
@@ -7,13 +7,22 @@
   const $ = (s) => document.querySelector(s);
   const inputEl      = $('#textIn')    || $('#input')  || $('textarea');
   const sendBtn      = $('#sendBtn')   || $('#send');
-  const speakBtn     = $('#speakBtn')  || $('#speak');
-  const pttBtn       = $('#pttBtn')    || $('#ptt') || $('#holdToTalk');
   const voiceSel     = $('#voicePick') || $('#voice') || $('#voiceSelect');
   const statusPill   = $('#statePill') || $('#status') || $('.status');
   const transcriptEl = $('#transcriptBox') || $('#transcript');
   const replyEl      = $('#reply');
-  const loopBtn      = $('#chatToggleBtn'); // optional “Start chat” toggle
+
+  // Ensure we have a Start/Stop toggle
+  let loopBtn = $('#chatToggleBtn');
+  if (!loopBtn) {
+    loopBtn = document.createElement('button');
+    loopBtn.id = 'chatToggleBtn';
+    loopBtn.textContent = 'Start chat';
+    loopBtn.style.marginLeft = '0.5rem';
+    loopBtn.className = 'btn';
+    // Place it next to Send if possible
+    (sendBtn?.parentElement || document.body).appendChild(loopBtn);
+  }
 
   // ---------- Session ----------
   const SESSION_KEY = 'kb_session';
@@ -60,7 +69,6 @@
     try { player.pause(); player.currentTime = 0; } catch {}
     bargeIn.speaking = false;
   }
-
   async function speakText(text, voice) {
     if (!text?.trim()) return;
     const resp = await fetch('/.netlify/functions/tts', {
@@ -84,7 +92,7 @@
         const resp = await fetch(url, opts);
         if (resp.ok) return resp;
         last = resp;
-        // if 4xx, do not hammer; break early
+        // On 4xx, break (client issue)
         if (resp.status >= 400 && resp.status < 500) break;
       } catch (e) { last = e; }
       await sleep(baseDelay * Math.pow(2, i));
@@ -117,7 +125,7 @@
     if (!resp.ok || !resp.body) {
       const raw = await resp.text().catch(()=> '');
       console.error('[chat-stream] HTTP', resp.status, 'raw=', raw);
-      throw new Error('chat_stream_failed');
+      throw new Error(`chat_stream_failed_${resp.status}`);
     }
 
     const reader = resp.body.getReader();
@@ -137,15 +145,13 @@
           const j = JSON.parse(data);
           const d = j.choices?.[0]?.delta?.content || j.delta || j.content || j.text || '';
           if (d) { finalText += d; append(replyEl, d); }
-        } catch {
-          finalText += data; append(replyEl, data);
-        }
+        } catch { finalText += data; append(replyEl, data); }
       }
     }
     return finalText.trim();
   }
 
-  // ---------- Send ----------
+  // ---------- Text Send (still available) ----------
   async function handleSend() {
     try {
       unlockAudioOnce();
@@ -163,12 +169,12 @@
     }
   }
 
-  // ---------- PTT / STT (Universal) ----------
+  // ---------- PTT / STT (under the hood) ----------
   const TIMESLICE_MS     = 450;
   const RELEASE_TAIL_MS  = 420;
   const SILENCE_DB       = -48;
   const MAX_TAIL_MS      = 1200;
-  const MIN_SPEECH_MS    = 600;  // NEW: avoid tiny “breaths”
+  const MIN_SPEECH_MS    = 600;   // avoid tiny breaths
   const SMALL_BLOB_MIN   = 2000;
   const PCM_SAMPLE_RATE  = 16000;
 
@@ -273,36 +279,30 @@
     try { waScriptNode && (waScriptNode.disconnect(), waScriptNode.onaudioprocess = null); } catch {}
   }
 
-  async function startPTT() {
-    try {
-      unlockAudioOnce();
-      stopSpeaking();
-      setStatus('listening');
-      chunks = [];
-      startTimeMs = performance.now();
+  async function startMicCycle() {
+    unlockAudioOnce();
+    stopSpeaking();
+    setStatus('listening');
 
-      mediaStream = await getUserMediaStream();
+    chunks = [];
+    startTimeMs = performance.now();
+    mediaStream = await getUserMediaStream();
 
-      const Ctx = window.AudioContext || window.webkitAudioContext;
-      if (!ac && Ctx) ac = new Ctx({ latencyHint: 'interactive' });
-      if (ac?.state === 'suspended') await ac.resume();
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!ac && Ctx) ac = new Ctx({ latencyHint: 'interactive' });
+    if (ac?.state === 'suspended') await ac.resume();
 
-      sourceNode = ac?.createMediaStreamSource ? ac.createMediaStreamSource(mediaStream) : null;
-      analyser = ac?.createAnalyser ? ac.createAnalyser() : null;
-      if (sourceNode && analyser) { analyser.fftSize = 1024; sourceNode.connect(analyser); }
+    sourceNode = ac?.createMediaStreamSource ? ac.createMediaStreamSource(mediaStream) : null;
+    analyser = ac?.createAnalyser ? ac.createAnalyser() : null;
+    if (sourceNode && analyser) { analyser.fftSize = 1024; sourceNode.connect(analyser); }
 
-      if (hasMediaRecorder() && !(isSafari() && MediaRecorder && MediaRecorder.isTypeSupported && !MediaRecorder.isTypeSupported('audio/webm'))) {
-        const mime = mimePick();
-        mediaRecorder = new MediaRecorder(mediaStream, { mimeType: mime, audioBitsPerSecond: 128000 });
-        mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
-        mediaRecorder.onstop = onPTTStop;
-        mediaRecorder.start(TIMESLICE_MS);
-      } else {
-        await startFallbackRecorder();
-      }
-    } catch (e) {
-      console.error('[PTT] start error', e);
-      setStatus('idle');
+    if (hasMediaRecorder() && !(isSafari() && MediaRecorder && MediaRecorder.isTypeSupported && !MediaRecorder.isTypeSupported('audio/webm'))) {
+      const mime = mimePick();
+      mediaRecorder = new MediaRecorder(mediaStream, { mimeType: mime, audioBitsPerSecond: 128000 });
+      mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+      mediaRecorder.start(TIMESLICE_MS);
+    } else {
+      await startFallbackRecorder();
     }
   }
 
@@ -317,13 +317,13 @@
       const db = rmsDb(buf);
       const now = performance.now();
       const passedMinTail = now >= minTailAt;
-      const exceededMax = now - tailStart >= MAX_TAIL_MS;
+      const exceededMax   = now - tailStart >= MAX_TAIL_MS;
       if (passedMinTail && (db < SILENCE_DB || exceededMax)) break;
       await sleep(45);
     }
   }
 
-  async function stopPTT() {
+  async function stopMicCycleAndProcess() {
     try {
       await waitTail();
 
@@ -335,16 +335,23 @@
         return;
       }
 
+      let blob;
       if (mediaRecorder && mediaRecorder.state === 'recording') {
         try { mediaRecorder.requestData?.(); } catch {}
-        mediaRecorder.stop();
+        // give the recorder a moment to flush
+        await sleep(50);
+        if (!chunks.length) {
+          // last push may arrive slightly late
+          await sleep(100);
+        }
+        blob = chunks.length ? new Blob(chunks, { type: mediaRecorder?.mimeType || 'audio/webm' }) : null;
       } else {
-        const wavBlob = encodeWavFromFloat32(waBuffers, waInputSampleRate, PCM_SAMPLE_RATE);
-        await processTranscriptFromBlob(wavBlob);
-        cleanupAudio();
+        blob = encodeWavFromFloat32(waBuffers, waInputSampleRate, PCM_SAMPLE_RATE);
       }
+      await processTranscriptFromBlob(blob);
     } catch (e) {
-      console.warn('[PTT] stop error', e);
+      console.warn('[mic] stop error', e);
+    } finally {
       cleanupAudio();
     }
   }
@@ -359,30 +366,13 @@
     chunks = []; mediaRecorder = null; mediaStream = null; analyser = null; sourceNode = null;
   }
 
-  async function onPTTStop() {
-    try {
-      await sleep(10);
-      if (!chunks.length) {
-        transcriptEl && (transcriptEl.textContent = '(no audio captured)');
-        setStatus('idle'); return cleanupAudio();
-      }
-      const blob = new Blob(chunks, { type: mediaRecorder?.mimeType || 'audio/webm' });
-      await processTranscriptFromBlob(blob);
-    } catch (e) {
-      console.error('[PTT] flow error', e);
-      setStatus('idle');
-    } finally {
-      cleanupAudio();
-    }
-  }
-
   async function processTranscriptFromBlob(blob) {
-    setStatus('transcribing');
-
-    if (blob.size < SMALL_BLOB_MIN) {
+    if (!blob || blob.size < SMALL_BLOB_MIN) {
       transcriptEl && (transcriptEl.textContent = '(no speech)');
       setStatus('idle'); return;
     }
+
+    setStatus('transcribing');
 
     const ab    = await blob.arrayBuffer();
     const mime  = blob.type || 'audio/wav';
@@ -405,14 +395,13 @@
         lastStatus = resp.status;
         if (resp.ok) { sttJson = await resp.json(); ok = true; break; }
       } catch {}
-      // break quickly on 4xx to avoid loops
-      if (lastStatus >= 400 && lastStatus < 500) break;
+      if (lastStatus >= 400 && lastStatus < 500) break; // client error → do not hammer
       await sleep(250 * (i+1));
     }
 
     if (!ok) {
       transcriptEl && (transcriptEl.textContent = '(stt failed)');
-      setStatus('idle'); return;
+      setStatus('idle'); bumpClientErr('stt'); return;
     }
 
     const transcript = (sttJson?.transcript || '').trim();
@@ -430,7 +419,11 @@
         body: JSON.stringify({ message: transcript, voice: getVoice(), sessionId }),
       });
       chatStatus = r.status;
-      if (!r.ok || !r.body) throw new Error('chat_stream_failed');
+      if (!r.ok || !r.body) {
+        const raw = await r.text().catch(()=> '');
+        console.error('[chat-stream] HTTP', chatStatus, 'raw=', raw);
+        throw new Error(`chat_stream_failed_${chatStatus}`);
+      }
       const reader = r.body.getReader();
       const dec = new TextDecoder();
       clear(replyEl);
@@ -453,92 +446,73 @@
       reply = final.trim();
     } catch (e) {
       console.error('[chat] error', e);
-      // handled by auto-loop guard below
+      setStatus('idle'); bumpClientErr('chat'); return;
     }
 
-    if (!reply) {
-      setStatus('idle'); return;
-    }
+    if (!reply) { setStatus('idle'); return; }
 
+    // Speak
     setStatus('speaking');
     await speakText(reply, getVoice());
     setStatus('idle');
+    resetClientErr();
   }
 
   // ---------- Continuous Mode (with anti-loop) ----------
   let autoMode = false;
   let loopInFlight = false;
-  let consecutiveClientErrors = 0;
-  const MAX_CLIENT_ERR = 3;
+
+  let clientErrSTT = 0;
+  let clientErrCHAT = 0;
+  const MAX_CLIENT_ERR = 2;
+
+  function resetClientErr() { clientErrSTT = 0; clientErrCHAT = 0; }
+  function bumpClientErr(kind) {
+    if (kind === 'stt') clientErrSTT++;
+    if (kind === 'chat') clientErrCHAT++;
+    if ((clientErrSTT >= MAX_CLIENT_ERR) || (clientErrCHAT >= MAX_CLIENT_ERR)) {
+      autoMode = false;
+      loopBtn && (loopBtn.textContent = 'Start chat');
+      setStatus('idle');
+      console.warn('[autoLoop] stopped after repeated client 4xx errors');
+    }
+  }
 
   async function autoLoop() {
     if (loopInFlight || !autoMode) return;
     loopInFlight = true;
     try {
-      await startPTT();
+      await startMicCycle();
       await waitTail();
-      await stopPTT();
-      // If we reached here without setting transcript or reply, still okay.
-      consecutiveClientErrors = 0; // reset on any successful cycle
+      await stopMicCycleAndProcess();
     } catch (e) {
       console.warn('[autoLoop]', e);
-      consecutiveClientErrors++;
     } finally {
       loopInFlight = false;
-      if (autoMode) {
-        if (consecutiveClientErrors >= MAX_CLIENT_ERR) {
-          autoMode = false;
-          loopBtn && (loopBtn.textContent = 'Start chat');
-          setStatus('idle');
-          console.warn('[autoLoop] stopped after repeated client errors');
-          return;
-        }
-        setTimeout(autoLoop, 120); // short idle to avoid hot spin
-      }
+      if (autoMode) setTimeout(autoLoop, 140);
     }
   }
 
   // ---------- Wire UI ----------
   sendBtn?.addEventListener('click', handleSend);
 
-  speakBtn?.addEventListener('click', async () => {
-    stopSpeaking();
-    const text = replyEl?.textContent?.trim() || inputEl?.value?.trim();
-    if (!text) return;
-    setStatus('speaking'); await speakText(text, getVoice()); setStatus('idle');
+  loopBtn.textContent = 'Start chat';
+  loopBtn.addEventListener('click', () => {
+    unlockAudioOnce();
+    if (!autoMode) {
+      autoMode = true;
+      resetClientErr();
+      loopBtn.textContent = 'Stop chat';
+      setStatus('listening');
+      autoLoop();
+    } else {
+      autoMode = false;
+      loopBtn.textContent = 'Start chat';
+      setStatus('idle');
+      cleanupAudio();
+      stopSpeaking();
+    }
   });
-
-  if (pttBtn) {
-    // PTT
-    const down = (e) => { e.preventDefault?.(); startPTT(); };
-    const up   = (e) => { e.preventDefault?.(); stopPTT();  };
-    pttBtn.addEventListener('pointerdown', down);
-    pttBtn.addEventListener('pointerup',   up);
-    pttBtn.addEventListener('pointerleave', up);
-    pttBtn.addEventListener('mousedown', down);
-    pttBtn.addEventListener('mouseup',   up);
-    pttBtn.addEventListener('touchstart', down, { passive: false });
-    pttBtn.addEventListener('touchend',   up,   { passive: false });
-  }
-
-  if (loopBtn) {
-    loopBtn.textContent = 'Start chat';
-    loopBtn.addEventListener('click', () => {
-      unlockAudioOnce();
-      if (!autoMode) {
-        autoMode = true;
-        consecutiveClientErrors = 0;
-        loopBtn.textContent = 'Stop chat';
-        setStatus('listening');
-        autoLoop();
-      } else {
-        autoMode = false;
-        loopBtn.textContent = 'Start chat';
-        setStatus('idle');
-        cleanupAudio();
-      }
-    });
-  }
 
   inputEl?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
@@ -555,5 +529,5 @@
   });
 
   setStatus('idle');
-  console.log('[Keilani] chat.js ready (Universal + anti-loop + session)', { sessionId });
+  console.log('[Keilani] chat.js ready (Single-button voice + anti-loop + session)', { sessionId });
 })();
