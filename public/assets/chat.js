@@ -1,6 +1,9 @@
 // chat.js
 // Handles audio recording and posting to Netlify STT function
 
+// chat.js (very first line)
+console.log("CHAT.JS BUILD TAG → 2025-09-18T08:45-0700");
+
 let mediaRecorder = null;
 let chunks = [];
 
