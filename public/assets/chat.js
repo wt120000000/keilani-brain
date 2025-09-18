@@ -1,5 +1,5 @@
 /* public/assets/chat.js
-   Keilani Brain — Single-button voice chat (universal mic, anti-loop, no PTT/Speak)
+   Keilani Brain — Single-button voice chat (universal mic, anti-loop, session + userId)
 */
 
 (() => {
@@ -20,22 +20,35 @@
     loopBtn.textContent = 'Start chat';
     loopBtn.style.marginLeft = '0.5rem';
     loopBtn.className = 'btn';
-    // Place it next to Send if possible
     (sendBtn?.parentElement || document.body).appendChild(loopBtn);
   }
 
-  // ---------- Session ----------
-  const SESSION_KEY = 'kb_session';
+  // ---------- IDs (session + user) ----------
   const uuidv4 = () =>
     ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
       (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (c / 4))).toString(16)
     );
-  const getSessionId = () => {
+
+  const SESSION_KEY = 'kb_session';
+  const USER_KEY    = 'kb_user_id';
+
+  function getSessionId() {
     let id = localStorage.getItem(SESSION_KEY);
     if (!id) { id = uuidv4(); localStorage.setItem(SESSION_KEY, id); }
     return id;
-  };
+  }
+
+  function getUserId() {
+    // precedence: ?uid= query → localStorage → generated
+    const urlUid = new URLSearchParams(location.search).get('uid');
+    if (urlUid) { localStorage.setItem(USER_KEY, urlUid); return urlUid; }
+    let uid = localStorage.getItem(USER_KEY);
+    if (!uid) { uid = `web-${uuidv4()}`; localStorage.setItem(USER_KEY, uid); }
+    return uid;
+  }
+
   const sessionId = getSessionId();
+  const userId    = getUserId();
 
   // ---------- Audio / TTS ----------
   const player = (() => {
@@ -92,8 +105,7 @@
         const resp = await fetch(url, opts);
         if (resp.ok) return resp;
         last = resp;
-        // On 4xx, break (client issue)
-        if (resp.status >= 400 && resp.status < 500) break;
+        if (resp.status >= 400 && resp.status < 500) break; // client error → don't hammer
       } catch (e) { last = e; }
       await sleep(baseDelay * Math.pow(2, i));
     }
@@ -119,7 +131,7 @@
     const resp = await fetchWithRetry('/api/chat-stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ message, voice, sessionId }),
+      body: JSON.stringify({ message, voice, sessionId, userId }),
     }, 2, 250);
 
     if (!resp.ok || !resp.body) {
@@ -151,7 +163,7 @@
     return finalText.trim();
   }
 
-  // ---------- Text Send (still available) ----------
+  // ---------- Text Send ----------
   async function handleSend() {
     try {
       unlockAudioOnce();
@@ -169,7 +181,7 @@
     }
   }
 
-  // ---------- PTT / STT (under the hood) ----------
+  // ---------- PTT / STT ----------
   const TIMESLICE_MS     = 450;
   const RELEASE_TAIL_MS  = 420;
   const SILENCE_DB       = -48;
@@ -327,7 +339,6 @@
     try {
       await waitTail();
 
-      // Guard: require minimum speech duration
       if (startTimeMs && performance.now() - startTimeMs < MIN_SPEECH_MS) {
         cleanupAudio();
         setStatus('idle');
@@ -338,12 +349,8 @@
       let blob;
       if (mediaRecorder && mediaRecorder.state === 'recording') {
         try { mediaRecorder.requestData?.(); } catch {}
-        // give the recorder a moment to flush
         await sleep(50);
-        if (!chunks.length) {
-          // last push may arrive slightly late
-          await sleep(100);
-        }
+        if (!chunks.length) await sleep(100);
         blob = chunks.length ? new Blob(chunks, { type: mediaRecorder?.mimeType || 'audio/webm' }) : null;
       } else {
         blob = encodeWavFromFloat32(waBuffers, waInputSampleRate, PCM_SAMPLE_RATE);
@@ -395,7 +402,7 @@
         lastStatus = resp.status;
         if (resp.ok) { sttJson = await resp.json(); ok = true; break; }
       } catch {}
-      if (lastStatus >= 400 && lastStatus < 500) break; // client error → do not hammer
+      if (lastStatus >= 400 && lastStatus < 500) break;
       await sleep(250 * (i+1));
     }
 
@@ -416,7 +423,7 @@
       const r = await fetch('/api/chat-stream', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: transcript, voice: getVoice(), sessionId }),
+        body: JSON.stringify({ message: transcript, voice: getVoice(), sessionId, userId }),
       });
       chatStatus = r.status;
       if (!r.ok || !r.body) {
@@ -529,5 +536,5 @@
   });
 
   setStatus('idle');
-  console.log('[Keilani] chat.js ready (Single-button voice + anti-loop + session)', { sessionId });
+  console.log('[Keilani] chat.js ready (Single-button voice + userId + session)', { sessionId, userId });
 })();
