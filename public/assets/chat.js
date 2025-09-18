@@ -188,6 +188,76 @@
     }
   }
 
+// chat.js (or your recorder module)
+let mediaRecorder;
+let chunks = [];
+
+async function startRecording() {
+  const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+  const preferredMime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
+    ? 'audio/webm;codecs=opus'
+    : 'audio/ogg;codecs=opus';
+
+  mediaRecorder = new MediaRecorder(stream, { mimeType: preferredMime });
+  chunks = [];
+
+  mediaRecorder.ondataavailable = (e) => {
+    if (e.data && e.data.size) {
+      chunks.push(e.data);
+      console.log('[STT] chunk bytes=', e.data.size);
+    }
+  };
+
+  mediaRecorder.onstop = async () => {
+    const blob = new Blob(chunks, { type: preferredMime });
+    console.log('[STT] final blob', blob.type, blob.size, 'bytes');
+
+    if (blob.size < 8192) {
+      console.warn('[STT] too small; record a bit longer.');
+      return;
+    }
+
+    const base64 = await blobToBase64Raw(blob); // raw base64, no data: prefix
+    const res = await fetch('https://api.keilani.ai/.netlify/functions/stt', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        audioBase64: base64,                  // <-- matches server
+        language: 'en',
+        // Optional: hint; server doesn’t require it
+        mime: blob.type,                      // e.g. "audio/webm;codecs=opus"
+        filename: blob.type.includes('webm') ? 'audio.webm'
+                : blob.type.includes('ogg')  ? 'audio.ogg'
+                : 'audio.wav',
+      }),
+    });
+
+    const json = await res.json().catch(() => ({}));
+    console.log('[STT] response', res.status, json);
+  };
+
+  mediaRecorder.start(); // we only post once on stop()
+}
+
+function stopRecording() {
+  if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    mediaRecorder.stop();
+  }
+}
+
+function blobToBase64Raw(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onloadend = () => {
+      const s = reader.result || '';
+      const comma = s.indexOf(',');
+      resolve(comma >= 0 ? s.slice(comma + 1) : s); // strip "data:...;base64,"
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(blob);
+  });
+}
+
   // WAV fallback
   let waScriptNode = null;
   let waBuffers = [];

@@ -1,11 +1,7 @@
 // netlify/functions/stt.js
-// POST { audioBase64: "<base64 or data URL>", language?: "en" } -> { transcript, meta? }
-// - Uses native fetch/FormData (Node 18) – no external deps.
-// - Content-type sniffing (WAV/OGG/WEBM/MP3/M4A).
-// - Validates minimum size; retries on 429/5xx with backoff.
-// - response_format=json (compatible with whisper-1 and gpt-4o-mini-transcribe).
+// POST { audioBase64: "<base64 or data URL>", language?: "en", mime?: "audio/webm;codecs=opus", filename?: "audio.webm" }
+// -> { transcript, meta? }
 
-/* Utility: JSON response helper */
 function json(status, body) {
   return {
     statusCode: status,
@@ -36,20 +32,21 @@ exports.handler = async (event) => {
   if (event.httpMethod !== "POST") return json(405, { error: "method_not_allowed" });
 
   const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-  // Default to whisper-1 if you prefer, or gpt-4o-mini-transcribe
   const MODEL = process.env.OPENAI_STT_MODEL || "gpt-4o-mini-transcribe";
-
   if (!OPENAI_API_KEY) return json(500, { error: "missing_openai_key" });
 
   // ---------- Parse body ----------
   let audioBase64 = "";
-  let mimeHint = ""; // we'll try to infer if empty
-  let language = undefined;
+  let mimeHint = "";
+  let filenameHint = "";
+  let language;
 
   try {
     const body = JSON.parse(event.body || "{}");
     const raw = (body.audioBase64 || "").trim();
     language = body.language || undefined;
+    mimeHint = (body.mime || "").toLowerCase();
+    filenameHint = (body.filename || "").trim();
 
     if (!raw) return json(400, { error: "missing_audio" });
 
@@ -61,7 +58,6 @@ exports.handler = async (event) => {
       const m = header.match(/^data:([^;]+)/);
       if (m) mimeHint = (m[1] || "").toLowerCase();
     } else {
-      // Plain base64, no data URL
       audioBase64 = raw;
     }
   } catch (e) {
@@ -76,27 +72,22 @@ exports.handler = async (event) => {
     return json(400, { error: "bad_base64", detail: String(e.message || e) });
   }
 
-  // Below ~2–3 KB, Whisper tends to return empty/format errors
   if (!buf || buf.length < 4000) {
     return json(400, {
       error: "audio_too_small",
-      detail: "Audio is too short or truncated; capture a bit more speech.",
+      detail: "Audio is too short or truncated; send a complete utterance (>= 8KB recommended).",
       meta: { bytes: buf?.length || 0 },
     });
   }
 
-  // ---------- Sniff magic bytes to tighten mime ----------
+  // ---------- Sniff magic bytes ----------
   const magic = buf.slice(0, 12);
-  const sig = magic.toString("hex");
+  const hex = magic.toString("hex");
 
-  // WAV = "RIFF" .... "WAVE" (52 49 46 46 / 57 41 56 45 in ascii)
   const isWav = magic.toString("ascii", 0, 4) === "RIFF" && magic.toString("ascii", 8, 12) === "WAVE";
-  // OGG = "OggS"
   const isOgg = magic.toString("ascii", 0, 4) === "OggS";
-  // WebM/Matroska starts with EBML header 1A45DFA3
-  const isWebm = sig.startsWith("1a45dfa3");
-  // MP4/M4A often contains "ftyp" at offset 4
-  const isMp4 = magic.toString("ascii", 4, 8) === "ftyp";
+  const isWebm = hex.startsWith("1a45dfa3");  // EBML
+  const isMp4 = magic.toString("ascii", 4, 8) === "ftyp"; // mp4/m4a/iso-bmff
 
   let inferredMime =
     isWav ? "audio/wav" :
@@ -104,45 +95,53 @@ exports.handler = async (event) => {
     isWebm ? "audio/webm" :
     isMp4 ? "audio/m4a" : "";
 
-  // Prefer explicit hint from Data URL if present; otherwise use sniffed type
+  // Normalize mimeHint like "audio/webm;codecs=opus" -> "audio/webm"
+  if (mimeHint) {
+    const semi = mimeHint.indexOf(";");
+    if (semi > -1) mimeHint = mimeHint.slice(0, semi);
+  }
+
   const finalMime = (mimeHint || inferredMime || "application/octet-stream").toLowerCase();
 
   const fileName =
-    finalMime.includes("wav") ? "audio.wav" :
-    finalMime.includes("mp3") ? "audio.mp3" :
-    finalMime.includes("m4a") || finalMime.includes("mp4") ? "audio.m4a" :
-    finalMime.includes("ogg") ? "audio.ogg" :
-    finalMime.includes("webm") ? "audio.webm" :
-    "audio.bin";
+    filenameHint ||
+    (finalMime.includes("wav") ? "audio.wav" :
+     finalMime.includes("mp3") ? "audio.mp3" :
+     finalMime.includes("m4a") || finalMime.includes("mp4") ? "audio.m4a" :
+     finalMime.includes("ogg") ? "audio.ogg" :
+     finalMime.includes("webm") ? "audio.webm" :
+     "audio.bin");
 
-  // ---------- Build multipart form (native FormData/Blob) ----------
-  // Node 18+: global FormData & Blob available
-  const form = new FormData();
-  const blob = new Blob([buf], { type: finalMime });
-  form.append("file", blob, fileName);
-  form.append("model", MODEL);
-  form.append("response_format", "json");
-  if (language) form.append("language", String(language));
-
-  // ---------- Retry helper ----------
+  // ---------- Helpers ----------
   const shouldRetry = (status, text) => {
-    if (status === 429) return true;                   // rate limit
-    if (status >= 500) return true;                    // server hiccups
-    // Some transient parsing errors are worth a single retry
-    if (status === 400 && /timeout|too\s+short/i.test(text || "")) return true;
+    if (status === 429) return true;
+    if (status >= 500) return true;
+    if (status === 400 && /timeout|too\s+short|malformed/i.test(text || "")) return true;
     return false;
   };
 
   const backoff = (attempt) =>
     new Promise((r) => setTimeout(r, 250 * Math.pow(2, attempt) + Math.floor(Math.random() * 100)));
 
-  // ---------- Call OpenAI w/ backoff ----------
+  function buildForm() {
+    const form = new FormData();
+    const blob = new Blob([buf], { type: finalMime });
+    form.append("file", blob, fileName);
+    form.append("model", MODEL);
+    // Whisper supports these fields; harmless for 4o transcribe too
+    form.append("response_format", "json");
+    if (language) form.append("language", String(language));
+    return form;
+  }
+
+  // ---------- Call OpenAI with retries (rebuild form each time) ----------
   const MAX_TRIES = 3;
   let lastStatus = 0;
   let lastText = "";
 
   for (let attempt = 0; attempt < MAX_TRIES; attempt++) {
     try {
+      const form = buildForm();
       const resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
         method: "POST",
         headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
@@ -158,16 +157,10 @@ exports.handler = async (event) => {
           await backoff(attempt);
           continue;
         }
-        // Non-retryable failure
         return json(resp.status, {
           error: "openai_stt_error",
           detail: safeParse(text) || text,
-          meta: {
-            bytes: buf.length,
-            mime: finalMime,
-            model: MODEL,
-            status: resp.status,
-          },
+          meta: { bytes: buf.length, mime: finalMime, model: MODEL, status: resp.status },
         });
       }
 
@@ -191,7 +184,6 @@ exports.handler = async (event) => {
     }
   }
 
-  // Shouldn’t reach here
   return json(502, {
     error: "stt_failed",
     detail: lastText || "Unknown STT failure",
