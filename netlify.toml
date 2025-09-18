@@ -1,6 +1,12 @@
+# =========================
+# Netlify configuration
+# =========================
+
 [build]
-  publish = "public"
-  command = ""
+  publish  = "public"
+  command  = ""
+  # If your functions live in non-default folder, uncomment the next line:
+  # functions = "netlify/functions"
 
 [functions]
   node_bundler = "esbuild"
@@ -8,40 +14,37 @@
 # ---------- Static assets ----------
 [[redirects]]
   from = "/assets/*"
-  to = "/assets/:splat"
+  to   = "/assets/:splat"
   status = 200
 
 # ---------- Node Functions (JSON / non-streaming) ----------
 [[redirects]]
   from = "/api/chat"
-  to = "/.netlify/functions/chat"
+  to   = "/.netlify/functions/chat"
   status = 200
-  
-  [build]
-  # set this to your actual publish dir (e.g., "dist" or "public")
-  publish = "dist"
 
-# Never cache HTML – always get the latest
+# Never cache HTML – always get the latest (debugging staleness)
 [[headers]]
   for = "/*.html"
   [headers.values]
   Cache-Control = "no-store, must-revalidate"
 
-# Short cache for assets while debugging
+# Short cache for assets while debugging (bump querystring on deploy)
 [[headers]]
   for = "/assets/*"
   [headers.values]
   Cache-Control = "max-age=30, must-revalidate"
 
-# (Optional) global CORS
+# (Optional) global CORS for static assets (functions already set their own)
 [[headers]]
   for = "/*"
   [headers.values]
   Access-Control-Allow-Origin = "*"
 
+# Convenience function routes you already use
 [[redirects]]
   from = "/api/stt"
-  to = "/.netlify/functions/stt"
+  to   = "/.netlify/functions/stt"
   status = 200
 
 [[redirects]]
@@ -56,22 +59,22 @@
 
 [[redirects]]
   from = "/api/tts"
-  to = "/.netlify/functions/tts"
+  to   = "/.netlify/functions/tts"
   status = 200
 
 [[redirects]]
   from = "/api/rtc/create-room"
-  to = "/.netlify/functions/rtc-create-room"
+  to   = "/.netlify/functions/rtc-create-room"
   status = 200
 
 [[redirects]]
   from = "/api/rtc/token"
-  to = "/.netlify/functions/rtc-token"
+  to   = "/.netlify/functions/rtc-token"
   status = 200
 
 [[redirects]]
   from = "/api/voices"
-  to = "/.netlify/functions/voices"
+  to   = "/.netlify/functions/voices"
   status = 200
 
 # ---------- Edge Function (SSE streaming) ----------
@@ -85,13 +88,13 @@
   function = "chat-stream"
 
 # ---------- Headers ----------
-# Correct MIME for asset JS
+# Correct MIME for asset JS (harmless; Netlify usually sets this automatically)
 [[headers]]
   for = "/assets/*.js"
   [headers.values]
   Content-Type = "application/javascript"
 
-# Global security headers
+# Global security headers (kept as-is)
 [[headers]]
   for = "/*"
   [headers.values]
