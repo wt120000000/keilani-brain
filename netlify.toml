@@ -16,6 +16,28 @@
   from = "/api/chat"
   to = "/.netlify/functions/chat"
   status = 200
+  
+  [build]
+  # set this to your actual publish dir (e.g., "dist" or "public")
+  publish = "dist"
+
+# Never cache HTML – always get the latest
+[[headers]]
+  for = "/*.html"
+  [headers.values]
+  Cache-Control = "no-store, must-revalidate"
+
+# Short cache for assets while debugging
+[[headers]]
+  for = "/assets/*"
+  [headers.values]
+  Cache-Control = "max-age=30, must-revalidate"
+
+# (Optional) global CORS
+[[headers]]
+  for = "/*"
+  [headers.values]
+  Access-Control-Allow-Origin = "*"
 
 [[redirects]]
   from = "/api/stt"
