@@ -1,10 +1,11 @@
-// CHAT.JS BUILD TAG → 2025-09-18T08:55-0700
+// CHAT.JS BUILD TAG → 2025-09-18T09:22-0700
 
 (() => {
   const API_ORIGIN = location.origin; // same origin (api.keilani.ai)
   const STT_URL = `${API_ORIGIN}/.netlify/functions/stt`;
   const TTS_URL = `${API_ORIGIN}/.netlify/functions/tts`;
 
+  // ===== UI logger =====
   const logEl = document.getElementById('log');
   const log = (...args) => {
     console.log('[CHAT]', ...args);
@@ -15,11 +16,14 @@
     }
   };
 
-  // ---- Recorder state ----
+  // ===== Recorder state =====
   let mediaRecorder = null;
+  let mediaStream = null;
   let chunks = [];
+  let autoStopTimer = null;
+  const AUTO_STOP_MS = 6000; // auto-stop after 6s so onstop always fires during tests
 
-  // ---- Helpers ----
+  // ===== Helpers =====
   function blobToBase64Raw(blob) {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -74,7 +78,6 @@
       format: 'mp3'
     };
 
-    // Must be within a user gesture for autoplay policies
     const res = await fetch(TTS_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -97,15 +100,35 @@
     log('TTS played', blob.size, 'bytes');
   }
 
-  // ---- Recording controls ----
-  async function startRecording() {
+  function clearAutoStop() {
+    if (autoStopTimer) {
+      clearTimeout(autoStopTimer);
+      autoStopTimer = null;
+    }
+  }
+
+  function stopTracks() {
     try {
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      mediaStream?.getTracks()?.forEach(t => t.stop());
+    } catch {}
+    mediaStream = null;
+  }
+
+  // ===== Recording controls =====
+  async function startRecording() {
+    // Prevent overlapping sessions
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
+      log('already recording; ignoring start');
+      return;
+    }
+
+    try {
+      mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const preferredMime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
         ? 'audio/webm;codecs=opus'
         : 'audio/ogg;codecs=opus';
 
-      mediaRecorder = new MediaRecorder(stream, { mimeType: preferredMime });
+      mediaRecorder = new MediaRecorder(mediaStream, { mimeType: preferredMime });
       chunks = [];
 
       mediaRecorder.ondataavailable = (e) => {
@@ -115,47 +138,74 @@
         }
       };
 
+      mediaRecorder.onerror = (e) => {
+        console.error('[CHAT] recorder error', e);
+        log('recorder error', String(e?.error || e?.name || e));
+      };
+
       mediaRecorder.onstop = async () => {
+        clearAutoStop();
         const blob = new Blob(chunks, { type: preferredMime });
         log('final blob', blob.type, blob.size, 'bytes');
 
+        // Always clean up tracks so next Start gets a fresh stream
+        stopTracks();
+
         if (blob.size < 8192) {
-          log('too small; record a bit longer.');
+          log('too small; record a bit longer before stopping.');
+          mediaRecorder = null;
           return;
         }
 
         try {
           const r = await sttUploadBlob(blob);
           log('TRANSCRIPT:', r.transcript);
-          // optional: read it back
+          // optional echo:
           // await speak(r.transcript || 'Transcription complete.');
         } catch (err) {
           console.error(err);
           log('STT failed', String(err && err.message || err));
+        } finally {
+          mediaRecorder = null;
+          chunks = [];
         }
       };
 
       mediaRecorder.start();
       log('recording started with', preferredMime);
+
+      // Auto-stop after N ms so onstop reliably runs during testing
+      clearAutoStop();
+      autoStopTimer = setTimeout(() => {
+        if (mediaRecorder && mediaRecorder.state === 'recording') {
+          log('auto-stop timer fired');
+          mediaRecorder.stop();
+          log('recording stopped (auto)');
+        }
+      }, AUTO_STOP_MS);
+
     } catch (err) {
       console.error(err);
       log('mic error', String(err && err.message || err));
+      stopTracks();
+      mediaRecorder = null;
+      chunks = [];
+      clearAutoStop();
     }
   }
 
   function stopRecording() {
-    if (mediaRecorder && mediaRecorder.state !== 'inactive') {
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
       mediaRecorder.stop();
-      log('recording stopped');
-    } else {
-      log('no active recorder');
+      log('recording stopped (manual)');
+      return;
     }
+    log('stop clicked but no active recorder');
   }
 
-  // ---- Wire UI after DOM is ready ----
+  // ===== Wire UI after DOM is ready =====
   document.addEventListener('DOMContentLoaded', () => {
     log('DOMContentLoaded; wiring handlers');
-
     const recBtn  = document.querySelector('#recordBtn');
     const stopBtn = document.querySelector('#stopBtn');
     const ttsBtn  = document.querySelector('#sayBtn');
@@ -165,7 +215,7 @@
     ttsBtn?.addEventListener('click', () => { log('tts click'); speak('Hey—Keilani TTS is live.'); });
   });
 
-  // expose for console testing if needed
+  // expose for console testing
   window.startRecording = startRecording;
   window.stopRecording  = stopRecording;
   window.speak          = speak;
