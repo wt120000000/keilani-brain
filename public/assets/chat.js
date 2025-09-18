@@ -1,5 +1,5 @@
 /* public/assets/chat.js
-   Keilani Brain — Single-button voice chat (universal mic, anti-loop, session + userId)
+   Keilani Brain — Turn-based voice chat (state machine, userId+session, anti-loop)
 */
 
 (() => {
@@ -13,17 +13,17 @@
   const replyEl      = $('#reply');
 
   // Ensure we have a Start/Stop toggle
-  let loopBtn = $('#chatToggleBtn');
-  if (!loopBtn) {
-    loopBtn = document.createElement('button');
-    loopBtn.id = 'chatToggleBtn';
-    loopBtn.textContent = 'Start chat';
-    loopBtn.style.marginLeft = '0.5rem';
-    loopBtn.className = 'btn';
-    (sendBtn?.parentElement || document.body).appendChild(loopBtn);
+  let chatBtn = $('#chatToggleBtn');
+  if (!chatBtn) {
+    chatBtn = document.createElement('button');
+    chatBtn.id = 'chatToggleBtn';
+    chatBtn.textContent = 'Start chat';
+    chatBtn.style.marginLeft = '0.5rem';
+    chatBtn.className = 'btn';
+    (sendBtn?.parentElement || document.body).appendChild(chatBtn);
   }
 
-  // ---------- IDs (session + user) ----------
+  // ---------- IDs ----------
   const uuidv4 = () =>
     ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g, c =>
       (c ^ crypto.getRandomValues(new Uint8Array(1))[0] & (15 >> (c / 4))).toString(16)
@@ -37,9 +37,7 @@
     if (!id) { id = uuidv4(); localStorage.setItem(SESSION_KEY, id); }
     return id;
   }
-
   function getUserId() {
-    // precedence: ?uid= query → localStorage → generated
     const urlUid = new URLSearchParams(location.search).get('uid');
     if (urlUid) { localStorage.setItem(USER_KEY, urlUid); return urlUid; }
     let uid = localStorage.getItem(USER_KEY);
@@ -59,9 +57,7 @@
     if (!el.parentNode) document.body.appendChild(el);
     return el;
   })();
-
   let ac = null;
-  let bargeIn = { speaking: false };
 
   function unlockAudioOnce() {
     try {
@@ -80,7 +76,6 @@
 
   function stopSpeaking() {
     try { player.pause(); player.currentTime = 0; } catch {}
-    bargeIn.speaking = false;
   }
   async function speakText(text, voice) {
     if (!text?.trim()) return;
@@ -93,10 +88,10 @@
     const ab = await resp.arrayBuffer();
     const url = URL.createObjectURL(new Blob([ab], { type: 'audio/mpeg' }));
     player.src = url;
-    try { bargeIn.speaking = true; await player.play(); } catch {}
+    await player.play().catch(() => {}); // autoplay may fail silently
   }
 
-  // ---------- Utils ----------
+  // ---------- Helpers ----------
   const sleep = (ms) => new Promise(r => setTimeout(r, ms));
   async function fetchWithRetry(url, opts, tries = 2, baseDelay = 250) {
     let last;
@@ -105,7 +100,7 @@
         const resp = await fetch(url, opts);
         if (resp.ok) return resp;
         last = resp;
-        if (resp.status >= 400 && resp.status < 500) break; // client error → don't hammer
+        if (resp.status >= 400 && resp.status < 500) break;
       } catch (e) { last = e; }
       await sleep(baseDelay * Math.pow(2, i));
     }
@@ -127,7 +122,6 @@
 
   // ---------- Chat Stream ----------
   async function chatStream(message, voice) {
-    if (!message || !message.trim()) throw new Error('empty_message');
     const resp = await fetchWithRetry('/api/chat-stream', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -163,31 +157,19 @@
     return finalText.trim();
   }
 
-  // ---------- Text Send ----------
-  async function handleSend() {
-    try {
-      unlockAudioOnce();
-      const text = inputEl?.value?.trim();
-      if (!text) return;
-      setStatus('thinking');
-      stopSpeaking();
-      const reply = await chatStream(text, getVoice());
-      setStatus('speaking');
-      await speakText(reply, getVoice());
-      setStatus('idle');
-    } catch (e) {
-      console.error('[SEND] error', e);
-      setStatus('idle');
-    }
+  // ---------- STT ----------
+  function toB64(buf) {
+    let bin = '', bytes = new Uint8Array(buf);
+    for (let i=0;i<bytes.length;i++) bin += String.fromCharCode(bytes[i]);
+    return btoa(bin);
   }
 
-  // ---------- PTT / STT ----------
+  // ---------- Mic (universal) ----------
   const TIMESLICE_MS     = 450;
   const RELEASE_TAIL_MS  = 420;
   const SILENCE_DB       = -48;
   const MAX_TAIL_MS      = 1200;
-  const MIN_SPEECH_MS    = 600;   // avoid tiny breaths
-  const SMALL_BLOB_MIN   = 2000;
+  const MIN_SPEECH_MS    = 600;
   const PCM_SAMPLE_RATE  = 16000;
 
   let mediaStream = null, mediaRecorder = null, chunks = [];
@@ -202,10 +184,13 @@
     if (MediaRecorder.isTypeSupported?.('audio/ogg')) return 'audio/ogg';
     return 'audio/webm';
   }
-  function toB64(buf) {
-    let bin = '', bytes = new Uint8Array(buf);
-    for (let i=0;i<bytes.length;i++) bin += String.fromCharCode(bytes[i]);
-    return btoa(bin);
+  async function getUserMediaStream() {
+    const base = { audio: { channelCount: 1, sampleRate: 48000, echoCancellation: true, noiseSuppression: true, autoGainControl: true } };
+    try { return await navigator.mediaDevices.getUserMedia(base); }
+    catch {
+      const alt = { audio: { channelCount: 1, sampleRate: 48000, echoCancellation: false, noiseSuppression: false, autoGainControl: true } };
+      return await navigator.mediaDevices.getUserMedia(alt);
+    }
   }
   function rmsDb(samples) {
     let sum = 0;
@@ -218,20 +203,34 @@
     return 20 * Math.log10(rms + 1e-6);
   }
 
-  async function getUserMediaStream() {
-    const base = { audio: { channelCount: 1, sampleRate: 48000, echoCancellation: true, noiseSuppression: true, autoGainControl: true } };
-    try { return await navigator.mediaDevices.getUserMedia(base); }
-    catch {
-      const alt = { audio: { channelCount: 1, sampleRate: 48000, echoCancellation: false, noiseSuppression: false, autoGainControl: true } };
-      return await navigator.mediaDevices.getUserMedia(alt);
-    }
-  }
-
   // WAV fallback
   let waScriptNode = null;
   let waBuffers = [];
   let waInputSampleRate = 48000;
 
+  async function startFallbackRecorder() {
+    const Ctx = window.AudioContext || window.webkitAudioContext;
+    if (!ac && Ctx) ac = new Ctx({ latencyHint: 'interactive' });
+    if (ac?.state === 'suspended') await ac.resume();
+
+    sourceNode = ac.createMediaStreamSource(mediaStream);
+    analyser = ac.createAnalyser(); analyser.fftSize = 1024; sourceNode.connect(analyser);
+
+    const bufferSize = 2048;
+    waScriptNode = ac.createScriptProcessor(bufferSize, 1, 1);
+    waBuffers = [];
+    waInputSampleRate = ac.sampleRate || 48000;
+
+    sourceNode.connect(waScriptNode);
+    waScriptNode.connect(ac.destination);
+    waScriptNode.onaudioprocess = (e) => {
+      const ch0 = e.inputBuffer.getChannelData(0);
+      waBuffers.push(new Float32Array(ch0));
+    };
+  }
+  function stopFallbackRecorder() {
+    try { waScriptNode && (waScriptNode.disconnect(), waScriptNode.onaudioprocess = null); } catch {}
+  }
   function encodeWavFromFloat32(buffers, inputRate, targetRate = PCM_SAMPLE_RATE) {
     let length = buffers.reduce((s, b) => s + b.length, 0);
     let merged = new Float32Array(length);
@@ -261,41 +260,12 @@
       let s = Math.max(-1, Math.min(1, down[i]));
       dv.setInt16(p, s < 0 ? s * 0x8000 : s * 0x7FFF, true); p += 2;
     }
-
     return new Blob([dv.buffer], { type: 'audio/wav' });
   }
 
-  async function startFallbackRecorder() {
-    if (!ac) {
-      const Ctx = window.AudioContext || window.webkitAudioContext;
-      ac = new Ctx({ latencyHint: 'interactive' });
-    }
-    if (ac?.state === 'suspended') await ac.resume();
-
-    sourceNode = ac.createMediaStreamSource(mediaStream);
-    analyser = ac.createAnalyser(); analyser.fftSize = 1024; sourceNode.connect(analyser);
-
-    const bufferSize = 2048;
-    waScriptNode = ac.createScriptProcessor(bufferSize, 1, 1);
-    waBuffers = [];
-    waInputSampleRate = ac.sampleRate || 48000;
-
-    sourceNode.connect(waScriptNode);
-    waScriptNode.connect(ac.destination);
-    waScriptNode.onaudioprocess = (e) => {
-      const ch0 = e.inputBuffer.getChannelData(0);
-      waBuffers.push(new Float32Array(ch0));
-    };
-  }
-  function stopFallbackRecorder() {
-    try { waScriptNode && (waScriptNode.disconnect(), waScriptNode.onaudioprocess = null); } catch {}
-  }
-
-  async function startMicCycle() {
+  async function startMic() {
     unlockAudioOnce();
-    stopSpeaking();
     setStatus('listening');
-
     chunks = [];
     startTimeMs = performance.now();
     mediaStream = await getUserMediaStream();
@@ -319,14 +289,19 @@
   }
 
   async function waitTail() {
+    if (!analyser) { await sleep(RELEASE_TAIL_MS); return; }
     const buf = new Uint8Array(256);
     const tailStart = performance.now();
     const minTailAt = tailStart + RELEASE_TAIL_MS;
 
     while (true) {
-      if (!analyser) break;
       analyser.getByteTimeDomainData(buf);
-      const db = rmsDb(buf);
+      const db = (() => {
+        let sum = 0;
+        for (let i=0;i<buf.length;i++) { const v = (buf[i]-128)/128; sum += v*v; }
+        const mean = sum / buf.length;
+        return 20*Math.log10(Math.sqrt(mean)+1e-6);
+      })();
       const now = performance.now();
       const passedMinTail = now >= minTailAt;
       const exceededMax   = now - tailStart >= MAX_TAIL_MS;
@@ -335,35 +310,7 @@
     }
   }
 
-  async function stopMicCycleAndProcess() {
-    try {
-      await waitTail();
-
-      if (startTimeMs && performance.now() - startTimeMs < MIN_SPEECH_MS) {
-        cleanupAudio();
-        setStatus('idle');
-        transcriptEl && (transcriptEl.textContent = '(no speech)');
-        return;
-      }
-
-      let blob;
-      if (mediaRecorder && mediaRecorder.state === 'recording') {
-        try { mediaRecorder.requestData?.(); } catch {}
-        await sleep(50);
-        if (!chunks.length) await sleep(100);
-        blob = chunks.length ? new Blob(chunks, { type: mediaRecorder?.mimeType || 'audio/webm' }) : null;
-      } else {
-        blob = encodeWavFromFloat32(waBuffers, waInputSampleRate, PCM_SAMPLE_RATE);
-      }
-      await processTranscriptFromBlob(blob);
-    } catch (e) {
-      console.warn('[mic] stop error', e);
-    } finally {
-      cleanupAudio();
-    }
-  }
-
-  function cleanupAudio() {
+  function cleanupMic() {
     try {
       mediaStream?.getTracks().forEach(t => t.stop());
       sourceNode && sourceNode.disconnect && sourceNode.disconnect();
@@ -373,168 +320,168 @@
     chunks = []; mediaRecorder = null; mediaStream = null; analyser = null; sourceNode = null;
   }
 
-  async function processTranscriptFromBlob(blob) {
-    if (!blob || blob.size < SMALL_BLOB_MIN) {
+  async function captureAndTranscribe() {
+    await waitTail();
+
+    if (startTimeMs && performance.now() - startTimeMs < MIN_SPEECH_MS) {
+      cleanupMic();
       transcriptEl && (transcriptEl.textContent = '(no speech)');
-      setStatus('idle'); return;
+      return '';
+    }
+
+    let blob;
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
+      try { mediaRecorder.requestData?.(); } catch {}
+      await sleep(60);
+      blob = chunks.length ? new Blob(chunks, { type: mediaRecorder?.mimeType || 'audio/webm' }) : null;
+    } else {
+      blob = encodeWavFromFloat32(waBuffers, waInputSampleRate, PCM_SAMPLE_RATE);
+    }
+
+    if (!blob || blob.size < 2000) {
+      cleanupMic();
+      transcriptEl && (transcriptEl.textContent = '(no speech)');
+      return '';
     }
 
     setStatus('transcribing');
-
-    const ab    = await blob.arrayBuffer();
-    const mime  = blob.type || 'audio/wav';
-    const b64   = toB64(ab);
-    const dataUrl = `data:${mime};base64,${b64}`;
+    const ab   = await blob.arrayBuffer();
+    const b64  = toB64(ab);
+    const mime = blob.type || 'audio/wav';
     const fileExt = mimeToExt(mime);
 
-    // STT with retry — include mime + fileExt
     let sttJson = {};
-    let ok = false, lastStatus = 0;
-
+    let ok = false;
     for (let i=0;i<2;i++) {
-      let resp;
+      let r;
       try {
-        resp = await fetch('/.netlify/functions/stt', {
+        r = await fetch('/.netlify/functions/stt', {
           method: 'POST',
           headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ audioBase64: dataUrl, mime, fileExt, language: 'en' }),
+          body: JSON.stringify({ audioBase64: `data:${mime};base64,${b64}`, mime, fileExt, language: 'en' }),
         });
-        lastStatus = resp.status;
-        if (resp.ok) { sttJson = await resp.json(); ok = true; break; }
+        if (r.ok) { sttJson = await r.json(); ok = true; break; }
+        if (r.status >= 400 && r.status < 500) break;
       } catch {}
-      if (lastStatus >= 400 && lastStatus < 500) break;
-      await sleep(250 * (i+1));
+      await sleep(300*(i+1));
     }
 
-    if (!ok) {
-      transcriptEl && (transcriptEl.textContent = '(stt failed)');
-      setStatus('idle'); bumpClientErr('stt'); return;
+    cleanupMic();
+    const transcript = ok ? (sttJson?.transcript || '').trim() : '';
+    transcriptEl && (transcriptEl.textContent = transcript || '(stt failed)');
+    return transcript;
+  }
+
+  // ---------- State machine ----------
+  // 'idle' → 'listening' → 'thinking' → 'speaking' → (audio ended) → 'listening'
+  let phase = 'idle';
+  let running = false;
+
+  async function nextTurn() {
+    if (!running) return;
+
+    // 1) listen
+    phase = 'listening';
+    setStatus('listening');
+    await startMic();
+    const transcript = await captureAndTranscribe();
+    if (!running) return;
+    if (!transcript) { // no speech → keep listening
+      await sleep(120);
+      return nextTurn();
     }
 
-    const transcript = (sttJson?.transcript || '').trim();
-    transcriptEl && (transcriptEl.textContent = transcript || '(no speech)');
-    if (!transcript) { setStatus('idle'); return; }
-
-    // Chat
+    // 2) think
+    phase = 'thinking';
     setStatus('thinking');
     let reply = '';
-    let chatStatus = 0;
     try {
-      const r = await fetch('/api/chat-stream', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ message: transcript, voice: getVoice(), sessionId, userId }),
-      });
-      chatStatus = r.status;
-      if (!r.ok || !r.body) {
-        const raw = await r.text().catch(()=> '');
-        console.error('[chat-stream] HTTP', chatStatus, 'raw=', raw);
-        throw new Error(`chat_stream_failed_${chatStatus}`);
-      }
-      const reader = r.body.getReader();
-      const dec = new TextDecoder();
-      clear(replyEl);
-      let final = '';
-      while (true) {
-        const { value, done } = await reader.read();
-        if (done) break;
-        const chunk = dec.decode(value, { stream: true });
-        for (const line of chunk.split(/\r?\n/)) {
-          if (!line.startsWith('data:')) continue;
-          const data = line.slice(5).trim();
-          if (!data || data === '[DONE]') continue;
-          try {
-            const j = JSON.parse(data);
-            const d = j.choices?.[0]?.delta?.content || j.delta || j.content || j.text || '';
-            if (d) { final += d; append(replyEl, d); }
-          } catch { final += data; append(replyEl, data); }
-        }
-      }
-      reply = final.trim();
+      reply = await chatStream(transcript, getVoice());
     } catch (e) {
       console.error('[chat] error', e);
-      setStatus('idle'); bumpClientErr('chat'); return;
-    }
-
-    if (!reply) { setStatus('idle'); return; }
-
-    // Speak
-    setStatus('speaking');
-    await speakText(reply, getVoice());
-    setStatus('idle');
-    resetClientErr();
-  }
-
-  // ---------- Continuous Mode (with anti-loop) ----------
-  let autoMode = false;
-  let loopInFlight = false;
-
-  let clientErrSTT = 0;
-  let clientErrCHAT = 0;
-  const MAX_CLIENT_ERR = 2;
-
-  function resetClientErr() { clientErrSTT = 0; clientErrCHAT = 0; }
-  function bumpClientErr(kind) {
-    if (kind === 'stt') clientErrSTT++;
-    if (kind === 'chat') clientErrCHAT++;
-    if ((clientErrSTT >= MAX_CLIENT_ERR) || (clientErrCHAT >= MAX_CLIENT_ERR)) {
-      autoMode = false;
-      loopBtn && (loopBtn.textContent = 'Start chat');
+      phase = 'idle';
       setStatus('idle');
-      console.warn('[autoLoop] stopped after repeated client 4xx errors');
+      return;
     }
-  }
 
-  async function autoLoop() {
-    if (loopInFlight || !autoMode) return;
-    loopInFlight = true;
-    try {
-      await startMicCycle();
-      await waitTail();
-      await stopMicCycleAndProcess();
-    } catch (e) {
-      console.warn('[autoLoop]', e);
-    } finally {
-      loopInFlight = false;
-      if (autoMode) setTimeout(autoLoop, 140);
-    }
-  }
+    if (!running) return;
 
-  // ---------- Wire UI ----------
-  sendBtn?.addEventListener('click', handleSend);
+    // 3) speak, then resume listening only after audio ends
+    const voice = getVoice();
+    const useTTS = !!voice && voice !== 'default' && voice !== '(default / no TTS)';
 
-  loopBtn.textContent = 'Start chat';
-  loopBtn.addEventListener('click', () => {
-    unlockAudioOnce();
-    if (!autoMode) {
-      autoMode = true;
-      resetClientErr();
-      loopBtn.textContent = 'Stop chat';
-      setStatus('listening');
-      autoLoop();
-    } else {
-      autoMode = false;
-      loopBtn.textContent = 'Start chat';
-      setStatus('idle');
-      cleanupAudio();
+    if (useTTS) {
+      phase = 'speaking';
+      setStatus('speaking');
       stopSpeaking();
+      const ended = new Promise(res => {
+        const onend = () => { player.removeEventListener('ended', onend); res(); };
+        player.addEventListener('ended', onend, { once: true });
+      });
+      await speakText(reply, voice);
+      await ended;                        // ← wait until the audio fully finishes
+      if (!running) return;
+      await sleep(120);                   // small gap so the mic doesn’t catch the player tail
+      return nextTurn();
+    } else {
+      // No TTS → show text and immediately listen again
+      phase = 'idle';
+      setStatus('idle');
+      await sleep(120);
+      return nextTurn();
     }
-  });
+  }
 
+  // ---------- UI ----------
+  async function handleSend() {
+    try {
+      unlockAudioOnce();
+      const text = inputEl?.value?.trim();
+      if (!text) return;
+      setStatus('thinking');
+      stopSpeaking();
+      const reply = await chatStream(text, getVoice());
+      setStatus('speaking');
+      await speakText(reply, getVoice());
+      setStatus('idle');
+    } catch (e) {
+      console.error('[SEND] error', e);
+      setStatus('idle');
+    }
+  }
+
+  sendBtn?.addEventListener('click', handleSend);
   inputEl?.addEventListener('keydown', (e) => {
     if (e.key === 'Enter' && !e.shiftKey) { e.preventDefault(); handleSend(); }
   });
 
+  chatBtn.addEventListener('click', () => {
+    unlockAudioOnce();
+    if (!running) {
+      running = true;
+      chatBtn.textContent = 'Stop chat';
+      nextTurn();             // kick off the first turn
+    } else {
+      running = false;
+      chatBtn.textContent = 'Start chat';
+      phase = 'idle';
+      setStatus('idle');
+      stopSpeaking();
+      cleanupMic();
+    }
+  });
+
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) {
-      try { stopSpeaking(); } catch {}
-      autoMode = false;
-      loopBtn && (loopBtn.textContent = 'Start chat');
-      cleanupAudio();
+      running = false;
+      chatBtn.textContent = 'Start chat';
+      phase = 'idle';
       setStatus('idle');
+      stopSpeaking();
+      cleanupMic();
     }
   });
 
   setStatus('idle');
-  console.log('[Keilani] chat.js ready (Single-button voice + userId + session)', { sessionId, userId });
+  console.log('[Keilani] chat.js ready (Turn-based voice + userId + session)', { sessionId, userId });
 })();
