@@ -1,18 +1,10 @@
-// CHAT.JS BUILD TAG → 2025-09-19T10:45-0700
+// CHAT.JS BUILD TAG → 2025-09-19T12:05-0700
+// Minimal round-trip: microphone → STT → TTS echo. No memory calls.
 
 (() => {
   const API_ORIGIN = location.origin; // same origin (api.keilani.ai)
-
-  // --- Core endpoints ---
-  const STT_URL    = `${API_ORIGIN}/.netlify/functions/stt`;
-  const TTS_URL    = `${API_ORIGIN}/.netlify/functions/tts`;
-
-  // --- Memory endpoints (server-side functions) ---
-  // Primary: direct functions path; Fallback: pretty /api/* if you added redirects in netlify.toml
-  const MEM_SEARCH = `${API_ORIGIN}/.netlify/functions/memory-search`;
-  const MEM_UPSERT = `${API_ORIGIN}/.netlify/functions/memory-upsert`;
-  const MEM_SEARCH_FALLBACK = `${API_ORIGIN}/api/memory/search`;
-  const MEM_UPSERT_FALLBACK = `${API_ORIGIN}/api/memory/upsert`;
+  const STT_URL = `${API_ORIGIN}/.netlify/functions/stt`;
+  const TTS_URL = `${API_ORIGIN}/.netlify/functions/tts`;
 
   // ===== UI logger =====
   const logEl = document.getElementById('log');
@@ -25,42 +17,12 @@
     }
   };
 
-  // ===== User identity for memory =====
-  const urlUid = new URLSearchParams(location.search).get('uid');
-  const LS_KEY = 'keilani_user_id';
-  function uuidv4() {
-    const a = crypto.getRandomValues(new Uint8Array(16));
-    a[6] = (a[6] & 0x0f) | 0x40; // v4
-    a[8] = (a[8] & 0x3f) | 0x80; // variant
-    const h = [...a].map(b => b.toString(16).padStart(2, '0')).join('');
-    return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;
-  }
-  let user_id =
-    (urlUid && urlUid.trim()) ||
-    localStorage.getItem(LS_KEY) ||
-    'global'; // demo default
-
-  // To persist a per-browser ID instead of 'global', uncomment:
-  // if (!urlUid && !localStorage.getItem(LS_KEY)) {
-  //   user_id = uuidv4();
-  //   localStorage.setItem(LS_KEY, user_id);
-  // }
-  log('user_id ⇒', user_id);
-
   // ===== Recorder state =====
   let mediaRecorder = null;
   let mediaStream = null;
   let chunks = [];
   let autoStopTimer = null;
-  const AUTO_STOP_MS = 6000; // auto-stop so onstop always fires during tests
-
-  // ===== Memory feature flag (auto-disables on server 500/config errors) =====
-  let memoryEnabled = true;
-  function disableMemory(reason) {
-    if (!memoryEnabled) return;
-    memoryEnabled = false;
-    log('MEMORY DISABLED for this session →', reason || 'unknown');
-  }
+  const AUTO_STOP_MS = 6000; // auto-stop after 6s so onstop always fires during tests
 
   // ===== Helpers =====
   function blobToBase64Raw(blob) {
@@ -98,10 +60,8 @@
     try { data = await res.json(); } catch {}
     log('STT status', res.status, data);
 
-    if (!res.ok) {
-      throw new Error(`STT ${res.status}: ${JSON.stringify(data)}`);
-    }
-    return data;
+    if (!res.ok) throw new Error(`STT ${res.status}: ${JSON.stringify(data)}`);
+    return data; // { transcript, meta }
   }
 
   async function speak(text, opts = {}) {
@@ -134,91 +94,6 @@
     log('TTS played', blob.size, 'bytes');
   }
 
-  // ===== Memory helpers =====
-  async function postJsonWithFallback(primaryUrl, fallbackUrl, payload) {
-    const doPost = async (url) => {
-      const r = await fetch(url, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-      let j = null;
-      try { j = await r.json(); } catch { j = null; }
-      return { r, j };
-    };
-
-    // Primary
-    let { r, j } = await doPost(primaryUrl);
-    if (r.status === 404 && fallbackUrl) {
-      // try pretty /api/* route if functions path not found
-      ({ r, j } = await doPost(fallbackUrl));
-    }
-    return { status: r.status, data: j };
-  }
-
-  async function memorySearch(query, limit = 6) {
-    if (!memoryEnabled) return [];
-    try {
-      const { status, data } = await postJsonWithFallback(
-        MEM_SEARCH, MEM_SEARCH_FALLBACK, { user_id, query, limit }
-      );
-      log('MEM search status', status, data);
-      if (status >= 500) {
-        if (data?.error?.includes?.('missing_supabase_env') || data?.error === 'missing_supabase_env') {
-          disableMemory('server missing Supabase env');
-        } else {
-          disableMemory(`server ${status}`);
-        }
-        return [];
-      }
-      if (status >= 400) {
-        log('MEM search client error; leaving memory enabled');
-        return [];
-      }
-      return data?.matches || [];
-    } catch (e) {
-      log('MEM search failed:', e.message || String(e));
-      disableMemory('fetch exception');
-      return [];
-    }
-  }
-
-  function shouldStoreMemory(text) {
-    if (!text) return false;
-    const t = text.toLowerCase().trim();
-    if (t.length < 12) return false;
-    if (t.startsWith('remember ') || t.startsWith('note ') || t.startsWith('save ')) return true;
-    if (t.includes('my name is ') || t.includes('i prefer ') || t.includes('i like ') || t.includes('timezone')) return true;
-    return false;
-  }
-
-  async function memoryUpsert(content) {
-    if (!memoryEnabled) return null;
-    try {
-      const { status, data } = await postJsonWithFallback(
-        MEM_UPSERT, MEM_UPSERT_FALLBACK, { user_id, content }
-      );
-      log('MEM upsert status', status, data);
-      if (status >= 500) {
-        if (data?.error?.includes?.('missing_supabase_env') || data?.error === 'missing_supabase_env') {
-          disableMemory('server missing Supabase env');
-        } else {
-          disableMemory(`server ${status}`);
-        }
-        return null;
-      }
-      if (status >= 400) {
-        log('MEM upsert client error; leaving memory enabled');
-        return null;
-      }
-      return data;
-    } catch (e) {
-      log('MEM upsert failed:', e.message || String(e));
-      disableMemory('fetch exception');
-      return null;
-    }
-  }
-
   function clearAutoStop() {
     if (autoStopTimer) {
       clearTimeout(autoStopTimer);
@@ -235,16 +110,6 @@
 
   // ===== Recording controls =====
   async function startRecording() {
-    // Best-effort recall (safe even if memory disabled)
-    const recall = await memorySearch('recent preferences or profile');
-    if (recall?.length) {
-      const bullets = recall.map(m => `• ${m.content} (sim ${(m.similarity || 0).toFixed(2)})`).join('\n');
-      log('Relevant memories:\n' + bullets);
-    } else {
-      log('No relevant memories found for this user.');
-    }
-
-    // Prevent overlapping sessions
     if (mediaRecorder && mediaRecorder.state === 'recording') {
       log('already recording; ignoring start');
       return;
@@ -286,34 +151,21 @@
         }
 
         try {
-          // 1) Transcribe audio
+          // (1) Transcribe
           const r = await sttUploadBlob(blob);
           const transcript = (r?.transcript || '').trim();
-          log('TRANSCRIPT:', transcript);
+          log('TRANSCRIPT:', transcript || '<empty>');
 
-          // 2) Recall with this transcript
+          // (2) Speak back immediately (keeps her talking)
           if (transcript) {
-            const matches = await memorySearch(transcript, 6);
-            if (matches?.length) {
-              const bullets = matches.map(m => `• ${m.content} (sim ${(m.similarity || 0).toFixed(2)})`).join('\n');
-              log('Recall for this turn:\n' + bullets);
-            }
-          }
-
-          // 3) Conditionally store
-          if (shouldStoreMemory(transcript)) {
-            log('Storing memory from transcript…');
-            await memoryUpsert(transcript);
+            await speak(transcript);
           } else {
-            log('Transcript not considered a memory (heuristic).');
+            await speak("I didn't catch that—try again?");
           }
-
-          // 4) Optional echo
-          // await speak(`You said: ${transcript}`);
-
         } catch (err) {
           console.error(err);
-          log('STT or Memory error', String(err && err.message || err));
+          log('STT/TTS error', String(err && err.message || err));
+          try { await speak("I hit a snag processing that audio."); } catch {}
         } finally {
           mediaRecorder = null;
           chunks = [];
