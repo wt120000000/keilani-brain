@@ -1,11 +1,9 @@
-// CHAT.JS BUILD TAG → 2025-09-19T14:05-0700
-// Hands-free loop: mic → STT → /functions/chat (messages array) → TTS → loop
+// CHAT.JS BUILD TAG → 2025-09-19T12:45-0700
 
 (() => {
-  const API_ORIGIN = location.origin;
-
-  const STT_URL  = `${API_ORIGIN}/.netlify/functions/stt`;
-  const TTS_URL  = `${API_ORIGIN}/.netlify/functions/tts`;
+  const API_ORIGIN = location.origin; // same origin (api.keilani.ai)
+  const STT_URL = `${API_ORIGIN}/.netlify/functions/stt`;
+  const TTS_URL = `${API_ORIGIN}/.netlify/functions/tts`;
   const CHAT_URL = `${API_ORIGIN}/.netlify/functions/chat`;
 
   // ===== UI logger =====
@@ -19,29 +17,15 @@
     }
   };
 
-  // ===== Conversation state =====
-  const STATE = { IDLE:'idle', RECORDING:'recording', THINKING:'thinking', SPEAKING:'speaking' };
-  let convoState = STATE.IDLE;
-  let handsFree = false;
-
   // ===== Recorder state =====
   let mediaRecorder = null;
   let mediaStream = null;
   let chunks = [];
   let autoStopTimer = null;
   const AUTO_STOP_MS = 6000;
-
-  // ===== Identity =====
-  const urlUid = new URLSearchParams(location.search).get('uid');
-  const LS_KEY = 'keilani_user_id';
-  let user_id = (urlUid && urlUid.trim()) || localStorage.getItem(LS_KEY) || 'global';
-  log('user_id ⇒', user_id);
+  const USER_ID = "global"; // TODO: replace with real user/session
 
   // ===== Helpers =====
-  function setState(s) { if (convoState !== s) { log(`state: ${convoState} → ${s}`); convoState = s; } }
-  function clearAutoStop() { if (autoStopTimer) { clearTimeout(autoStopTimer); autoStopTimer = null; } }
-  function stopTracks() { try { mediaStream?.getTracks()?.forEach(t => t.stop()); } catch {} mediaStream = null; }
-
   function blobToBase64Raw(blob) {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -65,10 +49,11 @@
       simpleMime.includes('m4a') || simpleMime.includes('mp4') ? 'audio.m4a' :
       simpleMime.includes('wav')  ? 'audio.wav'  : 'audio.bin';
 
+    const body = { audioBase64: base64, language: 'en', mime: simpleMime, filename };
     const res = await fetch(STT_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ audioBase64: base64, language: 'en', mime: simpleMime, filename })
+      body: JSON.stringify(body)
     });
 
     let data = null;
@@ -104,56 +89,51 @@
     const blob = new Blob([buf], { type: 'audio/mpeg' });
     const url = URL.createObjectURL(blob);
     const audio = new Audio(url);
-
-    await new Promise((resolve, reject) => {
-      audio.onended = () => { URL.revokeObjectURL(url); resolve(); };
-      audio.onerror = (e) => { URL.revokeObjectURL(url); reject(e); };
-      audio.play().catch(reject);
-    });
-
+    audio.onended = () => URL.revokeObjectURL(url);
+    await audio.play();
     log('TTS played', blob.size, 'bytes');
   }
 
-  // -------- Chat glue (only messages array) --------
-  async function askLLM(userMessage) {
+  async function askLLM(transcript) {
     const payload = {
-      user_id,
-      messages: [
-        { role: 'system', content: 'You are Keilani. Be kind, concise, and practical.' },
-        { role: 'user', content: userMessage }
-      ]
+      user_id: USER_ID,
+      message: transcript
     };
 
-    const r = await fetch(CHAT_URL, {
+    const res = await fetch(CHAT_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(payload)
     });
 
-    const j = await r.json().catch(() => ({}));
-    log('CHAT status', r.status, j);
+    let data = null;
+    try { data = await res.json(); } catch {}
+    log('CHAT status', res.status, data);
 
-    if (!r.ok) throw new Error(j?.error || `chat ${r.status}`);
-
-    const text =
-      j?.reply ||
-      j?.message ||
-      j?.choices?.[0]?.message?.content ||
-      j?.text || '';
-
-    return (text || "I'm here and listening.").trim();
+    if (!res.ok) throw new Error(`CHAT ${res.status}: ${JSON.stringify(data)}`);
+    if (data.reply) {
+      await speak(data.reply);
+    }
   }
 
-  // ===== Main loop =====
-  async function startConversation() {
-    if (!handsFree) handsFree = true;
-    if (convoState !== STATE.IDLE) { log('loop already running'); return; }
-    loopOnce();
+  function clearAutoStop() {
+    if (autoStopTimer) {
+      clearTimeout(autoStopTimer);
+      autoStopTimer = null;
+    }
   }
 
-  async function loopOnce() {
-    if (!handsFree) { setState(STATE.IDLE); return; }
-    setState(STATE.RECORDING);
+  function stopTracks() {
+    try { mediaStream?.getTracks()?.forEach(t => t.stop()); } catch {}
+    mediaStream = null;
+  }
+
+  // ===== Recording controls =====
+  async function startRecording() {
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
+      log('already recording; ignoring start');
+      return;
+    }
 
     try {
       mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -161,77 +141,97 @@
         ? 'audio/webm;codecs=opus'
         : 'audio/ogg;codecs=opus';
 
-      chunks = [];
       mediaRecorder = new MediaRecorder(mediaStream, { mimeType: preferredMime });
+      chunks = [];
 
-      const finished = new Promise((resolve) => {
-        mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
-        mediaRecorder.onstop = () => {
-          clearAutoStop();
-          const blob = new Blob(chunks, { type: preferredMime });
-          log('final blob', blob.type, blob.size, 'bytes');
-          stopTracks();
-          resolve(blob);
-        };
-      });
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data && e.data.size) {
+          chunks.push(e.data);
+          log('chunk', e.data.type, e.data.size, 'bytes');
+        }
+      };
+
+      mediaRecorder.onerror = (e) => {
+        console.error('[CHAT] recorder error', e);
+        log('recorder error', String(e?.error || e?.name || e));
+      };
+
+      mediaRecorder.onstop = async () => {
+        clearAutoStop();
+        const blob = new Blob(chunks, { type: preferredMime });
+        log('final blob', blob.type, blob.size, 'bytes');
+
+        stopTracks();
+
+        if (blob.size < 8192) {
+          log('too small; record a bit longer before stopping.');
+          mediaRecorder = null;
+          return;
+        }
+
+        try {
+          const r = await sttUploadBlob(blob);
+          log('TRANSCRIPT:', r.transcript);
+
+          // 🔗 Hook into chat function here
+          await askLLM(r.transcript);
+
+        } catch (err) {
+          console.error(err);
+          log('STT/CHAT failed', String(err && err.message || err));
+        } finally {
+          mediaRecorder = null;
+          chunks = [];
+        }
+      };
 
       mediaRecorder.start();
       log('recording started with', preferredMime);
 
       clearAutoStop();
       autoStopTimer = setTimeout(() => {
-        if (mediaRecorder && mediaRecorder.state === 'recording') { mediaRecorder.stop(); log('recording stopped (auto)'); }
+        if (mediaRecorder && mediaRecorder.state === 'recording') {
+          log('auto-stop timer fired');
+          mediaRecorder.stop();
+          log('recording stopped (auto)');
+        }
       }, AUTO_STOP_MS);
-
-      const blob = await finished;
-      mediaRecorder = null;
-      chunks = [];
-
-      if (!blob || blob.size < 4096) { setState(STATE.IDLE); return loopOnce(); }
-
-      // STT
-      setState(STATE.THINKING);
-      const stt = await sttUploadBlob(blob);
-      const transcript = (stt?.transcript || '').trim();
-      log('TRANSCRIPT:', transcript || '<empty>');
-      if (!transcript) { setState(STATE.IDLE); return loopOnce(); }
-
-      // Chat
-      const reply = await askLLM(transcript);
-      log('REPLY:', reply);
-
-      // TTS
-      setState(STATE.SPEAKING);
-      await speak(reply);
-
-      setState(STATE.IDLE);
-      if (handsFree) return loopOnce();
 
     } catch (err) {
       console.error(err);
-      log('loop error', String(err?.message || err));
-      stopTracks(); clearAutoStop();
-      mediaRecorder = null; chunks = [];
-      setState(STATE.IDLE);
-      if (handsFree) return loopOnce();
+      log('mic error', String(err && err.message || err));
+      stopTracks();
+      mediaRecorder = null;
+      chunks = [];
+      clearAutoStop();
     }
   }
 
-  function stopConversation() {
-    handsFree = false; clearAutoStop();
-    try { if (mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.stop(); } catch {}
-    stopTracks(); mediaRecorder = null; chunks = [];
-    setState(STATE.IDLE); log('hands-free loop stopped');
+  function stopRecording() {
+    if (mediaRecorder && mediaRecorder.state === 'recording') {
+      mediaRecorder.stop();
+      log('recording stopped (manual)');
+      return;
+    }
+    log('stop clicked but no active recorder');
   }
 
   // ===== Wire UI =====
   document.addEventListener('DOMContentLoaded', () => {
     log('DOMContentLoaded; wiring handlers');
-    document.querySelector('#recordBtn')?.addEventListener('click', () => { log('start conversation click'); startConversation(); });
-    document.querySelector('#stopBtn')?.addEventListener('click', () => { log('stop conversation click'); stopConversation(); });
-    document.querySelector('#sayBtn')?.addEventListener('click', () => { log('tts click'); speak('Hey—Keilani is ready.'); });
+    const recBtn  = document.querySelector('#recordBtn');
+    const stopBtn = document.querySelector('#stopBtn');
+    const ttsBtn  = document.querySelector('#sayBtn');
+    const convBtn = document.querySelector('#convBtn'); // optional "Start Conversation"
+
+    recBtn?.addEventListener('click', () => { log('record click'); startRecording(); });
+    stopBtn?.addEventListener('click', () => { log('stop click'); stopRecording(); });
+    ttsBtn?.addEventListener('click', () => { log('tts click'); speak('Hey—Keilani TTS is live.'); });
+    convBtn?.addEventListener('click', () => { log('start conversation click'); startRecording(); });
   });
 
-  window.startConversation = startConversation;
-  window.stopConversation  = stopConversation;
+  // expose for console
+  window.startRecording = startRecording;
+  window.stopRecording  = stopRecording;
+  window.speak          = speak;
 })();
