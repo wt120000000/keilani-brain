@@ -1,9 +1,15 @@
-// CHAT.JS BUILD TAG → 2025-09-18T09:22-0700
+// CHAT.JS BUILD TAG → 2025-09-19T09:55-0700
 
 (() => {
   const API_ORIGIN = location.origin; // same origin (api.keilani.ai)
-  const STT_URL = `${API_ORIGIN}/.netlify/functions/stt`;
-  const TTS_URL = `${API_ORIGIN}/.netlify/functions/tts`;
+
+  // --- Core endpoints ---
+  const STT_URL    = `${API_ORIGIN}/.netlify/functions/stt`;
+  const TTS_URL    = `${API_ORIGIN}/.netlify/functions/tts`;
+
+  // --- Memory endpoints (from #3) ---
+  const MEM_SEARCH = `${API_ORIGIN}/.netlify/functions/memory-search`;
+  const MEM_UPSERT = `${API_ORIGIN}/.netlify/functions/memory-upsert`;
 
   // ===== UI logger =====
   const logEl = document.getElementById('log');
@@ -15,6 +21,30 @@
       logEl.scrollTop = logEl.scrollHeight;
     }
   };
+
+  // ===== User identity for memory =====
+  const urlUid = new URLSearchParams(location.search).get('uid');
+  const LS_KEY = 'keilani_user_id';
+  function uuidv4() {
+    // RFC4122-ish using crypto
+    const a = crypto.getRandomValues(new Uint8Array(16));
+    a[6] = (a[6] & 0x0f) | 0x40; // version 4
+    a[8] = (a[8] & 0x3f) | 0x80; // variant
+    const h = [...a].map(b => b.toString(16).padStart(2, '0')).join('');
+    return `${h.slice(0,8)}-${h.slice(8,12)}-${h.slice(12,16)}-${h.slice(16,20)}-${h.slice(20)}`;
+  }
+  let user_id =
+    (urlUid && urlUid.trim()) ||
+    localStorage.getItem(LS_KEY) ||
+    'global'; // fallback for demos
+
+  if (!urlUid && !localStorage.getItem(LS_KEY)) {
+    // if you prefer per-browser identity instead of 'global', uncomment:
+    // user_id = uuidv4();
+    // localStorage.setItem(LS_KEY, user_id);
+  }
+
+  log('user_id ⇒', user_id);
 
   // ===== Recorder state =====
   let mediaRecorder = null;
@@ -100,6 +130,51 @@
     log('TTS played', blob.size, 'bytes');
   }
 
+  // ===== Memory helpers =====
+  async function memorySearch(query, limit = 6) {
+    try {
+      const res = await fetch(MEM_SEARCH, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id, query, limit })
+      });
+      const data = await res.json().catch(() => ({}));
+      log('MEM search status', res.status, data);
+      if (!res.ok) throw new Error(data?.error || `search ${res.status}`);
+      return data?.matches || [];
+    } catch (e) {
+      log('MEM search failed:', e.message || String(e));
+      return [];
+    }
+  }
+
+  // Very simple “should we store this?” heuristic for demo purposes.
+  function shouldStoreMemory(text) {
+    if (!text) return false;
+    const t = text.toLowerCase().trim();
+    if (t.length < 12) return false; // too short
+    if (t.startsWith('remember ') || t.startsWith('note ') || t.startsWith('save ')) return true;
+    if (t.includes("my name is ") || t.includes("i prefer ") || t.includes("i like ") || t.includes("timezone")) return true;
+    return false;
+  }
+
+  async function memoryUpsert(content) {
+    try {
+      const res = await fetch(MEM_UPSERT, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ user_id, content })
+      });
+      const data = await res.json().catch(() => ({}));
+      log('MEM upsert status', res.status, data);
+      if (!res.ok) throw new Error(data?.error || `upsert ${res.status}`);
+      return data;
+    } catch (e) {
+      log('MEM upsert failed:', e.message || String(e));
+      return null;
+    }
+  }
+
   function clearAutoStop() {
     if (autoStopTimer) {
       clearTimeout(autoStopTimer);
@@ -116,6 +191,16 @@
 
   // ===== Recording controls =====
   async function startRecording() {
+    // Before a new turn: try recalling context from memory for the *last* text input (if any)
+    // You could hook this to a text box; for now we recall on start with a generic probe.
+    const recall = await memorySearch('recent preferences or profile');
+    if (recall.length) {
+      const bullets = recall.map(m => `• ${m.content} (sim ${(m.similarity || 0).toFixed(2)})`).join('\n');
+      log('Relevant memories:\n' + bullets);
+    } else {
+      log('No relevant memories found for this user.');
+    }
+
     // Prevent overlapping sessions
     if (mediaRecorder && mediaRecorder.state === 'recording') {
       log('already recording; ignoring start');
@@ -158,13 +243,34 @@
         }
 
         try {
+          // 1) Transcribe audio
           const r = await sttUploadBlob(blob);
-          log('TRANSCRIPT:', r.transcript);
-          // optional echo:
-          // await speak(r.transcript || 'Transcription complete.');
+          const transcript = (r?.transcript || '').trim();
+          log('TRANSCRIPT:', transcript);
+
+          // 2) Search for related memories using the transcript as the query
+          if (transcript) {
+            const matches = await memorySearch(transcript, 6);
+            if (matches.length) {
+              const bullets = matches.map(m => `• ${m.content} (sim ${(m.similarity || 0).toFixed(2)})`).join('\n');
+              log('Recall for this turn:\n' + bullets);
+            }
+          }
+
+          // 3) Conditionally store a memory from this transcript (demo heuristic)
+          if (shouldStoreMemory(transcript)) {
+            log('Storing memory from transcript…');
+            await memoryUpsert(transcript);
+          } else {
+            log('Transcript not considered a memory (heuristic).');
+          }
+
+          // 4) (Optional) echo TTS so you can hear the end-to-end loop
+          // await speak(`You said: ${transcript}`);
+
         } catch (err) {
           console.error(err);
-          log('STT failed', String(err && err.message || err));
+          log('STT or Memory error', String(err && err.message || err));
         } finally {
           mediaRecorder = null;
           chunks = [];
