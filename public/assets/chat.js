@@ -1,16 +1,12 @@
-// CHAT.JS BUILD TAG → 2025-09-19T12:45-0700
-// Hands-free loop: mic → STT → LLM (/functions/chat) → TTS → mic…
-// Minimal dependencies: /.netlify/functions/stt, /tts, /chat
+// CHAT.JS BUILD TAG → 2025-09-19T14:05-0700
+// Hands-free loop: mic → STT → /functions/chat (messages array) → TTS → loop
 
 (() => {
-  const API_ORIGIN = location.origin; // same origin (api.keilani.ai)
+  const API_ORIGIN = location.origin;
 
-  // --- Endpoints ---
   const STT_URL  = `${API_ORIGIN}/.netlify/functions/stt`;
   const TTS_URL  = `${API_ORIGIN}/.netlify/functions/tts`;
-  const CHAT_URL = `${API_ORIGIN}/.netlify/functions/chat`;        // <= non-streaming JSON reply
-  // If you prefer pretty redirects in netlify.toml, add fallbacks:
-  const CHAT_URL_FALLBACK = `${API_ORIGIN}/api/chat`;
+  const CHAT_URL = `${API_ORIGIN}/.netlify/functions/chat`;
 
   // ===== UI logger =====
   const logEl = document.getElementById('log');
@@ -24,35 +20,27 @@
   };
 
   // ===== Conversation state =====
-  const STATE = {
-    IDLE:      'idle',
-    RECORDING: 'recording',
-    THINKING:  'thinking',
-    SPEAKING:  'speaking',
-  };
+  const STATE = { IDLE:'idle', RECORDING:'recording', THINKING:'thinking', SPEAKING:'speaking' };
   let convoState = STATE.IDLE;
-  let handsFree = false; // toggled by Start/Stop buttons
+  let handsFree = false;
 
   // ===== Recorder state =====
   let mediaRecorder = null;
   let mediaStream = null;
   let chunks = [];
   let autoStopTimer = null;
-  const AUTO_STOP_MS = 6000; // chunk window; can raise to 8–10s later
+  const AUTO_STOP_MS = 6000;
 
-  // ===== Identity (optional) =====
+  // ===== Identity =====
   const urlUid = new URLSearchParams(location.search).get('uid');
   const LS_KEY = 'keilani_user_id';
   let user_id = (urlUid && urlUid.trim()) || localStorage.getItem(LS_KEY) || 'global';
   log('user_id ⇒', user_id);
 
   // ===== Helpers =====
-  function setState(s) {
-    if (convoState !== s) {
-      log(`state: ${convoState} → ${s}`);
-      convoState = s;
-    }
-  }
+  function setState(s) { if (convoState !== s) { log(`state: ${convoState} → ${s}`); convoState = s; } }
+  function clearAutoStop() { if (autoStopTimer) { clearTimeout(autoStopTimer); autoStopTimer = null; } }
+  function stopTracks() { try { mediaStream?.getTracks()?.forEach(t => t.stop()); } catch {} mediaStream = null; }
 
   function blobToBase64Raw(blob) {
     return new Promise((resolve, reject) => {
@@ -88,10 +76,9 @@
     log('STT status', res.status, data);
 
     if (!res.ok) throw new Error(`STT ${res.status}: ${JSON.stringify(data)}`);
-    return data; // { transcript, meta }
+    return data;
   }
 
-  // Await until playback ENDS (not just starts)
   async function speak(text, opts = {}) {
     const payload = {
       text: String(text || 'Hello, Keilani here.'),
@@ -118,7 +105,6 @@
     const url = URL.createObjectURL(blob);
     const audio = new Audio(url);
 
-    // Promise resolves when audio ENDS
     await new Promise((resolve, reject) => {
       audio.onended = () => { URL.revokeObjectURL(url); resolve(); };
       audio.onerror = (e) => { URL.revokeObjectURL(url); reject(e); };
@@ -128,75 +114,47 @@
     log('TTS played', blob.size, 'bytes');
   }
 
-  async function askLLM(message) {
-    // Try direct function, then pretty route fallback
-    let res = await fetch(CHAT_URL, {
+  // -------- Chat glue (only messages array) --------
+  async function askLLM(userMessage) {
+    const payload = {
+      user_id,
+      messages: [
+        { role: 'system', content: 'You are Keilani. Be kind, concise, and practical.' },
+        { role: 'user', content: userMessage }
+      ]
+    };
+
+    const r = await fetch(CHAT_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({
-        user_id,
-        messages: [
-          { role: 'system', content: 'You are Keilani. Be kind, concise, and practical.' },
-          { role: 'user', content: message }
-        ]
-      })
+      body: JSON.stringify(payload)
     });
-    if (res.status === 404) {
-      res = await fetch(CHAT_URL_FALLBACK, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          user_id,
-          messages: [
-            { role: 'system', content: 'You are Keilani. Be kind, concise, and practical.' },
-            { role: 'user', content: message }
-          ]
-        })
-      });
-    }
 
-    const data = await res.json().catch(() => ({}));
-    log('CHAT status', res.status, data);
+    const j = await r.json().catch(() => ({}));
+    log('CHAT status', r.status, j);
 
-    if (!res.ok) throw new Error(data?.error || `chat ${res.status}`);
-    // Accept a few common response shapes
+    if (!r.ok) throw new Error(j?.error || `chat ${r.status}`);
+
     const text =
-      data?.reply ||
-      data?.message ||
-      data?.choices?.[0]?.message?.content ||
-      data?.text ||
-      '';
-    return (text || '').trim();
+      j?.reply ||
+      j?.message ||
+      j?.choices?.[0]?.message?.content ||
+      j?.text || '';
+
+    return (text || "I'm here and listening.").trim();
   }
 
-  function clearAutoStop() {
-    if (autoStopTimer) {
-      clearTimeout(autoStopTimer);
-      autoStopTimer = null;
-    }
-  }
-
-  function stopTracks() {
-    try { mediaStream?.getTracks()?.forEach(t => t.stop()); } catch {}
-    mediaStream = null;
-  }
-
-  // ===== Main loop pieces =====
-  async function startRecording() {
+  // ===== Main loop =====
+  async function startConversation() {
     if (!handsFree) handsFree = true;
-    if (convoState !== STATE.IDLE) {
-      // Already mid-loop; ignore extra clicks.
-      log('loop already running; state =', convoState);
-      return;
-    }
-    loopOnce(); // kick the loop
+    if (convoState !== STATE.IDLE) { log('loop already running'); return; }
+    loopOnce();
   }
 
   async function loopOnce() {
     if (!handsFree) { setState(STATE.IDLE); return; }
     setState(STATE.RECORDING);
 
-    // 1) Capture a short utterance
     try {
       mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
       const preferredMime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
@@ -207,18 +165,8 @@
       mediaRecorder = new MediaRecorder(mediaStream, { mimeType: preferredMime });
 
       const finished = new Promise((resolve) => {
-        mediaRecorder.ondataavailable = (e) => {
-          if (e.data && e.data.size) {
-            chunks.push(e.data);
-            log('chunk', e.data.type, e.data.size, 'bytes');
-          }
-        };
-        mediaRecorder.onerror = (e) => {
-          console.error('[CHAT] recorder error', e);
-          log('recorder error', String(e?.error || e?.name || e));
-          resolve(null);
-        };
-        mediaRecorder.onstop = async () => {
+        mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+        mediaRecorder.onstop = () => {
           clearAutoStop();
           const blob = new Blob(chunks, { type: preferredMime });
           log('final blob', blob.type, blob.size, 'bytes');
@@ -230,95 +178,60 @@
       mediaRecorder.start();
       log('recording started with', preferredMime);
 
-      // Auto-stop window; you can later replace with VAD if you want.
       clearAutoStop();
       autoStopTimer = setTimeout(() => {
-        try {
-          if (mediaRecorder && mediaRecorder.state === 'recording') {
-            log('auto-stop timer fired');
-            mediaRecorder.stop();
-            log('recording stopped (auto)');
-          }
-        } catch {}
+        if (mediaRecorder && mediaRecorder.state === 'recording') { mediaRecorder.stop(); log('recording stopped (auto)'); }
       }, AUTO_STOP_MS);
 
       const blob = await finished;
       mediaRecorder = null;
       chunks = [];
 
-      if (!blob || blob.size < 4096) {
-        log('silence or too-short; retrying…');
-        // small pause to avoid a tight loop
-        await new Promise(r => setTimeout(r, 300));
-        setState(STATE.IDLE);
-        return loopOnce();
-      }
+      if (!blob || blob.size < 4096) { setState(STATE.IDLE); return loopOnce(); }
 
-      // 2) STT
+      // STT
       setState(STATE.THINKING);
       const stt = await sttUploadBlob(blob);
       const transcript = (stt?.transcript || '').trim();
       log('TRANSCRIPT:', transcript || '<empty>');
+      if (!transcript) { setState(STATE.IDLE); return loopOnce(); }
 
-      // If user said nothing useful, restart
-      if (!transcript) {
-        setState(STATE.IDLE);
-        return loopOnce();
-      }
-
-      // 3) LLM reply
+      // Chat
       const reply = await askLLM(transcript);
-      const say = reply || "I'm not sure yet, could you rephrase?";
-      log('REPLY:', say);
+      log('REPLY:', reply);
 
-      // 4) TTS speak → when ends, re-loop
+      // TTS
       setState(STATE.SPEAKING);
-      await speak(say);
+      await speak(reply);
 
-      // 5) Loop again if still hands-free
       setState(STATE.IDLE);
       if (handsFree) return loopOnce();
 
     } catch (err) {
       console.error(err);
-      log('loop error', String(err && err.message || err));
-      stopTracks();
-      clearAutoStop();
-      mediaRecorder = null;
-      chunks = [];
-      // brief backoff then continue if still on
-      await new Promise(r => setTimeout(r, 500));
+      log('loop error', String(err?.message || err));
+      stopTracks(); clearAutoStop();
+      mediaRecorder = null; chunks = [];
       setState(STATE.IDLE);
       if (handsFree) return loopOnce();
     }
   }
 
   function stopConversation() {
-    handsFree = false;
-    clearAutoStop();
+    handsFree = false; clearAutoStop();
     try { if (mediaRecorder && mediaRecorder.state === 'recording') mediaRecorder.stop(); } catch {}
-    stopTracks();
-    mediaRecorder = null;
-    chunks = [];
-    setState(STATE.IDLE);
-    log('hands-free loop stopped');
+    stopTracks(); mediaRecorder = null; chunks = [];
+    setState(STATE.IDLE); log('hands-free loop stopped');
   }
 
   // ===== Wire UI =====
   document.addEventListener('DOMContentLoaded', () => {
     log('DOMContentLoaded; wiring handlers');
-    const recBtn  = document.querySelector('#recordBtn');
-    const stopBtn = document.querySelector('#stopBtn');
-    const ttsBtn  = document.querySelector('#sayBtn');
-
-    recBtn?.addEventListener('click', () => { log('start conversation click'); startRecording(); });
-    stopBtn?.addEventListener('click', () => { log('stop conversation click'); stopConversation(); });
-
-    // "Speak Test Line" still works as a sanity check for TTS
-    ttsBtn?.addEventListener('click', () => { log('tts click'); speak('Hey—Keilani is in hands-free mode now.'); });
+    document.querySelector('#recordBtn')?.addEventListener('click', () => { log('start conversation click'); startConversation(); });
+    document.querySelector('#stopBtn')?.addEventListener('click', () => { log('stop conversation click'); stopConversation(); });
+    document.querySelector('#sayBtn')?.addEventListener('click', () => { log('tts click'); speak('Hey—Keilani is ready.'); });
   });
 
-  // expose for console testing
-  window.startConversation = startRecording;
+  window.startConversation = startConversation;
   window.stopConversation  = stopConversation;
 })();
