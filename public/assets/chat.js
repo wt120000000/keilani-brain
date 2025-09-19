@@ -1,4 +1,4 @@
-// CHAT.JS BUILD TAG → 2025-09-19T12:45-0700
+// CHAT.JS BUILD TAG → 2025-09-19T13:35-0700
 
 (() => {
   const API_ORIGIN = location.origin; // same origin (api.keilani.ai)
@@ -6,7 +6,6 @@
   const TTS_URL = `${API_ORIGIN}/.netlify/functions/tts`;
   const CHAT_URL = `${API_ORIGIN}/.netlify/functions/chat`;
 
-  // ===== UI logger =====
   const logEl = document.getElementById('log');
   const log = (...args) => {
     console.log('[CHAT]', ...args);
@@ -17,15 +16,14 @@
     }
   };
 
-  // ===== Recorder state =====
   let mediaRecorder = null;
   let mediaStream = null;
   let chunks = [];
   let autoStopTimer = null;
   const AUTO_STOP_MS = 6000;
-  const USER_ID = "global"; // TODO: replace with real user/session
+  const USER_ID = "global";
+  let loopMode = false; // 🔄 conversation loop flag
 
-  // ===== Helpers =====
   function blobToBase64Raw(blob) {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -89,16 +87,24 @@
     const blob = new Blob([buf], { type: 'audio/mpeg' });
     const url = URL.createObjectURL(blob);
     const audio = new Audio(url);
-    audio.onended = () => URL.revokeObjectURL(url);
-    await audio.play();
-    log('TTS played', blob.size, 'bytes');
+
+    return new Promise((resolve) => {
+      audio.onended = () => {
+        URL.revokeObjectURL(url);
+        log('TTS finished');
+        if (loopMode) {
+          log('🔄 Loop mode: restarting recording…');
+          startRecording(); // auto-restart after TTS ends
+        }
+        resolve();
+      };
+      audio.play();
+      log('TTS played', blob.size, 'bytes');
+    });
   }
 
   async function askLLM(transcript) {
-    const payload = {
-      user_id: USER_ID,
-      message: transcript
-    };
+    const payload = { user_id: USER_ID, message: transcript };
 
     const res = await fetch(CHAT_URL, {
       method: 'POST',
@@ -128,7 +134,6 @@
     mediaStream = null;
   }
 
-  // ===== Recording controls =====
   async function startRecording() {
     if (mediaRecorder && mediaRecorder.state === 'recording') {
       log('already recording; ignoring start');
@@ -145,26 +150,17 @@
       chunks = [];
 
       mediaRecorder.ondataavailable = (e) => {
-        if (e.data && e.data.size) {
-          chunks.push(e.data);
-          log('chunk', e.data.type, e.data.size, 'bytes');
-        }
-      };
-
-      mediaRecorder.onerror = (e) => {
-        console.error('[CHAT] recorder error', e);
-        log('recorder error', String(e?.error || e?.name || e));
+        if (e.data && e.data.size) chunks.push(e.data);
       };
 
       mediaRecorder.onstop = async () => {
         clearAutoStop();
         const blob = new Blob(chunks, { type: preferredMime });
         log('final blob', blob.type, blob.size, 'bytes');
-
         stopTracks();
 
         if (blob.size < 8192) {
-          log('too small; record a bit longer before stopping.');
+          log('too small; record longer before stopping.');
           mediaRecorder = null;
           return;
         }
@@ -172,10 +168,7 @@
         try {
           const r = await sttUploadBlob(blob);
           log('TRANSCRIPT:', r.transcript);
-
-          // 🔗 Hook into chat function here
           await askLLM(r.transcript);
-
         } catch (err) {
           console.error(err);
           log('STT/CHAT failed', String(err && err.message || err));
@@ -193,7 +186,6 @@
         if (mediaRecorder && mediaRecorder.state === 'recording') {
           log('auto-stop timer fired');
           mediaRecorder.stop();
-          log('recording stopped (auto)');
         }
       }, AUTO_STOP_MS);
 
@@ -208,6 +200,7 @@
   }
 
   function stopRecording() {
+    loopMode = false; // stop loop if manually halted
     if (mediaRecorder && mediaRecorder.state === 'recording') {
       mediaRecorder.stop();
       log('recording stopped (manual)');
@@ -216,21 +209,23 @@
     log('stop clicked but no active recorder');
   }
 
-  // ===== Wire UI =====
   document.addEventListener('DOMContentLoaded', () => {
     log('DOMContentLoaded; wiring handlers');
     const recBtn  = document.querySelector('#recordBtn');
     const stopBtn = document.querySelector('#stopBtn');
     const ttsBtn  = document.querySelector('#sayBtn');
-    const convBtn = document.querySelector('#convBtn'); // optional "Start Conversation"
+    const convBtn = document.querySelector('#convBtn'); // conversation loop button
 
     recBtn?.addEventListener('click', () => { log('record click'); startRecording(); });
     stopBtn?.addEventListener('click', () => { log('stop click'); stopRecording(); });
     ttsBtn?.addEventListener('click', () => { log('tts click'); speak('Hey—Keilani TTS is live.'); });
-    convBtn?.addEventListener('click', () => { log('start conversation click'); startRecording(); });
+    convBtn?.addEventListener('click', () => {
+      log('start conversation click');
+      loopMode = true;
+      startRecording();
+    });
   });
 
-  // expose for console
   window.startRecording = startRecording;
   window.stopRecording  = stopRecording;
   window.speak          = speak;
