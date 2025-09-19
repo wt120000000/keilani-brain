@@ -1,4 +1,4 @@
-// CHAT.JS BUILD TAG → 2025-09-19T15:32-0700 (auto-loop on Start)
+// CHAT.JS BUILD TAG → 2025-09-19T16:20-0700 (VAD-based auto-stop)
 
 (() => {
   const API_ORIGIN = location.origin; // same origin (api.keilani.ai)
@@ -21,10 +21,24 @@
   let mediaRecorder = null;
   let mediaStream = null;
   let chunks = [];
-  let autoStopTimer = null;
-  const AUTO_STOP_MS = 2000; // snappy 2s turns
+
+  // VAD state
+  let audioCtx = null;
+  let analyser = null;
+  let sourceNode = null;
+  let vadRaf = null;
+  let vadLastSpeech = 0;
+  let vadStartedAt = 0;
+
+  // VAD tuning (adjust if needed)
+  const MIN_CAPTURE_MS = 1200; // don't stop before this (lets you start talking)
+  const SILENCE_MS     = 900;  // stop after this long of silence
+  const MAX_CAPTURE_MS = 8000; // hard cap
+  const VAD_INTERVAL   = 80;   // ms between checks
+  const VAD_THRESH     = 7;    // sensitivity ~ amplitude delta (0-127 baseline=128)
+
   const USER_ID = "global";
-  let loopMode = false; // 🔄 stays true until Stop is clicked
+  let loopMode = true; // default to conversational loop
 
   // ===== Helpers =====
   function blobToBase64Raw(blob) {
@@ -121,11 +135,16 @@
     if (data.reply) await speak(data.reply);
   }
 
-  function clearAutoStop() {
-    if (autoStopTimer) {
-      clearTimeout(autoStopTimer);
-      autoStopTimer = null;
+  function cleanupVAD() {
+    if (vadRaf) {
+      cancelAnimationFrame(vadRaf);
+      vadRaf = null;
     }
+    try { sourceNode?.disconnect(); } catch {}
+    try { analyser?.disconnect(); } catch {}
+    sourceNode = null;
+    analyser = null;
+    // keep audioCtx around; it can be reused
   }
 
   function stopTracks() {
@@ -133,24 +152,24 @@
     mediaStream = null;
   }
 
-  // ===== Recording (turn-based) =====
+  // ===== Recording with VAD =====
   async function startRecording() {
-    // Ensure only one session and fresh tracks
+    // Ensure single session
     if (mediaRecorder && mediaRecorder.state === 'recording') {
       log('already recording; ignoring start');
       return;
     }
-    // If a previous stream is lingering, stop it
     stopTracks();
-    clearAutoStop();
+    cleanupVAD();
     chunks = [];
 
     try {
       mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+      // MediaRecorder setup (container)
       const preferredMime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
         ? 'audio/webm;codecs=opus'
         : 'audio/ogg;codecs=opus';
-
       mediaRecorder = new MediaRecorder(mediaStream, { mimeType: preferredMime });
 
       mediaRecorder.ondataavailable = (e) => {
@@ -166,15 +185,13 @@
       };
 
       mediaRecorder.onstop = async () => {
-        clearAutoStop();
+        cleanupVAD();
         const blob = new Blob(chunks, { type: mediaRecorder.mimeType });
         log('final blob', blob.type, blob.size, 'bytes');
-
-        // Stop tracks before network work
         stopTracks();
 
         if (blob.size < 6000) {
-          log('too small; record a bit longer before stopping.');
+          log('too small; record a bit longer.');
           mediaRecorder = null;
           chunks = [];
           return;
@@ -193,36 +210,74 @@
         }
       };
 
-      mediaRecorder.start(); // one pass; we stop via timer
-      log('recording started with', mediaRecorder.mimeType);
+      // WebAudio VAD pipeline
+      if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 1024;
+      sourceNode = audioCtx.createMediaStreamSource(mediaStream);
+      sourceNode.connect(analyser);
 
-      autoStopTimer = setTimeout(() => {
-        if (mediaRecorder && mediaRecorder.state === 'recording') {
-          log('auto-stop timer fired');
-          mediaRecorder.stop();
-          log('recording stopped (auto)');
+      const buf = new Uint8Array(analyser.fftSize);
+      vadStartedAt = performance.now();
+      vadLastSpeech = vadStartedAt;
+
+      const tick = () => {
+        analyser.getByteTimeDomainData(buf);
+        // Compute simple amplitude deviation from 128 baseline
+        let maxDev = 0;
+        for (let i = 0; i < buf.length; i++) {
+          const dev = Math.abs(buf[i] - 128);
+          if (dev > maxDev) maxDev = dev;
         }
-      }, AUTO_STOP_MS);
+        const now = performance.now();
+        const speaking = maxDev >= VAD_THRESH;
+
+        if (speaking) vadLastSpeech = now;
+
+        const elapsed = now - vadStartedAt;
+        const silence = now - vadLastSpeech;
+
+        // stop conditions: after min capture and either long silence or hard cap
+        if (elapsed >= MIN_CAPTURE_MS && (silence >= SILENCE_MS || elapsed >= MAX_CAPTURE_MS)) {
+          try {
+            if (mediaRecorder && mediaRecorder.state === 'recording') {
+              mediaRecorder.stop();
+              log('recording stopped (VAD)');
+            }
+          } catch (e) {
+            console.warn('stop err', e);
+          }
+          return;
+        }
+        // pace checks ~VAD_INTERVAL
+        vadRaf = setTimeout(() => requestAnimationFrame(tick), VAD_INTERVAL);
+      };
+
+      mediaRecorder.start(); // single pass; VAD decides when to stop
+      log('recording started with', mediaRecorder.mimeType, '(VAD)');
+      requestAnimationFrame(tick);
 
     } catch (err) {
       console.error(err);
       log('mic error', String(err && err.message || err));
+      cleanupVAD();
       stopTracks();
       mediaRecorder = null;
       chunks = [];
-      clearAutoStop();
     }
   }
 
   function stopRecording() {
-    loopMode = false; // 🚫 disable auto-loop
-    if (mediaRecorder && mediaRecorder.state === 'recording') {
-      mediaRecorder.stop();
-      log('recording stopped (manual)');
-    } else {
-      log('stop clicked but no active recorder');
-    }
-    clearAutoStop();
+    loopMode = false;
+    try {
+      if (mediaRecorder && mediaRecorder.state === 'recording') {
+        mediaRecorder.stop();
+        log('recording stopped (manual)');
+      } else {
+        log('stop clicked but no active recorder');
+      }
+    } catch {}
+    cleanupVAD();
     stopTracks();
   }
 
@@ -232,9 +287,8 @@
     const recBtn  = document.querySelector('#recordBtn');
     const stopBtn = document.querySelector('#stopBtn');
     const ttsBtn  = document.querySelector('#sayBtn');
-    const convBtn = document.querySelector('#convBtn'); // optional separate button
+    const convBtn = document.querySelector('#convBtn'); // optional
 
-    // Start Recording now enables auto-loop by default ✅
     recBtn?.addEventListener('click', () => {
       loopMode = true;
       log('record click → loopMode ON');
@@ -245,7 +299,6 @@
 
     ttsBtn?.addEventListener('click', () => { log('tts click'); speak('Hey—Keilani TTS is live.'); });
 
-    // Optional explicit conversation toggle (also enables loop)
     convBtn?.addEventListener('click', () => {
       log('start conversation click');
       loopMode = true;
