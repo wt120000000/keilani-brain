@@ -1,4 +1,4 @@
-// CHAT.JS BUILD TAG → 2025-09-19T15:10-0700 (fast turn-based, auto-loop)
+// CHAT.JS BUILD TAG → 2025-09-19T15:32-0700 (auto-loop on Start)
 
 (() => {
   const API_ORIGIN = location.origin; // same origin (api.keilani.ai)
@@ -22,9 +22,9 @@
   let mediaStream = null;
   let chunks = [];
   let autoStopTimer = null;
-  const AUTO_STOP_MS = 2000; // ⏱️ 2s utterances for snappy turn-taking
+  const AUTO_STOP_MS = 2000; // snappy 2s turns
   const USER_ID = "global";
-  let loopMode = false; // turn-taking conversation loop
+  let loopMode = false; // 🔄 stays true until Stop is clicked
 
   // ===== Helpers =====
   function blobToBase64Raw(blob) {
@@ -94,8 +94,8 @@
       audio.onended = () => {
         URL.revokeObjectURL(url);
         log('TTS finished');
-        // 🔁 auto-loop: restart mic immediately after she finishes
         if (loopMode) {
+          log('🔁 auto-restart mic');
           startRecording();
         }
         resolve();
@@ -107,7 +107,6 @@
 
   async function askLLM(transcript) {
     const payload = { user_id: USER_ID, message: transcript };
-
     const res = await fetch(CHAT_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -119,10 +118,7 @@
     log('CHAT status', res.status, data);
 
     if (!res.ok) throw new Error(`CHAT ${res.status}: ${JSON.stringify(data)}`);
-    if (data.reply) {
-      // Mic is stopped at this point; speak, then onended will restart mic if loopMode
-      await speak(data.reply);
-    }
+    if (data.reply) await speak(data.reply);
   }
 
   function clearAutoStop() {
@@ -139,10 +135,15 @@
 
   // ===== Recording (turn-based) =====
   async function startRecording() {
+    // Ensure only one session and fresh tracks
     if (mediaRecorder && mediaRecorder.state === 'recording') {
       log('already recording; ignoring start');
       return;
     }
+    // If a previous stream is lingering, stop it
+    stopTracks();
+    clearAutoStop();
+    chunks = [];
 
     try {
       mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -151,7 +152,6 @@
         : 'audio/ogg;codecs=opus';
 
       mediaRecorder = new MediaRecorder(mediaStream, { mimeType: preferredMime });
-      chunks = [];
 
       mediaRecorder.ondataavailable = (e) => {
         if (e.data && e.data.size) {
@@ -167,15 +167,16 @@
 
       mediaRecorder.onstop = async () => {
         clearAutoStop();
-        const blob = new Blob(chunks, { type: preferredMime });
+        const blob = new Blob(chunks, { type: mediaRecorder.mimeType });
         log('final blob', blob.type, blob.size, 'bytes');
 
-        // Always clean up tracks before STT/LLM/TTS
+        // Stop tracks before network work
         stopTracks();
 
         if (blob.size < 6000) {
           log('too small; record a bit longer before stopping.');
           mediaRecorder = null;
+          chunks = [];
           return;
         }
 
@@ -192,11 +193,9 @@
         }
       };
 
-      mediaRecorder.start(); // no timeslice: we’ll stop after AUTO_STOP_MS once
-      log('recording started with', preferredMime);
+      mediaRecorder.start(); // one pass; we stop via timer
+      log('recording started with', mediaRecorder.mimeType);
 
-      // Faster turn-taking window
-      clearAutoStop();
       autoStopTimer = setTimeout(() => {
         if (mediaRecorder && mediaRecorder.state === 'recording') {
           log('auto-stop timer fired');
@@ -216,13 +215,15 @@
   }
 
   function stopRecording() {
-    loopMode = false; // stop loop if manually halted
+    loopMode = false; // 🚫 disable auto-loop
     if (mediaRecorder && mediaRecorder.state === 'recording') {
       mediaRecorder.stop();
       log('recording stopped (manual)');
-      return;
+    } else {
+      log('stop clicked but no active recorder');
     }
-    log('stop clicked but no active recorder');
+    clearAutoStop();
+    stopTracks();
   }
 
   // ===== Wire UI =====
@@ -231,12 +232,20 @@
     const recBtn  = document.querySelector('#recordBtn');
     const stopBtn = document.querySelector('#stopBtn');
     const ttsBtn  = document.querySelector('#sayBtn');
-    const convBtn = document.querySelector('#convBtn'); // optional "Start Conversation"
+    const convBtn = document.querySelector('#convBtn'); // optional separate button
 
-    recBtn?.addEventListener('click', () => { log('record click'); startRecording(); });
+    // Start Recording now enables auto-loop by default ✅
+    recBtn?.addEventListener('click', () => {
+      loopMode = true;
+      log('record click → loopMode ON');
+      startRecording();
+    });
+
     stopBtn?.addEventListener('click', () => { log('stop click'); stopRecording(); });
+
     ttsBtn?.addEventListener('click', () => { log('tts click'); speak('Hey—Keilani TTS is live.'); });
 
+    // Optional explicit conversation toggle (also enables loop)
     convBtn?.addEventListener('click', () => {
       log('start conversation click');
       loopMode = true;
@@ -245,7 +254,7 @@
   });
 
   // expose for console
-  window.startRecording = startRecording;
+  window.startRecording = () => { loopMode = true; startRecording(); };
   window.stopRecording  = stopRecording;
   window.speak          = speak;
 })();
