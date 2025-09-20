@@ -1,9 +1,11 @@
 // public/assets/chat.js
-// BUILD TAG → 2025-09-19T18:20-0700 (Emotion state plumbed end-to-end)
+// BUILD TAG → 2025-09-19T22:07-0700 (Hardened STT fetch: timeout, retry, dual endpoints; emotion plumb)
 
 (() => {
   const API_ORIGIN = location.origin;
-  const STT_URL   = `${API_ORIGIN}/.netlify/functions/stt`;
+
+  // Try function path first, then pretty redirect as fallback.
+  const STT_URLS  = [`${API_ORIGIN}/.netlify/functions/stt`, `${API_ORIGIN}/api/stt`];
   const TTS_URL   = `${API_ORIGIN}/.netlify/functions/tts`;
   const CHAT_URL  = `${API_ORIGIN}/.netlify/functions/chat`;
 
@@ -17,17 +19,13 @@
     }
   };
 
-  // ===== AFFECT (persisted per-device) =====
-  let affect = null; // { mood, valence, arousal, intensity, since, decay }
+  // ===== AFFECT (persist per-device) =====
+  let affect = null;
   try { affect = JSON.parse(localStorage.getItem('affect') || 'null'); } catch {}
   if (!affect) affect = { mood:"calm", valence:0, arousal:0.25, intensity:0.25, since:new Date().toISOString(), decay:{half_life_sec:600} };
+  const saveAffect = (a) => { affect = a || affect; try { localStorage.setItem('affect', JSON.stringify(affect)); } catch {} };
 
-  function saveAffect(a) {
-    affect = a || affect;
-    try { localStorage.setItem('affect', JSON.stringify(affect)); } catch {}
-  }
-
-  // ===== Recorder/VAD state (from your latest) =====
+  // ===== Recorder / VAD (fast) =====
   let mediaRecorder = null, mediaStream = null, chunks = [];
   let audioCtx = null, analyser = null, sourceNode = null, vadTimer = null;
   const FAST = {
@@ -38,9 +36,12 @@
     RMS_THRESH     : 9,
     START_HOLD_MS  : 160,
     BPS            : 64000,
+    MAX_CAPTURE_MS : 9000,
   };
   const USER_ID = "global";
   let loopMode = true;
+
+  const sleep = (ms) => new Promise(r => setTimeout(r, ms));
 
   function blobToBase64Raw(blob) {
     return new Promise((resolve, reject) => {
@@ -55,6 +56,24 @@
     });
   }
 
+  // Generic fetch with timeout and backoff
+  async function fetchJsonWithTimeout(url, opts, timeoutMs, attempt, totalAttempts) {
+    const ctrl = new AbortController();
+    const t = setTimeout(() => ctrl.abort('timeout'), timeoutMs);
+    try {
+      const res = await fetch(url, { ...opts, signal: ctrl.signal, cache: 'no-store', keepalive: false, credentials: 'omit' });
+      const isJson = (res.headers.get('content-type') || '').includes('application/json');
+      const body = isJson ? await res.json().catch(() => null) : null;
+      return { ok: res.ok, status: res.status, data: body };
+    } catch (e) {
+      log(`fetch error on ${url} (attempt ${attempt}/${totalAttempts}) →`, String(e && e.message || e));
+      return { ok: false, status: 0, data: { error: String(e && e.message || e) } };
+    } finally {
+      clearTimeout(t);
+    }
+  }
+
+  // Try all STT endpoints with retry/backoff
   async function sttUploadBlob(blob) {
     const base64 = await blobToBase64Raw(blob);
     const simpleMime = (blob.type || '').split(';')[0] || 'application/octet-stream';
@@ -65,22 +84,38 @@
       simpleMime.includes('m4a') || simpleMime.includes('mp4') ? 'audio.m4a' :
       simpleMime.includes('wav')  ? 'audio.wav'  : 'audio.bin';
 
-    const body = { audioBase64: base64, language: 'en', mime: simpleMime, filename };
-    const res = await fetch(STT_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(body)
-    });
-    let data = null;
-    try { data = await res.json(); } catch {}
-    log('STT status', res.status, data);
-    if (!res.ok) throw new Error(`STT ${res.status}: ${JSON.stringify(data)}`);
-    return data;
+    const body = JSON.stringify({ audioBase64: base64, language: 'en', mime: simpleMime, filename });
+
+    // up to 2 attempts per URL
+    for (let i = 0; i < STT_URLS.length; i++) {
+      const url = STT_URLS[i];
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        const res = await fetchJsonWithTimeout(
+          url,
+          { method: 'POST', headers: { 'Content-Type': 'application/json' }, body },
+          15000,
+          attempt,
+          2
+        );
+        if (res.ok) {
+          log('STT status', res.status, res.data, `via ${i === 0 ? 'functions path' : 'redirect path'}`);
+          return res.data;
+        }
+        // Retry on network/timeout/429/5xx
+        if (res.status === 0 || res.status === 429 || res.status >= 500) {
+          const wait = 300 + Math.random() * 500;
+          await sleep(wait);
+          continue;
+        }
+        // Non-retryable error; throw
+        throw new Error(`STT ${res.status}: ${JSON.stringify(res.data)}`);
+      }
+      log(`STT: switching endpoint to fallback: ${STT_URLS[i+1] || '(none)'}`);
+    }
+    throw new Error('STT failed across endpoints');
   }
 
   function ttsOptsFromAffect(a) {
-    // Only speed exposed reliably; voice via server mapping
-    // Keep client neutral; server maps voice. We pass emotion_state through.
     return { emotion_state: a };
   }
 
@@ -88,76 +123,73 @@
     const payload = {
       text: String(text || 'Hello, Keilani here.'),
       format: 'mp3',
-      // AFFECT: forward current affect
       emotion_state: opts.emotion_state || affect
     };
 
-    // tiny retry for 429
-    for (let attempt = 0; attempt < 2; attempt++) {
-      const res = await fetch(TTS_URL, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(payload)
-      });
-
-      const buf = await res.arrayBuffer();
-      if (!res.ok) {
-        let detail = '';
-        try { detail = JSON.parse(new TextDecoder().decode(buf)); } catch {}
-        log('TTS error', res.status, detail || new TextDecoder().decode(buf));
-        if (res.status === 429 && attempt === 0) {
-          await new Promise(r => setTimeout(r, 450 + Math.random() * 350));
-          continue;
-        }
-        throw new Error(`TTS ${res.status}`);
-      }
-
-      const blob = new Blob([buf], { type: 'audio/mpeg' });
-      const url = URL.createObjectURL(blob);
-      const audio = new Audio(url);
-      return new Promise((resolve) => {
-        audio.onended = () => {
-          URL.revokeObjectURL(url);
-          log('TTS finished');
-          if (loopMode) {
-            log('🔁 auto-restart mic');
-            startRecording();
+    for (let attempt = 1; attempt <= 2; attempt++) {
+      const ctrl = new AbortController();
+      const t = setTimeout(() => ctrl.abort('timeout'), 15000);
+      try {
+        const res = await fetch(TTS_URL, {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(payload),
+          signal: ctrl.signal,
+          cache: 'no-store',
+          credentials: 'omit',
+        });
+        const buf = await res.arrayBuffer();
+        if (!res.ok) {
+          let detail = '';
+          try { detail = JSON.parse(new TextDecoder().decode(buf)); } catch {}
+          log('TTS error', res.status, detail || new TextDecoder().decode(buf));
+          if ((res.status === 429 || res.status >= 500) && attempt === 1) {
+            await sleep(400 + Math.random() * 400);
+            continue;
           }
-          resolve();
-        };
-        audio.play();
-        log('TTS played', blob.size, 'bytes');
-      });
+          throw new Error(`TTS ${res.status}`);
+        }
+
+        const blob = new Blob([buf], { type: 'audio/mpeg' });
+        const url = URL.createObjectURL(blob);
+        const audio = new Audio(url);
+        return new Promise((resolve) => {
+          audio.onended = () => {
+            URL.revokeObjectURL(url);
+            log('TTS finished');
+            if (loopMode) {
+              log('🔁 auto-restart mic');
+              startRecording();
+            }
+            resolve();
+          };
+          audio.play();
+          log('TTS played', blob.size, 'bytes');
+        });
+      } catch (e) {
+        log('TTS fetch exception', String(e && e.message || e));
+        if (attempt === 1) { await sleep(350 + Math.random() * 300); }
+      } finally { clearTimeout(t); }
     }
+    throw new Error('TTS failed');
   }
 
   async function askLLM(transcript) {
-    const payload = {
-      user_id: USER_ID,
-      message: transcript,
-      // AFFECT: send current affect so server can decay/blend
-      emotion_state: affect
-    };
+    const payload = { user_id: USER_ID, message: transcript, emotion_state: affect };
 
-    const res = await fetch(CHAT_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
+    const res = await fetchJsonWithTimeout(
+      CHAT_URL,
+      { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(payload) },
+      15000,
+      1,
+      1
+    );
 
-    let data = null;
-    try { data = await res.json(); } catch {}
-    log('CHAT status', res.status, data);
+    log('CHAT status', res.status, res.data);
+    if (!res.ok) throw new Error(`CHAT ${res.status}: ${JSON.stringify(res.data)}`);
 
-    if (!res.ok) throw new Error(`CHAT ${res.status}: ${JSON.stringify(data)}`);
-
-    // AFFECT: store the returned next state
-    if (data.next_emotion_state) saveAffect(data.next_emotion_state);
-
-    if (data.reply) {
-      const ttsOpts = ttsOptsFromAffect(affect);
-      await speak(data.reply, ttsOpts);
-    }
+    if (res.data?.next_emotion_state) saveAffect(res.data.next_emotion_state);
+    if (res.data?.reply) await speak(res.data.reply, ttsOptsFromAffect(affect));
   }
 
   function cleanupVAD() {
@@ -172,25 +204,17 @@
     mediaStream = null;
   }
 
-  // ===== Recording with faster VAD (from your current fast build) =====
   async function startRecording() {
-    if (mediaRecorder && mediaRecorder.state === 'recording') {
-      log('already recording; ignoring start');
-      return;
-    }
+    if (mediaRecorder && mediaRecorder.state === 'recording') { log('already recording; ignoring start'); return; }
     stopTracks(); cleanupVAD(); chunks = [];
 
     try {
       mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
       const preferredMime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
-        ? 'audio/webm;codecs=opus'
-        : 'audio/ogg;codecs=opus';
+        ? 'audio/webm;codecs=opus' : 'audio/ogg;codecs=opus';
 
-      mediaRecorder = new MediaRecorder(mediaStream, {
-        mimeType: preferredMime,
-        audioBitsPerSecond: FAST.BPS
-      });
+      mediaRecorder = new MediaRecorder(mediaStream, { mimeType: preferredMime, audioBitsPerSecond: FAST.BPS });
 
       mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
       mediaRecorder.onerror = (e) => { console.error('[CHAT] recorder error', e); log('recorder error', String(e?.error || e?.name || e)); };
@@ -209,33 +233,33 @@
         }
 
         try {
+          // STT → CHAT → TTS
           const r = await sttUploadBlob(blob);
           log('TRANSCRIPT:', r.transcript);
           await askLLM(r.transcript);
         } catch (err) {
           console.error(err);
           log('STT/CHAT failed', String(err && err.message || err));
+          // If STT path had a transient outage, keep loop alive so user can try again
+          if (loopMode) { await sleep(300); startRecording(); }
         } finally {
           mediaRecorder = null; chunks = [];
         }
       };
 
       if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-      analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 1024;
+      analyser = audioCtx.createAnalyser(); analyser.fftSize = 1024;
       sourceNode = audioCtx.createMediaStreamSource(mediaStream);
       sourceNode.connect(analyser);
 
       const buf = new Uint8Array(analyser.fftSize);
       const startedAt = performance.now();
-      let lastSpeechAt = startedAt;
-      let speechStarted = false;
-      let speechStartCandidateAt = null;
+      let lastSpeechAt = startedAt, speechStarted = false, speechStartCandidateAt = null;
 
       const tick = () => {
         analyser.getByteTimeDomainData(buf);
         let sumSq = 0;
-        for (let i = 0; i < buf.length; i++) { const dev = buf[i] - 128; sumSq += dev * dev; }
+        for (let i = 0; i < buf.length; i++) { const d = buf[i] - 128; sumSq += d * d; }
         const rms = Math.sqrt(sumSq / buf.length);
 
         const now = performance.now();
@@ -260,15 +284,11 @@
           speechDur >= FAST.SPEECH_MIN_MS &&
           silenceDur >= FAST.SILENCE_MS;
 
-        const stopByMax = elapsed >= 9000;
+        const stopByMax = elapsed >= FAST.MAX_CAPTURE_MS;
 
         if (stopBySilence || stopByMax) {
-          try {
-            if (mediaRecorder && mediaRecorder.state === 'recording') {
-              mediaRecorder.stop();
-              log(`recording stopped (${stopBySilence ? 'silence' : 'max'})`);
-            }
-          } catch {}
+          try { if (mediaRecorder && mediaRecorder.state === 'recording') { mediaRecorder.stop(); log(`recording stopped (${stopBySilence ? 'silence' : 'max'})`); } }
+          catch {}
           return;
         }
         vadTimer = setTimeout(tick, FAST.VAD_INTERVAL);
@@ -310,6 +330,7 @@
     convBtn?.addEventListener('click', () => { log('start conversation click'); loopMode = true; startRecording(); });
   });
 
+  // expose for console
   window.startRecording = () => { loopMode = true; startRecording(); };
   window.stopRecording  = stopRecording;
   window.speak          = (t) => speak(t, ttsOptsFromAffect(affect));
