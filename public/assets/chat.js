@@ -1,5 +1,5 @@
 // public/assets/chat.js
-// BUILD: 2025-09-20T18:30Z
+// BUILD: 2025-09-20T21:05Z
 
 (() => {
   // --------- Config ---------
@@ -17,6 +17,7 @@
     logEl.textContent += (logEl.textContent ? "\n" : "") + line;
     logEl.scrollTop = logEl.scrollHeight;
   }
+  if (logEl && !logEl.textContent) logEl.textContent = "DOM not ready…";
 
   // --------- DOM wiring (handles both new & old IDs) ---------
   function getButtons() {
@@ -25,7 +26,7 @@
     const stop   = document.getElementById("stopBtn")   || document.querySelector('[data-action="stop"]');
     const say    = document.getElementById("sayBtn")    || document.querySelector('[data-action="say"]');
 
-    // Legacy fallback IDs (what your old JS expected)
+    // Legacy fallback IDs (what an older script used)
     const legacyRecord = document.getElementById("btnRecord");
     const legacyStop   = document.getElementById("btnStop");
     const legacySay    = document.getElementById("btnSpeakTest");
@@ -50,7 +51,7 @@
     return true;
   }
 
-  // Retry wiring a few times in case DOM hydrates slowly or cached HTML swaps
+  // Retry wiring in case DOM loads slowly
   let __wireTries = 0;
   function ensureWired() {
     if (wireUI()) return;
@@ -68,7 +69,7 @@
   function clearTimer() { if (autoTimer) { clearTimeout(autoTimer); autoTimer = null; } }
   function stopTracks() { try { mediaStream?.getTracks?.().forEach(t => t.stop()); } catch {} mediaStream = null; }
 
-  function blobToB64(blob) {
+  function blobToBase64Raw(blob) {
     return new Promise((resolve, reject) => {
       const fr = new FileReader();
       fr.onloadend = () => {
@@ -81,15 +82,26 @@
     });
   }
 
-  async function sttUploadBlob(blob) {
-    // Your server currently accepts multipart OR JSON in different versions.
-    // The deployed one you tested used multipart FormData, so we keep that path.
-    const fd = new FormData();
-    fd.append("file", blob, "speech.webm");
+  // ---- STT: send JSON (base64) to match backend expectation ----
+  async function sttUploadBlob_JSON(blob) {
+    const audioBase64 = await blobToBase64Raw(blob);
+    const simpleMime = (blob.type || "").split(";")[0] || "application/octet-stream";
+    const filename =
+      simpleMime.includes("webm") ? "audio.webm" :
+      simpleMime.includes("ogg")  ? "audio.ogg"  :
+      simpleMime.includes("mpeg") || simpleMime.includes("mp3") ? "audio.mp3" :
+      simpleMime.includes("m4a") || simpleMime.includes("mp4") ? "audio.m4a" :
+      simpleMime.includes("wav")  ? "audio.wav"  : "audio.bin";
 
-    const res = await fetch(STT_URL, { method: "POST", body: fd });
+    const body = { audioBase64, language: "en", mime: simpleMime, filename };
+
+    const res = await fetch(STT_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body),
+    });
     const data = await res.json().catch(() => ({}));
-    log("STT status", res.status, data);
+    log("STT status", res.status, data, "via functions path");
     if (!res.ok) throw new Error(`STT ${res.status}: ${JSON.stringify(data)}`);
     return data;
   }
@@ -122,13 +134,11 @@
     log("TTS played", blob.size, "bytes");
   }
 
-  // --------- Chat helper (filler for perceived latency) ---------
+  // --------- Chat helper (with filler) ---------
   let lastEmotion = null;
   async function askLLM(text) {
     let cancelled = false;
-    const filler = setTimeout(() => {
-      if (!cancelled) speak("Gimme a sec…", { speed: 1.08 });
-    }, 350);
+    const filler = setTimeout(() => { if (!cancelled) speak("Gimme a sec…", { speed: 1.08 }); }, 350);
 
     const res = await fetch(CHAT_URL, {
       method: "POST",
@@ -168,7 +178,7 @@
         if (blob.size < 8192) { log("too small; speak a bit longer."); mediaRecorder = null; return; }
 
         try {
-          const stt = await sttUploadBlob(blob);
+          const stt = await sttUploadBlob_JSON(blob);
           log("TRANSCRIPT:", stt.transcript);
           await askLLM(stt.transcript);
         } catch (err) {
