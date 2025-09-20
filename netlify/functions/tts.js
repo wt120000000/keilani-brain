@@ -1,82 +1,111 @@
 // netlify/functions/tts.js
-const fetch = require("node-fetch");
+// POST { text, voice?, emotion?: { stability?, similarity?, style? } } -> MP3 bytes
+// ElevenLabs proxy with strict clamping 0..1 for voice_settings.
+
+const fetch = globalThis.fetch; // Node 18+
+const enc = new TextEncoder();
+
+function clamp01(v, fallback = 0.5) {
+  const n = typeof v === "string" ? parseFloat(v) : (typeof v === "number" ? v : NaN);
+  if (Number.isNaN(n)) return fallback;
+  return Math.max(0, Math.min(1, n));
+}
+
+function json(status, body) {
+  return {
+    statusCode: status,
+    headers: {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization"
+    },
+    body: JSON.stringify(body)
+  };
+}
 
 exports.handler = async (event) => {
+  // CORS preflight
+  if (event.httpMethod === "OPTIONS") {
+    return {
+      statusCode: 204,
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization"
+      },
+      body: ""
+    };
+  }
+  if (event.httpMethod !== "POST") return json(405, { error: "method_not_allowed" });
+
+  const ELEVEN_API_KEY = process.env.ELEVEN_API_KEY;
+  const ELEVEN_VOICE_ID = process.env.ELEVEN_VOICE_ID || "21m00Tcm4TlvDq8ikWAM"; // Alloy default
+  if (!ELEVEN_API_KEY) return json(500, { error: "missing_eleven_key" });
+
+  // Parse input
+  let body;
   try {
-    if (event.httpMethod === "OPTIONS") {
-      return {
-        statusCode: 204,
-        headers: {
-          "Access-Control-Allow-Origin": "*",
-          "Access-Control-Allow-Methods": "POST, OPTIONS",
-          "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With",
-        },
-        body: "",
-      };
+    body = JSON.parse(event.body || "{}");
+  } catch (e) {
+    return json(400, { error: "invalid_json", detail: String(e?.message || e) });
+  }
+
+  const text = (body.text || "").toString().trim();
+  if (!text) return json(400, { error: "missing_text" });
+
+  const voice = (body.voice || "").toString().trim() || ELEVEN_VOICE_ID;
+  const emotion = body.emotion || {};
+  // HARD CLAMP: always in [0,1]
+  const stability  = clamp01(emotion.stability,  0.55);
+  const similarity = clamp01(emotion.similarity, 0.75);
+  const style      = clamp01(emotion.style,      0.50);
+
+  // ElevenLabs v1 TTS
+  const url = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voice)}`;
+  const payload = {
+    text,
+    model_id: "eleven_monolingual_v1", // or your preferred model
+    voice_settings: {
+      stability,          // 0..1
+      similarity_boost: similarity, // 0..1
+      style,              // 0..1 (IMPORTANT: DO NOT MULTIPLY)
+      use_speaker_boost: true
     }
+  };
 
-    if (event.httpMethod !== "POST") {
-      return {
-        statusCode: 405,
-        body: JSON.stringify({ error: "Method not allowed" }),
-      };
-    }
-
-    const { text, emotion } = JSON.parse(event.body);
-
-    // Default emotion values
-    let { stability = 0.5, similarity = 0.75, style = 0.5 } = emotion || {};
-
-    // Clamp + normalize to [0.0–1.0]
-    const clamp = (v) => Math.max(0.0, Math.min(1.0, parseFloat(v) || 0.5));
-    stability = clamp(stability);
-    similarity = clamp(similarity);
-    style = clamp(style);
-
-    const voiceId = process.env.ELEVENLABS_VOICE_ID || "your-voice-id";
-    const apiKey = process.env.ELEVENLABS_API_KEY;
-
-    const resp = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${voiceId}`, {
+  try {
+    const resp = await fetch(url, {
       method: "POST",
       headers: {
+        "xi-api-key": ELEVEN_API_KEY,
         "Content-Type": "application/json",
-        "xi-api-key": apiKey,
+        "Accept": "audio/mpeg"
       },
-      body: JSON.stringify({
-        text,
-        model_id: "eleven_multilingual_v2",
-        voice_settings: {
-          stability,
-          similarity_boost: similarity,
-          style,
-        },
-      }),
+      body: JSON.stringify(payload)
     });
 
-    if (!resp.ok) {
-      const err = await resp.text();
-      return {
-        statusCode: resp.status,
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ error: "tts_eleven_error", detail: err }),
-      };
+    // If ElevenLabs returns JSON (error), bubble it up
+    const ct = resp.headers.get("content-type") || "";
+    if (!resp.ok || ct.includes("application/json")) {
+      const errText = await resp.text().catch(() => "");
+      let detail;
+      try { detail = JSON.parse(errText); } catch { detail = errText; }
+      return json(resp.status, { error: "tts_eleven_error", detail });
     }
 
-    const arrayBuffer = await resp.arrayBuffer();
+    const buf = Buffer.from(await resp.arrayBuffer());
     return {
       statusCode: 200,
       headers: {
         "Content-Type": "audio/mpeg",
         "Access-Control-Allow-Origin": "*",
+        "Cache-Control": "no-store"
       },
-      body: Buffer.from(arrayBuffer).toString("base64"),
-      isBase64Encoded: true,
+      body: buf.toString("base64"),
+      isBase64Encoded: true
     };
-  } catch (err) {
-    return {
-      statusCode: 500,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ error: "tts_function_error", detail: err.message }),
-    };
+  } catch (e) {
+    return json(502, { error: "tts_exception", detail: String(e?.message || e) });
   }
 };
