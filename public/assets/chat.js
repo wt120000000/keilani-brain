@@ -1,58 +1,72 @@
-// CHAT.JS BUILD TAG → 2025-09-20T09:40Z
+// public/assets/chat.js
+// BUILD: 2025-09-20T18:30Z
 
 (() => {
-  // ---------- Config ----------
-  const API_ORIGIN = location.origin; // api.keilani.ai
+  // --------- Config ---------
+  const API_ORIGIN = location.origin;
   const STT_URL  = `${API_ORIGIN}/.netlify/functions/stt`;
   const CHAT_URL = `${API_ORIGIN}/.netlify/functions/chat`;
   const TTS_URL  = `${API_ORIGIN}/.netlify/functions/tts`;
 
-  // ---------- Logger ----------
+  // --------- Logger ---------
   const logEl = document.getElementById("log");
-  const setBuildTag = () => {
-    const el = document.getElementById("buildTag");
-    if (el) el.textContent = document.currentScript?.src?.split("v=")[1] || "dev";
-  };
-  const log = (...args) => {
+  function log(...args) {
     console.log("[CHAT]", ...args);
     if (!logEl) return;
     const line = args.map(a => (typeof a === "object" ? JSON.stringify(a, null, 2) : String(a))).join(" ");
     logEl.textContent += (logEl.textContent ? "\n" : "") + line;
     logEl.scrollTop = logEl.scrollHeight;
-  };
+  }
 
-  // ---------- DOM safe wiring ----------
-  function qsAll(sel) { return Array.from(document.querySelectorAll(sel)); }
+  // --------- DOM wiring (handles both new & old IDs) ---------
+  function getButtons() {
+    // Preferred IDs (match your index.html)
+    const record = document.getElementById("recordBtn") || document.querySelector('[data-action="record"]');
+    const stop   = document.getElementById("stopBtn")   || document.querySelector('[data-action="stop"]');
+    const say    = document.getElementById("sayBtn")    || document.querySelector('[data-action="say"]');
+
+    // Legacy fallback IDs (what your old JS expected)
+    const legacyRecord = document.getElementById("btnRecord");
+    const legacyStop   = document.getElementById("btnStop");
+    const legacySay    = document.getElementById("btnSpeakTest");
+
+    return {
+      recordBtn: record || legacyRecord || null,
+      stopBtn:   stop   || legacyStop   || null,
+      sayBtn:    say    || legacySay    || null,
+    };
+  }
+
   function wireUI() {
-    const recordBtn = document.getElementById("recordBtn") || qsAll('[data-action="record"]')[0];
-    const stopBtn   = document.getElementById("stopBtn")   || qsAll('[data-action="stop"]')[0];
-    const sayBtn    = document.getElementById("sayBtn")    || qsAll('[data-action="say"]')[0];
-
+    const { recordBtn, stopBtn, sayBtn } = getButtons();
     if (!recordBtn || !stopBtn || !sayBtn) {
-      log("UI buttons not found; check IDs/attrs.");
+      log("UI buttons not found yet, retrying…");
       return false;
     }
     recordBtn.addEventListener("click", () => { log("record click"); startRecording(); });
     stopBtn.addEventListener("click",   () => { log("stop click");   stopRecording(); });
     sayBtn.addEventListener("click",    () => { log("tts click");    speak("Hey — Keilani here.", { speed: 1.08 }); });
-
-    const ok = document.getElementById("uiOk"), bad = document.getElementById("uiBad");
-    ok && (ok.hidden = false); bad && (bad.hidden = true);
     log("DOMContentLoaded; wiring handlers");
     return true;
   }
 
-  document.addEventListener("DOMContentLoaded", () => {
-    setBuildTag();
-    wireUI();
-  });
+  // Retry wiring a few times in case DOM hydrates slowly or cached HTML swaps
+  let __wireTries = 0;
+  function ensureWired() {
+    if (wireUI()) return;
+    if (__wireTries++ < 20) setTimeout(ensureWired, 250);
+  }
+  document.addEventListener("DOMContentLoaded", ensureWired);
 
-  // ---------- Audio utils ----------
+  // --------- Audio helpers ---------
   let mediaRecorder = null;
   let mediaStream = null;
   let chunks = [];
   let autoTimer = null;
   const AUTO_MS = 6000;
+
+  function clearTimer() { if (autoTimer) { clearTimeout(autoTimer); autoTimer = null; } }
+  function stopTracks() { try { mediaStream?.getTracks?.().forEach(t => t.stop()); } catch {} mediaStream = null; }
 
   function blobToB64(blob) {
     return new Promise((resolve, reject) => {
@@ -68,10 +82,12 @@
   }
 
   async function sttUploadBlob(blob) {
-    const b64 = await blobToB64(blob);
-    const simpleMime = (blob.type || "").split(";")[0] || "application/octet-stream";
-    const body = { audioBase64: b64, language: "en", mime: simpleMime, filename: simpleMime.includes("webm") ? "audio.webm" : "audio.bin" };
-    const res = await fetch(STT_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    // Your server currently accepts multipart OR JSON in different versions.
+    // The deployed one you tested used multipart FormData, so we keep that path.
+    const fd = new FormData();
+    fd.append("file", blob, "speech.webm");
+
+    const res = await fetch(STT_URL, { method: "POST", body: fd });
     const data = await res.json().catch(() => ({}));
     log("STT status", res.status, data);
     if (!res.ok) throw new Error(`STT ${res.status}: ${JSON.stringify(data)}`);
@@ -84,10 +100,13 @@
       voice: opts.voice || "alloy",
       speed: typeof opts.speed === "number" ? opts.speed : 1.0,
       format: "mp3",
-      // pass-thru emotion if present
       emotion: opts.emotion || undefined
     };
-    const res = await fetch(TTS_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(payload) });
+    const res = await fetch(TTS_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
     const buf = await res.arrayBuffer();
     if (!res.ok) {
       let detail = "";
@@ -103,30 +122,30 @@
     log("TTS played", blob.size, "bytes");
   }
 
-  function clearTimer() { if (autoTimer) { clearTimeout(autoTimer); autoTimer = null; } }
-  function stopTracks() { try { mediaStream?.getTracks?.().forEach(t => t.stop()); } catch {} mediaStream = null; }
-
-  // ---------- Loop mode (auto continue) ----------
-  let loopMode = false;
+  // --------- Chat helper (filler for perceived latency) ---------
   let lastEmotion = null;
-
-  async function askLLM(user_id, message) {
-    // Small “thinking” filler if we suspect >300ms
+  async function askLLM(text) {
     let cancelled = false;
     const filler = setTimeout(() => {
       if (!cancelled) speak("Gimme a sec…", { speed: 1.08 });
-    }, 300);
+    }, 350);
 
-    const body = { user_id, message, emotion_state: lastEmotion || undefined };
-    const res = await fetch(CHAT_URL, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    const res = await fetch(CHAT_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ user_id: "global", message: text, emotion_state: lastEmotion || undefined })
+    });
     clearTimeout(filler); cancelled = true;
 
     const data = await res.json().catch(() => ({}));
+    log("CHAT status", res.status, data);
     if (!res.ok) throw new Error(`CHAT ${res.status}: ${JSON.stringify(data)}`);
-    return data;
+
+    lastEmotion = data?.next_emotion_state || null;
+    if (data.reply) await speak(data.reply, { emotion: lastEmotion || undefined, speed: 1.03 });
   }
 
-  // ---------- Recording control ----------
+  // --------- Recording control ---------
   async function startRecording() {
     if (mediaRecorder && mediaRecorder.state === "recording") {
       log("already recording; ignoring start");
@@ -148,24 +167,15 @@
 
         if (blob.size < 8192) { log("too small; speak a bit longer."); mediaRecorder = null; return; }
 
-        // STT → CHAT → TTS
         try {
           const stt = await sttUploadBlob(blob);
           log("TRANSCRIPT:", stt.transcript);
-
-          const reply = await askLLM("global", stt.transcript);
-          lastEmotion = reply?.next_emotion_state || null;
-          log("CHAT status", 200, reply);
-
-          await speak(reply.reply || "Got it.", { emotion: lastEmotion || undefined, speed: 1.03 });
+          await askLLM(stt.transcript);
         } catch (err) {
           log("STT/CHAT failed", String(err?.message || err));
         } finally {
-          mediaRecorder = null; chunks = [];
-          if (loopMode) {
-            // give the TTS tail a moment to clear the mic loopback
-            setTimeout(() => startRecording(), 350);
-          }
+          mediaRecorder = null;
+          chunks = [];
         }
       };
 
@@ -187,7 +197,9 @@
 
   function stopRecording() {
     if (mediaRecorder && mediaRecorder.state === "recording") {
-      mediaRecorder.stop(); log("recording stopped (manual)"); return;
+      mediaRecorder.stop();
+      log("recording stopped (manual)");
+      return;
     }
     log("stop clicked but no active recorder");
   }
