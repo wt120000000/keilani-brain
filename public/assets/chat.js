@@ -1,4 +1,4 @@
-// CHAT.JS BUILD TAG → 2025-09-19T16:20-0700 (VAD-based auto-stop)
+// CHAT.JS BUILD TAG → 2025-09-19T17:05-0700 (Smarter VAD, sustained-speech gating, TTS retry)
 
 (() => {
   const API_ORIGIN = location.origin; // same origin (api.keilani.ai)
@@ -26,19 +26,26 @@
   let audioCtx = null;
   let analyser = null;
   let sourceNode = null;
-  let vadRaf = null;
-  let vadLastSpeech = 0;
-  let vadStartedAt = 0;
+  let vadTimer = null;
 
-  // VAD tuning (adjust if needed)
-  const MIN_CAPTURE_MS = 1200; // don't stop before this (lets you start talking)
-  const SILENCE_MS     = 900;  // stop after this long of silence
-  const MAX_CAPTURE_MS = 8000; // hard cap
-  const VAD_INTERVAL   = 80;   // ms between checks
-  const VAD_THRESH     = 7;    // sensitivity ~ amplitude delta (0-127 baseline=128)
+  // --- VAD tuning ---
+  // We only stop AFTER these conditions:
+  // 1) speech has actually started and lasted ≥ SPEECH_MIN_MS
+  // 2) silence ≥ SILENCE_MS
+  // 3) and also obey MIN_CAPTURE_MS and MAX_CAPTURE_MS safeguards
+  const MIN_CAPTURE_MS  = 1600; // minimum total capture time
+  const SPEECH_MIN_MS   = 800;  // you must have spoken at least this long
+  const SILENCE_MS      = 1300; // stop after this long of silence
+  const MAX_CAPTURE_MS  = 10000;
+  const VAD_INTERVAL    = 75;   // check interval ms
+
+  // RMS threshold: ~0..127 scale around 0.
+  // Typical ambient is <3-4; normal speech 8-20+. Tune per device/room if needed.
+  const RMS_THRESH      = 9;    // sensitivity (higher = less sensitive)
+  const START_HOLD_MS   = 220;  // require this much continuous speech to mark "speech started"
 
   const USER_ID = "global";
-  let loopMode = true; // default to conversational loop
+  let loopMode = true;
 
   // ===== Helpers =====
   function blobToBase64Raw(blob) {
@@ -86,37 +93,43 @@
       format: 'mp3'
     };
 
-    const res = await fetch(TTS_URL, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify(payload)
-    });
+    // small retry for 429s
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const res = await fetch(TTS_URL, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
 
-    const buf = await res.arrayBuffer();
-    if (!res.ok) {
-      let detail = '';
-      try { detail = JSON.parse(new TextDecoder().decode(buf)); } catch {}
-      log('TTS error', res.status, detail || new TextDecoder().decode(buf));
-      throw new Error(`TTS ${res.status}`);
-    }
-
-    const blob = new Blob([buf], { type: 'audio/mpeg' });
-    const url = URL.createObjectURL(blob);
-    const audio = new Audio(url);
-
-    return new Promise((resolve) => {
-      audio.onended = () => {
-        URL.revokeObjectURL(url);
-        log('TTS finished');
-        if (loopMode) {
-          log('🔁 auto-restart mic');
-          startRecording();
+      const buf = await res.arrayBuffer();
+      if (!res.ok) {
+        let detail = '';
+        try { detail = JSON.parse(new TextDecoder().decode(buf)); } catch {}
+        log('TTS error', res.status, detail || new TextDecoder().decode(buf));
+        if (res.status === 429 && attempt === 0) {
+          await new Promise(r => setTimeout(r, 500 + Math.random() * 400));
+          continue;
         }
-        resolve();
-      };
-      audio.play();
-      log('TTS played', blob.size, 'bytes');
-    });
+        throw new Error(`TTS ${res.status}`);
+      }
+
+      const blob = new Blob([buf], { type: 'audio/mpeg' });
+      const url = URL.createObjectURL(blob);
+      const audio = new Audio(url);
+      return new Promise((resolve) => {
+        audio.onended = () => {
+          URL.revokeObjectURL(url);
+          log('TTS finished');
+          if (loopMode) {
+            log('🔁 auto-restart mic');
+            startRecording();
+          }
+          resolve();
+        };
+        audio.play();
+        log('TTS played', blob.size, 'bytes');
+      });
+    }
   }
 
   async function askLLM(transcript) {
@@ -136,9 +149,9 @@
   }
 
   function cleanupVAD() {
-    if (vadRaf) {
-      cancelAnimationFrame(vadRaf);
-      vadRaf = null;
+    if (vadTimer) {
+      clearTimeout(vadTimer);
+      vadTimer = null;
     }
     try { sourceNode?.disconnect(); } catch {}
     try { analyser?.disconnect(); } catch {}
@@ -152,9 +165,8 @@
     mediaStream = null;
   }
 
-  // ===== Recording with VAD =====
+  // ===== Recording with smarter VAD =====
   async function startRecording() {
-    // Ensure single session
     if (mediaRecorder && mediaRecorder.state === 'recording') {
       log('already recording; ignoring start');
       return;
@@ -166,7 +178,7 @@
     try {
       mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
-      // MediaRecorder setup (container)
+      // Prefer webm/opus for lowest latency; ogg/opus fallback
       const preferredMime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
         ? 'audio/webm;codecs=opus'
         : 'audio/ogg;codecs=opus';
@@ -190,10 +202,11 @@
         log('final blob', blob.type, blob.size, 'bytes');
         stopTracks();
 
-        if (blob.size < 6000) {
+        if (blob.size < 9000) { // ~> ensure we got enough signal for accuracy
           log('too small; record a bit longer.');
           mediaRecorder = null;
           chunks = [];
+          if (loopMode) startRecording();
           return;
         }
 
@@ -218,44 +231,72 @@
       sourceNode.connect(analyser);
 
       const buf = new Uint8Array(analyser.fftSize);
-      vadStartedAt = performance.now();
-      vadLastSpeech = vadStartedAt;
+      const startedAt = performance.now();
+      let lastSpeechAt = startedAt;
+      let speechStarted = false;
+      let speechStartCandidateAt = null;
 
       const tick = () => {
         analyser.getByteTimeDomainData(buf);
-        // Compute simple amplitude deviation from 128 baseline
-        let maxDev = 0;
+
+        // Compute RMS (relative to mid 128)
+        let sumSq = 0;
         for (let i = 0; i < buf.length; i++) {
-          const dev = Math.abs(buf[i] - 128);
-          if (dev > maxDev) maxDev = dev;
+          const dev = buf[i] - 128;
+          sumSq += dev * dev;
         }
+        const rms = Math.sqrt(sumSq / buf.length); // approx 0..~35+
+
         const now = performance.now();
-        const speaking = maxDev >= VAD_THRESH;
+        const elapsed = now - startedAt;
 
-        if (speaking) vadLastSpeech = now;
+        // Speech gate: require RMS above threshold for START_HOLD_MS to declare "speechStarted"
+        if (rms >= RMS_THRESH) {
+          if (!speechStartCandidateAt) speechStartCandidateAt = now;
+          if (!speechStarted && now - speechStartCandidateAt >= START_HOLD_MS) {
+            speechStarted = true;
+            log('VAD: speech started');
+          }
+          lastSpeechAt = now;
+        } else {
+          // below threshold
+          speechStartCandidateAt = null;
+        }
 
-        const elapsed = now - vadStartedAt;
-        const silence = now - vadLastSpeech;
+        const silenceDur = now - lastSpeechAt;
 
-        // stop conditions: after min capture and either long silence or hard cap
-        if (elapsed >= MIN_CAPTURE_MS && (silence >= SILENCE_MS || elapsed >= MAX_CAPTURE_MS)) {
+        // Stop only after:
+        // - min total capture
+        // - speech has actually started and lasted some time
+        // - sufficient silence
+        const speechDur = speechStarted ? (lastSpeechAt - startedAt) : 0;
+
+        const stopBySilence =
+          elapsed >= MIN_CAPTURE_MS &&
+          speechStarted &&
+          speechDur >= SPEECH_MIN_MS &&
+          silenceDur >= SILENCE_MS;
+
+        const stopByMax = elapsed >= MAX_CAPTURE_MS;
+
+        if (stopBySilence || stopByMax) {
           try {
             if (mediaRecorder && mediaRecorder.state === 'recording') {
               mediaRecorder.stop();
-              log('recording stopped (VAD)');
+              log(`recording stopped (VAD ${stopBySilence ? 'silence' : 'max'})`);
             }
           } catch (e) {
             console.warn('stop err', e);
           }
           return;
         }
-        // pace checks ~VAD_INTERVAL
-        vadRaf = setTimeout(() => requestAnimationFrame(tick), VAD_INTERVAL);
+
+        vadTimer = setTimeout(tick, VAD_INTERVAL);
       };
 
       mediaRecorder.start(); // single pass; VAD decides when to stop
       log('recording started with', mediaRecorder.mimeType, '(VAD)');
-      requestAnimationFrame(tick);
+      vadTimer = setTimeout(tick, VAD_INTERVAL);
 
     } catch (err) {
       console.error(err);
