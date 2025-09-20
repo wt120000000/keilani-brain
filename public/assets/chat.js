@@ -1,5 +1,5 @@
 // public/assets/chat.js
-// BUILD: 2025-09-20T21:05Z
+// BUILD: 2025-09-20T21:45Z
 
 (() => {
   // --------- Config ---------
@@ -19,14 +19,12 @@
   }
   if (logEl && !logEl.textContent) logEl.textContent = "DOM not ready…";
 
-  // --------- DOM wiring (handles both new & old IDs) ---------
+  // --------- DOM wiring (supports new & legacy IDs) ---------
   function getButtons() {
-    // Preferred IDs (match your index.html)
     const record = document.getElementById("recordBtn") || document.querySelector('[data-action="record"]');
     const stop   = document.getElementById("stopBtn")   || document.querySelector('[data-action="stop"]');
     const say    = document.getElementById("sayBtn")    || document.querySelector('[data-action="say"]');
 
-    // Legacy fallback IDs (what an older script used)
     const legacyRecord = document.getElementById("btnRecord");
     const legacyStop   = document.getElementById("btnStop");
     const legacySay    = document.getElementById("btnSpeakTest");
@@ -51,7 +49,6 @@
     return true;
   }
 
-  // Retry wiring in case DOM loads slowly
   let __wireTries = 0;
   function ensureWired() {
     if (wireUI()) return;
@@ -82,7 +79,7 @@
     });
   }
 
-  // ---- STT: send JSON (base64) to match backend expectation ----
+  // ---- STT: send JSON (base64) to match backend ----
   async function sttUploadBlob_JSON(blob) {
     const audioBase64 = await blobToBase64Raw(blob);
     const simpleMime = (blob.type || "").split(";")[0] || "application/octet-stream";
@@ -106,26 +103,50 @@
     return data;
   }
 
+  // --------- TTS with 404 fallback (no hard-coded voice) ---------
   async function speak(text, opts = {}) {
-    const payload = {
+    async function requestTTS(payload) {
+      const res = await fetch(TTS_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      const buf = await res.arrayBuffer();
+      return { res, buf };
+    }
+
+    // First try: pass through opts.voice if caller provided; otherwise omit voice
+    const basePayload = {
       text: String(text || ""),
-      voice: opts.voice || "alloy",
       speed: typeof opts.speed === "number" ? opts.speed : 1.0,
       format: "mp3",
-      emotion: opts.emotion || undefined
+      // If your server uses ELEVEN_VOICE_ID default, leaving `voice` undefined
+      // will make it choose that env-configured voice.
+      voice: opts.voice, // may be undefined
+      emotion: opts.emotion || undefined,
     };
-    const res = await fetch(TTS_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(payload)
-    });
-    const buf = await res.arrayBuffer();
+
+    let { res, buf } = await requestTTS(basePayload);
+
+    // If the chosen voice doesn't exist on the Eleven account, retry once without voice
+    if (res.status === 404 || res.status === 400) {
+      try {
+        const detail = new TextDecoder().decode(buf);
+        log("TTS first attempt failed", res.status, detail);
+      } catch {}
+      if (basePayload.voice) {
+        delete basePayload.voice;
+        ({ res, buf } = await requestTTS(basePayload));
+      }
+    }
+
     if (!res.ok) {
       let detail = "";
       try { detail = new TextDecoder().decode(buf); } catch {}
       log("TTS error", res.status, detail);
       throw new Error(`TTS ${res.status}`);
     }
+
     const blob = new Blob([buf], { type: "audio/mpeg" });
     const url = URL.createObjectURL(blob);
     const audio = new Audio(url);
@@ -156,6 +177,8 @@
   }
 
   // --------- Recording control ---------
+  let mediaPreferred = "audio/webm;codecs=opus";
+
   async function startRecording() {
     if (mediaRecorder && mediaRecorder.state === "recording") {
       log("already recording; ignoring start");
@@ -163,15 +186,15 @@
     }
     try {
       mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const preferred = MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus" : "audio/ogg;codecs=opus";
-      mediaRecorder = new MediaRecorder(mediaStream, { mimeType: preferred });
+      mediaPreferred = MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus" : "audio/ogg;codecs=opus";
+      mediaRecorder = new MediaRecorder(mediaStream, { mimeType: mediaPreferred });
       chunks = [];
 
       mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size) { chunks.push(e.data); log("chunk", e.data.type, e.data.size, "bytes"); } };
       mediaRecorder.onerror = (e) => { log("recorder error", String(e?.error || e?.name || e)); };
       mediaRecorder.onstop = async () => {
         clearTimer();
-        const blob = new Blob(chunks, { type: preferred });
+        const blob = new Blob(chunks, { type: mediaPreferred });
         log("final blob", blob.type, blob.size, "bytes");
         stopTracks();
 
@@ -190,7 +213,7 @@
       };
 
       mediaRecorder.start();
-      log("recording started with", preferred);
+      log("recording started with", mediaPreferred);
 
       clearTimer();
       autoTimer = setTimeout(() => {
@@ -214,7 +237,7 @@
     log("stop clicked but no active recorder");
   }
 
-  // Expose for console tests
+  // Expose for console
   window.startRecording = startRecording;
   window.stopRecording  = stopRecording;
   window.speak          = speak;
