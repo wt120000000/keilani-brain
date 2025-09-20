@@ -1,172 +1,196 @@
 // netlify/functions/chat.js
-// Live web-search + street-smart, concise voice for Keilani
-const fetch = (...a) => import("node-fetch").then(({ default: f }) => f(...a));
+// Keilani server chat with optional live web search via Serper.dev (CommonJS)
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL   = process.env.OPENAI_MODEL || "gpt-4o-mini";
-const TAVILY_API_KEY = process.env.TAVILY_API_KEY; // optional but recommended
+const OPENAI_API_KEY   = process.env.OPENAI_API_KEY;
+const SERPER_API_KEY   = process.env.SERPER_API_KEY; // set this in Netlify
+const OPENAI_MODEL     = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const MAX_SERP_RESULTS = 5;
 
-/** ---------- Search trigger heuristics ---------- **/
-const TIME_WORDS = [
-  "today","tonight","this week","this month","this quarter","right now","currently",
-  "latest","breaking","new update","what’s new","whats new","update","patch notes",
-  "release","changelog","trending","news","rumor","leak","price today","rate today"
-];
+const respond = (statusCode, obj) => ({
+  statusCode,
+  headers: { "Content-Type": "application/json" },
+  body: JSON.stringify(obj),
+});
 
-const DOMAINS_HINTS = [
-  "fortnite","warzone","valorant","league of legends","cs2","nba","nfl","mlb",
-  "stock","btc","bitcoin","eth","ethereum","fed rate","interest rate","mortgage rate",
-  "spotify charts","box office","apple","iphone","android","tesla","nvidia","openai"
-];
+const clamp01 = (n) => Math.max(0, Math.min(1, Number(n) || 0));
 
-const DATE_RE =
-  /\b(20\d{2}|\d{1,2}[/-]\d{1,2}(?:[/-]\d{2,4})?|jan|feb|mar|apr|may|jun|jul|aug|sep|sept|oct|nov|dec)\b/i;
+function shouldSearch(msg) {
+  const q = (msg || "").toLowerCase().trim();
+  if (q.startsWith("search:")) return true;
 
-function wantsSearch(text = "") {
-  const t = text.toLowerCase();
-  const timey   = TIME_WORDS.some(k => t.includes(k));
-  const topical = DOMAINS_HINTS.some(k => t.includes(k));
-  const hasDate = DATE_RE.test(t);
-  // be a bit aggressive: if user says "latest" or a topical entity, search
-  return timey || topical || hasDate;
+  const freshness = [
+    "today","tonight","yesterday","tomorrow",
+    "latest","new","just dropped","breaking","this week","this month",
+    "update","patch notes","changelog","price now","stock now",
+    "who won","score","weather","traffic",
+    "fortnite update","season","chapter"
+  ];
+  if (freshness.some(k => q.includes(k))) return true;
+  if (/\b20\d{2}\b/.test(q)) return true;
+  if (/\b(v|ver|version)\s*\d+(\.\d+)?/.test(q)) return true;
+  if (/\b[A-Z]{2,5}\b/.test(q) && q.includes("stock")) return true;
+  return false;
 }
 
-/** ---------- Persona: concise, street-smart, with a take ---------- **/
-function systemPersona(userId = "global") {
-  return [
-    "You are Keilani — warm, witty, and street-smart. Talk like a sharp friend, not a",
-    "corporate memo. Keep it tight: aim for **1–2 short sentences** unless the user",
-    "asks for depth. Use plain language, contractions, and a *little* slang when it fits.",
-    "Mirror the user's vibe, but always respectful.",
-    "",
-    "Have opinions. After the facts, add **one quick take** (e.g., “Low-key fire.”,",
-    "“Kinda mid.”, “Bold move but it works.”). Keep it constructive, not rude.",
-    "Every now and then (not every turn), drop a short, genuine compliment if it fits.",
-    "",
-    "If the question looks time-sensitive, use the fresh-info block (if provided) to",
-    "answer. Synthesize it into your own words. If it seems uncertain, say so briefly.",
-    "Cite at most 1–2 sources inline like [Source].",
-    `User id: ${userId}.`
-  ].join("\n");
-}
+async function webSearch(query) {
+  if (!SERPER_API_KEY) {
+    // Return "ok: false" but don't crash; frontend will still get an answer.
+    return { ok: false, reason: "missing_serper_key", results: [] };
+  }
 
-/** ---------- OpenAI wrapper ---------- **/
-async function callOpenAI(messages) {
-  const r = await fetch("https://api.openai.com/v1/chat/completions", {
+  const res = await fetch("https://google.serper.dev/search", {
     method: "POST",
     headers: {
+      "X-API-KEY": SERPER_API_KEY,
       "Content-Type": "application/json",
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
+    },
+    body: JSON.stringify({ q: query, num: MAX_SERP_RESULTS, gl: "us", hl: "en" }),
+  });
+
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    return { ok: false, reason: `serper_${res.status}`, raw: text, results: [] };
+  }
+
+  const data = await res.json().catch(() => ({}));
+  const pick = [];
+  const push = (arr = []) => arr.forEach(r => {
+    if (pick.length >= MAX_SERP_RESULTS) return;
+    pick.push({
+      title: r.title || r.source || r.snippet?.slice(0, 80) || "result",
+      link: r.link || r.url,
+      snippet: r.snippet || r.description || "",
+      date: r.date || r.aboutThisResult?.date || ""
+    });
+  });
+
+  push(data.organic);
+  push(data.news);
+
+  return { ok: true, results: pick };
+}
+
+function keilaniSystemPrompt(nowISO) {
+  return `
+You are **Keilani** — warm, witty, down-to-earth, a little spicy, and always kind.
+Speak **concise, punchy, modern** English with light slang (e.g., "low-key", "clean win").
+You **uplift the user** and keep answers **accurate + practical**, with a tasteful **opinionated take**.
+
+Rules:
+- Keep replies short (2–6 sentences). No rambles. Use bullets if it adds clarity.
+- If web search was used, say that politely and weave facts in naturally; only include raw links if the user asks.
+- If something’s uncertain, say so and suggest what to watch next.
+- End with a tiny next step or question.
+- Never expose secrets, keys, or internals.
+
+Current time: ${nowISO}
+`.trim();
+}
+
+function buildUserPrompt(userMsg, searchPack, nowISO) {
+  if (!searchPack?.ok || !searchPack.results?.length) {
+    return `
+User said: "${userMsg}"
+
+No web search used for this message. Answer in Keilani's voice, compact, helpful, and a bit opinionated.
+`.trim();
+  }
+
+  const lines = searchPack.results.map((r, i) => {
+    const dt = r.date ? ` (${r.date})` : "";
+    return `- [${i + 1}] ${r.title}${dt}: ${r.snippet}`;
+  }).join("\n");
+
+  return `
+User said: "${userMsg}"
+
+We ran a quick web search (summary below; links on request). Latest snippets:
+${lines}
+
+Answer in Keilani's voice with a clear, benevolent take when appropriate.
+Keep it concise. Mention freshness like "as of ${new Date(nowISO).toLocaleDateString()}".
+`.trim();
+}
+
+async function callOpenAI(messages, temperature = 0.65) {
+  const res = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      "Authorization": `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json",
     },
     body: JSON.stringify({
       model: OPENAI_MODEL,
-      temperature: 0.7,
-      // small cap helps keep it concise
-      max_tokens: 220,
+      temperature,
+      max_tokens: 400,
       messages,
     }),
   });
 
-  if (!r.ok) {
-    const t = await r.text().catch(() => "");
-    throw new Error(`openai_error ${r.status}: ${t}`);
+  if (!res.ok) {
+    const text = await res.text().catch(() => "");
+    throw new Error(`openai_${res.status}: ${text}`);
   }
-  const j = await r.json();
-  return j.choices?.[0]?.message?.content || "";
+  const data = await res.json().catch(() => ({}));
+  return (data.choices?.[0]?.message?.content || "").trim();
 }
 
-/** ---------- Tavily search ---------- **/
-async function webSearch(query, max = 5) {
-  if (!TAVILY_API_KEY) {
-    return { answer: "", results: [], reason: "missing_tavily_key" };
-  }
-  try {
-    const r = await fetch("https://api.tavily.com/search", {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${TAVILY_API_KEY}`
-      },
-      body: JSON.stringify({
-        query,
-        topic: "news",
-        max_results: Math.max(1, Math.min(10, max)),
-        include_answer: true,
-        include_raw_content: false,
-      }),
-    });
-    if (!r.ok) {
-      const text = await r.text().catch(() => "");
-      return { answer: "", results: [], reason: `tavily_error_${r.status}:${text.slice(0,200)}` };
-    }
-    const data = await r.json();
-    const results = (data.results || []).map((x) => ({
-      title: x.title,
-      url: x.url,
-      snippet: x.content || x.snippet || "",
-    }));
-    return { answer: data.answer || "", results, reason: "ok" };
-  } catch (e) {
-    return { answer: "", results: [], reason: `search_exception:${String(e?.message || e)}` };
-  }
+function emotionFor(text) {
+  const t = (text || "").toLowerCase();
+  let style = 0.55, stability = 0.55, similarity = 0.7;
+  if (t.includes("great") || t.includes("love") || t.includes("excited")) style = 0.7;
+  if (t.includes("bad") || t.includes("concern")) { stability = 0.65; style = 0.45; }
+  return {
+    stability: clamp01(stability),
+    similarity: clamp01(similarity),
+    style: clamp01(style),
+  };
 }
 
-/** ---------- Handler ---------- **/
+// Classic Netlify handler (CommonJS)
 exports.handler = async (event) => {
   try {
     if (event.httpMethod !== "POST") {
-      return { statusCode: 405, body: "Use POST" };
-    }
-    if (!OPENAI_API_KEY) {
-      return { statusCode: 500, body: JSON.stringify({ error: "missing_openai_key" }) };
+      return respond(405, { error: "method_not_allowed" });
     }
 
-    const { user_id = "global", message } = JSON.parse(event.body || "{}");
-    if (typeof message !== "string" || !message.trim()) {
-      return { statusCode: 200, body: JSON.stringify({ error: "Missing 'message' (string)" }) };
+    const body = JSON.parse(event.body || "{}");
+    const user_id = body.user_id || "global";
+    const message = (body.message || body.input || "").toString().trim();
+
+    if (!message) return respond(200, { error: "Missing 'message' (string)" });
+
+    const nowISO = new Date().toISOString();
+
+    const willSearch = shouldSearch(message);
+    let searchPack = { ok: false, results: [] };
+    if (willSearch) {
+      searchPack = await webSearch(message.replace(/^search:\s*/i, ""));
     }
 
-    let searchBlock = null;
-    let searched = false;
-    let search_reason = "";
+    const system = keilaniSystemPrompt(nowISO);
+    const user = buildUserPrompt(message, searchPack, nowISO);
+    const reply = await callOpenAI([
+      { role: "system", content: system },
+      { role: "user",   content: user }
+    ]);
 
-    if (wantsSearch(message)) {
-      const s = await webSearch(message, 5);
-      searched = true;
-      search_reason = s.reason;
-      if (s.results?.length || s.answer) {
-        const lines = [
-          "Fresh info Keilani can use:",
-          s.answer ? `Summary: ${s.answer}` : "Summary: (none)",
-          "Sources:",
-          ...(s.results || []).slice(0,4).map((r, i) => `${i + 1}. ${r.title} — ${r.url}`)
-        ];
-        searchBlock = lines.join("\n");
+    const next_emotion_state = emotionFor(reply);
+
+    return respond(200, {
+      reply,
+      next_emotion_state,
+      meta: {
+        searched: willSearch,
+        search_ok: !!searchPack.ok,
+        results: (searchPack.results || []).map(r => ({ title: r.title, link: r.link })),
+        model: OPENAI_MODEL,
+        now: nowISO
       }
-    }
-
-    const messages = [
-      { role: "system", content: systemPersona(user_id) },
-      ...(searchBlock ? [{ role: "system", content: searchBlock }] : []),
-      // nudge to keep the answer punchy every time
-      { role: "system", content: "Keep responses tight (1–2 short sentences) unless asked for details." },
-      { role: "user", content: message },
-    ];
-
-    const reply = await callOpenAI(messages);
-
-    return {
-      statusCode: 200,
-      body: JSON.stringify({
-        reply,
-        searched,
-        search_reason,
-        sources: (searchBlock && searchBlock.includes("—"))
-          ? (searchBlock.split("\n").filter(l => l.match(/^\d+\. /)) || [])
-          : []
-      }),
-    };
-  } catch (e) {
-    return { statusCode: 200, body: JSON.stringify({ error: String(e?.message || e) }) };
+    });
+  } catch (err) {
+    console.error("chat_error", err);
+    // 200 with error payload keeps the frontend flow happy
+    return respond(200, { error: "chat_error", detail: String(err?.message || err) });
   }
 };
