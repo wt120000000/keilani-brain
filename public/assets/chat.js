@@ -1,12 +1,11 @@
-// CHAT.JS BUILD TAG → 2025-09-19T17:05-0700 (Smarter VAD, sustained-speech gating, TTS retry)
+// CHAT.JS BUILD TAG → 2025-09-19T17:45-0700 (Fast profile: quicker VAD + lower bitrate)
 
 (() => {
-  const API_ORIGIN = location.origin; // same origin (api.keilani.ai)
+  const API_ORIGIN = location.origin;
   const STT_URL   = `${API_ORIGIN}/.netlify/functions/stt`;
   const TTS_URL   = `${API_ORIGIN}/.netlify/functions/tts`;
   const CHAT_URL  = `${API_ORIGIN}/.netlify/functions/chat`;
 
-  // ===== UI logger =====
   const logEl = document.getElementById('log');
   const log = (...args) => {
     console.log('[CHAT]', ...args);
@@ -17,32 +16,27 @@
     }
   };
 
+  // ===== Fast profile knobs =====
+  // Trimmed vs prior build (was SILENCE_MS=1300, START_HOLD_MS=220, MIN_CAPTURE_MS=1600)
+  const FAST = {
+    MIN_CAPTURE_MS : 1200,  // was 1600
+    SPEECH_MIN_MS  : 700,   // was 800
+    SILENCE_MS     : 900,   // was 1300
+    VAD_INTERVAL   : 60,    // was 75
+    RMS_THRESH     : 9,     // leave as-is; bump to 10–12 if noisy
+    START_HOLD_MS  : 160,   // was 220
+    BPS            : 64000, // 64 kbps Opus (smaller upload, still intelligible)
+  };
+
   // ===== State =====
   let mediaRecorder = null;
   let mediaStream = null;
   let chunks = [];
 
-  // VAD state
   let audioCtx = null;
   let analyser = null;
   let sourceNode = null;
   let vadTimer = null;
-
-  // --- VAD tuning ---
-  // We only stop AFTER these conditions:
-  // 1) speech has actually started and lasted ≥ SPEECH_MIN_MS
-  // 2) silence ≥ SILENCE_MS
-  // 3) and also obey MIN_CAPTURE_MS and MAX_CAPTURE_MS safeguards
-  const MIN_CAPTURE_MS  = 1600; // minimum total capture time
-  const SPEECH_MIN_MS   = 800;  // you must have spoken at least this long
-  const SILENCE_MS      = 1300; // stop after this long of silence
-  const MAX_CAPTURE_MS  = 10000;
-  const VAD_INTERVAL    = 75;   // check interval ms
-
-  // RMS threshold: ~0..127 scale around 0.
-  // Typical ambient is <3-4; normal speech 8-20+. Tune per device/room if needed.
-  const RMS_THRESH      = 9;    // sensitivity (higher = less sensitive)
-  const START_HOLD_MS   = 220;  // require this much continuous speech to mark "speech started"
 
   const USER_ID = "global";
   let loopMode = true;
@@ -93,7 +87,7 @@
       format: 'mp3'
     };
 
-    // small retry for 429s
+    // tiny retry for 429
     for (let attempt = 0; attempt < 2; attempt++) {
       const res = await fetch(TTS_URL, {
         method: 'POST',
@@ -107,7 +101,7 @@
         try { detail = JSON.parse(new TextDecoder().decode(buf)); } catch {}
         log('TTS error', res.status, detail || new TextDecoder().decode(buf));
         if (res.status === 429 && attempt === 0) {
-          await new Promise(r => setTimeout(r, 500 + Math.random() * 400));
+          await new Promise(r => setTimeout(r, 450 + Math.random() * 350));
           continue;
         }
         throw new Error(`TTS ${res.status}`);
@@ -149,15 +143,11 @@
   }
 
   function cleanupVAD() {
-    if (vadTimer) {
-      clearTimeout(vadTimer);
-      vadTimer = null;
-    }
+    if (vadTimer) { clearTimeout(vadTimer); vadTimer = null; }
     try { sourceNode?.disconnect(); } catch {}
     try { analyser?.disconnect(); } catch {}
     sourceNode = null;
     analyser = null;
-    // keep audioCtx around; it can be reused
   }
 
   function stopTracks() {
@@ -165,7 +155,7 @@
     mediaStream = null;
   }
 
-  // ===== Recording with smarter VAD =====
+  // ===== Recording with faster VAD =====
   async function startRecording() {
     if (mediaRecorder && mediaRecorder.state === 'recording') {
       log('already recording; ignoring start');
@@ -178,16 +168,21 @@
     try {
       mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
 
-      // Prefer webm/opus for lowest latency; ogg/opus fallback
       const preferredMime = MediaRecorder.isTypeSupported('audio/webm;codecs=opus')
         ? 'audio/webm;codecs=opus'
         : 'audio/ogg;codecs=opus';
-      mediaRecorder = new MediaRecorder(mediaStream, { mimeType: preferredMime });
+
+      // lower bitrate -> smaller upload -> faster STT
+      mediaRecorder = new MediaRecorder(mediaStream, {
+        mimeType: preferredMime,
+        audioBitsPerSecond: FAST.BPS
+      });
 
       mediaRecorder.ondataavailable = (e) => {
         if (e.data && e.data.size) {
           chunks.push(e.data);
-          log('chunk', e.data.type, e.data.size, 'bytes');
+          // keep logs light
+          // log('chunk', e.data.type, e.data.size, 'bytes');
         }
       };
 
@@ -202,7 +197,7 @@
         log('final blob', blob.type, blob.size, 'bytes');
         stopTracks();
 
-        if (blob.size < 9000) { // ~> ensure we got enough signal for accuracy
+        if (blob.size < 8500) {
           log('too small; record a bit longer.');
           mediaRecorder = null;
           chunks = [];
@@ -223,7 +218,7 @@
         }
       };
 
-      // WebAudio VAD pipeline
+      // WebAudio VAD
       if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       analyser = audioCtx.createAnalyser();
       analyser.fftSize = 1024;
@@ -238,65 +233,54 @@
 
       const tick = () => {
         analyser.getByteTimeDomainData(buf);
-
-        // Compute RMS (relative to mid 128)
         let sumSq = 0;
         for (let i = 0; i < buf.length; i++) {
           const dev = buf[i] - 128;
           sumSq += dev * dev;
         }
-        const rms = Math.sqrt(sumSq / buf.length); // approx 0..~35+
+        const rms = Math.sqrt(sumSq / buf.length);
 
         const now = performance.now();
         const elapsed = now - startedAt;
 
-        // Speech gate: require RMS above threshold for START_HOLD_MS to declare "speechStarted"
-        if (rms >= RMS_THRESH) {
+        if (rms >= FAST.RMS_THRESH) {
           if (!speechStartCandidateAt) speechStartCandidateAt = now;
-          if (!speechStarted && now - speechStartCandidateAt >= START_HOLD_MS) {
+          if (!speechStarted && now - speechStartCandidateAt >= FAST.START_HOLD_MS) {
             speechStarted = true;
-            log('VAD: speech started');
+            log('VAD: speech started (fast)');
           }
           lastSpeechAt = now;
         } else {
-          // below threshold
           speechStartCandidateAt = null;
         }
 
         const silenceDur = now - lastSpeechAt;
-
-        // Stop only after:
-        // - min total capture
-        // - speech has actually started and lasted some time
-        // - sufficient silence
         const speechDur = speechStarted ? (lastSpeechAt - startedAt) : 0;
 
         const stopBySilence =
-          elapsed >= MIN_CAPTURE_MS &&
+          elapsed >= FAST.MIN_CAPTURE_MS &&
           speechStarted &&
-          speechDur >= SPEECH_MIN_MS &&
-          silenceDur >= SILENCE_MS;
+          speechDur >= FAST.SPEECH_MIN_MS &&
+          silenceDur >= FAST.SILENCE_MS;
 
-        const stopByMax = elapsed >= MAX_CAPTURE_MS;
+        const stopByMax = elapsed >= 9000; // keep a ceiling
 
         if (stopBySilence || stopByMax) {
           try {
             if (mediaRecorder && mediaRecorder.state === 'recording') {
               mediaRecorder.stop();
-              log(`recording stopped (VAD ${stopBySilence ? 'silence' : 'max'})`);
+              log(`recording stopped (${stopBySilence ? 'silence' : 'max'})`);
             }
-          } catch (e) {
-            console.warn('stop err', e);
-          }
+          } catch (e) {}
           return;
         }
 
-        vadTimer = setTimeout(tick, VAD_INTERVAL);
+        vadTimer = setTimeout(tick, FAST.VAD_INTERVAL);
       };
 
-      mediaRecorder.start(); // single pass; VAD decides when to stop
-      log('recording started with', mediaRecorder.mimeType, '(VAD)');
-      vadTimer = setTimeout(tick, VAD_INTERVAL);
+      mediaRecorder.start();
+      log('recording started with', mediaRecorder.mimeType, '(VAD, fast)');
+      vadTimer = setTimeout(tick, FAST.VAD_INTERVAL);
 
     } catch (err) {
       console.error(err);
@@ -322,13 +306,12 @@
     stopTracks();
   }
 
-  // ===== Wire UI =====
   document.addEventListener('DOMContentLoaded', () => {
     log('DOMContentLoaded; wiring handlers');
     const recBtn  = document.querySelector('#recordBtn');
     const stopBtn = document.querySelector('#stopBtn');
     const ttsBtn  = document.querySelector('#sayBtn');
-    const convBtn = document.querySelector('#convBtn'); // optional
+    const convBtn = document.querySelector('#convBtn');
 
     recBtn?.addEventListener('click', () => {
       loopMode = true;
@@ -337,17 +320,10 @@
     });
 
     stopBtn?.addEventListener('click', () => { log('stop click'); stopRecording(); });
-
     ttsBtn?.addEventListener('click', () => { log('tts click'); speak('Hey—Keilani TTS is live.'); });
-
-    convBtn?.addEventListener('click', () => {
-      log('start conversation click');
-      loopMode = true;
-      startRecording();
-    });
+    convBtn?.addEventListener('click', () => { log('start conversation click'); loopMode = true; startRecording(); });
   });
 
-  // expose for console
   window.startRecording = () => { loopMode = true; startRecording(); };
   window.stopRecording  = stopRecording;
   window.speak          = speak;
