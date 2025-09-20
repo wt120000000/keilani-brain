@@ -1,30 +1,34 @@
 // netlify/functions/tts.js
-// POST { text, voiceId?, modelId?, latency?, stability?, similarity?, style?, outputFormat? } -> audio/mpeg (binary)
+// POST { text, voice?:string, speed?:number, emotion?:string, format?:'mp3'|'wav' }
+// -> audio bytes
+// - Uses OpenAI TTS by default (o4-mini-tts). If ELEVEN_API_KEY+ELEVEN_VOICE_ID exist, uses ElevenLabs.
+// - Applies simple emotion → prosody mapping.
 
-const makeBinary = (buf, extra = {}) => ({
-  statusCode: 200,
-  isBase64Encoded: true,
-  headers: {
-    "Content-Type": "audio/mpeg",
-    "Cache-Control": "no-store",
-    "Access-Control-Allow-Origin": "*",
-    ...extra,
-  },
-  body: buf.toString("base64"),
-});
+const EMO = {
+  calm:      { speed: 0.95, pitch: 0,   voice: "alloy" },
+  happy:     { speed: 1.10, pitch: 2,   voice: "alloy" },
+  friendly:  { speed: 1.05, pitch: 1,   voice: "alloy" },
+  playful:   { speed: 1.15, pitch: 3,   voice: "alloy" },
+  concerned: { speed: 0.98, pitch: -1,  voice: "alloy" },
+  curious:   { speed: 1.05, pitch: 1,   voice: "alloy" },
+  sad:       { speed: 0.90, pitch: -3,  voice: "alloy" },
+  angry:     { speed: 1.00, pitch: -2,  voice: "alloy" },
+};
 
-const makeErr = (status, msg, extra = {}) => ({
-  statusCode: status,
-  headers: {
-    "Content-Type": "application/json",
-    "Access-Control-Allow-Origin": "*",
-    ...extra,
-  },
-  body: JSON.stringify({ error: msg }),
-});
+function json(status, body) {
+  return {
+    statusCode: status,
+    headers: {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    },
+    body: JSON.stringify(body),
+  };
+}
 
 exports.handler = async (event) => {
-  // ---- CORS preflight
   if (event.httpMethod === "OPTIONS") {
     return {
       statusCode: 204,
@@ -36,87 +40,105 @@ exports.handler = async (event) => {
       body: "",
     };
   }
+  if (event.httpMethod !== "POST") return json(405, { error: "method_not_allowed" });
 
-  // ---- Method check
-  if (event.httpMethod !== "POST") {
-    return makeErr(405, "Method Not Allowed");
-  }
+  let body = {};
+  try { body = JSON.parse(event.body || "{}"); }
+  catch (e) { return json(400, { error: "invalid_json", detail: String(e.message || e) }); }
 
-  // ---- API key (support both env names)
-  const API_KEY =
-    process.env.ELEVENLABS_API_KEY ||
-    process.env.ELEVEN_API_KEY ||
-    "";
+  const text = String(body.text || "").trim();
+  if (!text) return json(400, { error: "missing_text" });
 
-  if (!API_KEY) {
-    return makeErr(500, "Missing ELEVENLABS_API_KEY (or ELEVEN_API_KEY)");
-  }
+  // Map emotion → prosody defaults
+  const emKey = (body.emotion || "").toLowerCase();
+  const emo = EMO[emKey] || EMO.calm;
+
+  // Caller can override
+  const fmt = (body.format || "mp3").toLowerCase();
+  const speed = typeof body.speed === "number" ? body.speed : emo.speed;
+  const voicePref = String(body.voice || emo.voice);
+
+  // Prefer Eleven if configured, else OpenAI TTS
+  const EL_KEY = process.env.ELEVEN_API_KEY;
+  const EL_VOICE = process.env.ELEVEN_VOICE_ID;
 
   try {
-    const input = JSON.parse(event.body || "{}");
+    if (EL_KEY && EL_VOICE) {
+      // ---- ElevenLabs ----
+      const url = `https://api.elevenlabs.io/v1/text-to-speech/${EL_VOICE}`;
+      const resp = await fetch(url, {
+        method: "POST",
+        headers: {
+          "xi-api-key": EL_KEY,
+          "Content-Type": "application/json",
+          "Accept": fmt === "mp3" ? "audio/mpeg" : "audio/wav",
+        },
+        body: JSON.stringify({
+          text,
+          model_id: "eleven_monolingual_v1",
+          voice_settings: {
+            stability: 0.5,
+            similarity_boost: 0.8,
+            style: Math.max(0, Math.min(100, 50 + (emo.pitch * 5))), // simple style tweak
+            use_speaker_boost: true
+          }
+        })
+      });
 
-    const text = (input.text || "").toString().trim();
-    if (!text) return makeErr(400, "Missing text");
+      if (!resp.ok) {
+        const errText = await resp.text();
+        return json(resp.status, { error: "tts_eleven_error", detail: errText });
+      }
 
-    // Voice resolution:
-    //  1) request body voiceId
-    //  2) env ELEVEN_VOICE_ID
-    const voiceId = (input.voiceId || process.env.ELEVEN_VOICE_ID || "").trim();
-    if (!voiceId) {
-      return makeErr(400, "Missing voiceId (and ELEVEN_VOICE_ID fallback not set)");
+      const buf = Buffer.from(await resp.arrayBuffer());
+      return {
+        statusCode: 200,
+        headers: {
+          "Content-Type": fmt === "mp3" ? "audio/mpeg" : "audio/wav",
+          "Access-Control-Allow-Origin": "*",
+        },
+        body: buf.toString("base64"),
+        isBase64Encoded: true,
+      };
     }
 
-    // Optional tuning
-    const modelId = (input.modelId || "eleven_monolingual_v1").toString();
-    // 0 (highest quality) through 4 (lowest latency). When doing non-stream REST,
-    // this can be passed; some voices ignore it. Safe to include.
-    const latency = Number.isFinite(+input.latency) ? +input.latency : 2;
+    // ---- OpenAI TTS ----
+    const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+    if (!OPENAI_API_KEY) return json(500, { error: "missing_openai_key" });
 
-    // Voice settings
-    const stability = Number.isFinite(+input.stability) ? +input.stability : 0.5;
-    const similarity = Number.isFinite(+input.similarity) ? +input.similarity : 0.75;
-    const style = Number.isFinite(+input.style) ? +input.style : 0.0;
-
-    // Output format (see ElevenLabs docs for allowed values)
-    // Common: mp3_44100_128, mp3_44100_192, mp3_44100_64, etc.
-    const outputFormat = (input.outputFormat || "mp3_44100_128").toString();
-
-    const url = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(
-      voiceId
-    )}`;
-
-    const payload = {
-      text,
-      model_id: modelId,
-      optimize_streaming_latency: latency, // accepted by some models/voices; harmless otherwise
-      voice_settings: {
-        stability,
-        similarity_boost: similarity,
-        style,
-      },
-      output_format: outputFormat,
-    };
-
-    const res = await fetch(url, {
+    const model = process.env.OPENAI_TTS_MODEL || "gpt-4o-mini-tts";
+    const resp = await fetch("https://api.openai.com/v1/audio/speech", {
       method: "POST",
       headers: {
-        "xi-api-key": API_KEY,
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
         "Content-Type": "application/json",
-        Accept: "audio/mpeg",
       },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({
+        model,
+        input: text,
+        voice: voicePref,
+        format: fmt,
+        // OpenAI doesn't expose pitch directly; speed is honored.
+        speed
+      }),
     });
 
-    if (!res.ok) {
-      // Try to bubble up a helpful error
-      let details = "";
-      try { details = await res.text(); } catch (_) {}
-      return makeErr(res.status, details || `ElevenLabs TTS error (${res.status})`);
+    if (!resp.ok) {
+      const errText = await resp.text();
+      return json(resp.status, { error: "tts_openai_error", detail: errText });
     }
 
-    const arrayBuf = await res.arrayBuffer();
-    return makeBinary(Buffer.from(arrayBuf));
+    const buf = Buffer.from(await resp.arrayBuffer());
+    return {
+      statusCode: 200,
+      headers: {
+        "Content-Type": fmt === "mp3" ? "audio/mpeg" : "audio/wav",
+        "Access-Control-Allow-Origin": "*",
+      },
+      body: buf.toString("base64"),
+      isBase64Encoded: true,
+    };
   } catch (e) {
-    return makeErr(500, `tts exception: ${e.message || String(e)}`);
+    return json(502, { error: "tts_exception", detail: String(e.message || e) });
   }
 };
