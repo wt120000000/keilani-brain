@@ -1,4 +1,5 @@
-// CHAT.JS BUILD TAG → 2025-09-19T17:45-0700 (Fast profile: quicker VAD + lower bitrate)
+// public/assets/chat.js
+// BUILD TAG → 2025-09-19T18:20-0700 (Emotion state plumbed end-to-end)
 
 (() => {
   const API_ORIGIN = location.origin;
@@ -16,32 +17,31 @@
     }
   };
 
-  // ===== Fast profile knobs =====
-  // Trimmed vs prior build (was SILENCE_MS=1300, START_HOLD_MS=220, MIN_CAPTURE_MS=1600)
+  // ===== AFFECT (persisted per-device) =====
+  let affect = null; // { mood, valence, arousal, intensity, since, decay }
+  try { affect = JSON.parse(localStorage.getItem('affect') || 'null'); } catch {}
+  if (!affect) affect = { mood:"calm", valence:0, arousal:0.25, intensity:0.25, since:new Date().toISOString(), decay:{half_life_sec:600} };
+
+  function saveAffect(a) {
+    affect = a || affect;
+    try { localStorage.setItem('affect', JSON.stringify(affect)); } catch {}
+  }
+
+  // ===== Recorder/VAD state (from your latest) =====
+  let mediaRecorder = null, mediaStream = null, chunks = [];
+  let audioCtx = null, analyser = null, sourceNode = null, vadTimer = null;
   const FAST = {
-    MIN_CAPTURE_MS : 1200,  // was 1600
-    SPEECH_MIN_MS  : 700,   // was 800
-    SILENCE_MS     : 900,   // was 1300
-    VAD_INTERVAL   : 60,    // was 75
-    RMS_THRESH     : 9,     // leave as-is; bump to 10–12 if noisy
-    START_HOLD_MS  : 160,   // was 220
-    BPS            : 64000, // 64 kbps Opus (smaller upload, still intelligible)
+    MIN_CAPTURE_MS : 1200,
+    SPEECH_MIN_MS  : 700,
+    SILENCE_MS     : 900,
+    VAD_INTERVAL   : 60,
+    RMS_THRESH     : 9,
+    START_HOLD_MS  : 160,
+    BPS            : 64000,
   };
-
-  // ===== State =====
-  let mediaRecorder = null;
-  let mediaStream = null;
-  let chunks = [];
-
-  let audioCtx = null;
-  let analyser = null;
-  let sourceNode = null;
-  let vadTimer = null;
-
   const USER_ID = "global";
   let loopMode = true;
 
-  // ===== Helpers =====
   function blobToBase64Raw(blob) {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -71,7 +71,6 @@
       headers: { 'Content-Type': 'application/json' },
       body: JSON.stringify(body)
     });
-
     let data = null;
     try { data = await res.json(); } catch {}
     log('STT status', res.status, data);
@@ -79,12 +78,18 @@
     return data;
   }
 
+  function ttsOptsFromAffect(a) {
+    // Only speed exposed reliably; voice via server mapping
+    // Keep client neutral; server maps voice. We pass emotion_state through.
+    return { emotion_state: a };
+  }
+
   async function speak(text, opts = {}) {
     const payload = {
       text: String(text || 'Hello, Keilani here.'),
-      voice: opts.voice || 'alloy',
-      speed: typeof opts.speed === 'number' ? opts.speed : 1.0,
-      format: 'mp3'
+      format: 'mp3',
+      // AFFECT: forward current affect
+      emotion_state: opts.emotion_state || affect
     };
 
     // tiny retry for 429
@@ -127,7 +132,13 @@
   }
 
   async function askLLM(transcript) {
-    const payload = { user_id: USER_ID, message: transcript };
+    const payload = {
+      user_id: USER_ID,
+      message: transcript,
+      // AFFECT: send current affect so server can decay/blend
+      emotion_state: affect
+    };
+
     const res = await fetch(CHAT_URL, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
@@ -139,15 +150,21 @@
     log('CHAT status', res.status, data);
 
     if (!res.ok) throw new Error(`CHAT ${res.status}: ${JSON.stringify(data)}`);
-    if (data.reply) await speak(data.reply);
+
+    // AFFECT: store the returned next state
+    if (data.next_emotion_state) saveAffect(data.next_emotion_state);
+
+    if (data.reply) {
+      const ttsOpts = ttsOptsFromAffect(affect);
+      await speak(data.reply, ttsOpts);
+    }
   }
 
   function cleanupVAD() {
     if (vadTimer) { clearTimeout(vadTimer); vadTimer = null; }
     try { sourceNode?.disconnect(); } catch {}
     try { analyser?.disconnect(); } catch {}
-    sourceNode = null;
-    analyser = null;
+    sourceNode = null; analyser = null;
   }
 
   function stopTracks() {
@@ -155,15 +172,13 @@
     mediaStream = null;
   }
 
-  // ===== Recording with faster VAD =====
+  // ===== Recording with faster VAD (from your current fast build) =====
   async function startRecording() {
     if (mediaRecorder && mediaRecorder.state === 'recording') {
       log('already recording; ignoring start');
       return;
     }
-    stopTracks();
-    cleanupVAD();
-    chunks = [];
+    stopTracks(); cleanupVAD(); chunks = [];
 
     try {
       mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
@@ -172,24 +187,13 @@
         ? 'audio/webm;codecs=opus'
         : 'audio/ogg;codecs=opus';
 
-      // lower bitrate -> smaller upload -> faster STT
       mediaRecorder = new MediaRecorder(mediaStream, {
         mimeType: preferredMime,
         audioBitsPerSecond: FAST.BPS
       });
 
-      mediaRecorder.ondataavailable = (e) => {
-        if (e.data && e.data.size) {
-          chunks.push(e.data);
-          // keep logs light
-          // log('chunk', e.data.type, e.data.size, 'bytes');
-        }
-      };
-
-      mediaRecorder.onerror = (e) => {
-        console.error('[CHAT] recorder error', e);
-        log('recorder error', String(e?.error || e?.name || e));
-      };
+      mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size) chunks.push(e.data); };
+      mediaRecorder.onerror = (e) => { console.error('[CHAT] recorder error', e); log('recorder error', String(e?.error || e?.name || e)); };
 
       mediaRecorder.onstop = async () => {
         cleanupVAD();
@@ -199,8 +203,7 @@
 
         if (blob.size < 8500) {
           log('too small; record a bit longer.');
-          mediaRecorder = null;
-          chunks = [];
+          mediaRecorder = null; chunks = [];
           if (loopMode) startRecording();
           return;
         }
@@ -213,12 +216,10 @@
           console.error(err);
           log('STT/CHAT failed', String(err && err.message || err));
         } finally {
-          mediaRecorder = null;
-          chunks = [];
+          mediaRecorder = null; chunks = [];
         }
       };
 
-      // WebAudio VAD
       if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
       analyser = audioCtx.createAnalyser();
       analyser.fftSize = 1024;
@@ -234,10 +235,7 @@
       const tick = () => {
         analyser.getByteTimeDomainData(buf);
         let sumSq = 0;
-        for (let i = 0; i < buf.length; i++) {
-          const dev = buf[i] - 128;
-          sumSq += dev * dev;
-        }
+        for (let i = 0; i < buf.length; i++) { const dev = buf[i] - 128; sumSq += dev * dev; }
         const rms = Math.sqrt(sumSq / buf.length);
 
         const now = performance.now();
@@ -246,8 +244,7 @@
         if (rms >= FAST.RMS_THRESH) {
           if (!speechStartCandidateAt) speechStartCandidateAt = now;
           if (!speechStarted && now - speechStartCandidateAt >= FAST.START_HOLD_MS) {
-            speechStarted = true;
-            log('VAD: speech started (fast)');
+            speechStarted = true; log('VAD: speech started (fast)');
           }
           lastSpeechAt = now;
         } else {
@@ -263,7 +260,7 @@
           speechDur >= FAST.SPEECH_MIN_MS &&
           silenceDur >= FAST.SILENCE_MS;
 
-        const stopByMax = elapsed >= 9000; // keep a ceiling
+        const stopByMax = elapsed >= 9000;
 
         if (stopBySilence || stopByMax) {
           try {
@@ -271,10 +268,9 @@
               mediaRecorder.stop();
               log(`recording stopped (${stopBySilence ? 'silence' : 'max'})`);
             }
-          } catch (e) {}
+          } catch {}
           return;
         }
-
         vadTimer = setTimeout(tick, FAST.VAD_INTERVAL);
       };
 
@@ -285,10 +281,7 @@
     } catch (err) {
       console.error(err);
       log('mic error', String(err && err.message || err));
-      cleanupVAD();
-      stopTracks();
-      mediaRecorder = null;
-      chunks = [];
+      cleanupVAD(); stopTracks(); mediaRecorder = null; chunks = [];
     }
   }
 
@@ -296,14 +289,12 @@
     loopMode = false;
     try {
       if (mediaRecorder && mediaRecorder.state === 'recording') {
-        mediaRecorder.stop();
-        log('recording stopped (manual)');
+        mediaRecorder.stop(); log('recording stopped (manual)');
       } else {
         log('stop clicked but no active recorder');
       }
     } catch {}
-    cleanupVAD();
-    stopTracks();
+    cleanupVAD(); stopTracks();
   }
 
   document.addEventListener('DOMContentLoaded', () => {
@@ -313,18 +304,13 @@
     const ttsBtn  = document.querySelector('#sayBtn');
     const convBtn = document.querySelector('#convBtn');
 
-    recBtn?.addEventListener('click', () => {
-      loopMode = true;
-      log('record click → loopMode ON');
-      startRecording();
-    });
-
+    recBtn?.addEventListener('click', () => { loopMode = true; log('record click → loopMode ON'); startRecording(); });
     stopBtn?.addEventListener('click', () => { log('stop click'); stopRecording(); });
-    ttsBtn?.addEventListener('click', () => { log('tts click'); speak('Hey—Keilani TTS is live.'); });
+    ttsBtn?.addEventListener('click', () => { log('tts click'); speak('Hey—Keilani TTS is live.', ttsOptsFromAffect(affect)); });
     convBtn?.addEventListener('click', () => { log('start conversation click'); loopMode = true; startRecording(); });
   });
 
   window.startRecording = () => { loopMode = true; startRecording(); };
   window.stopRecording  = stopRecording;
-  window.speak          = speak;
+  window.speak          = (t) => speak(t, ttsOptsFromAffect(affect));
 })();

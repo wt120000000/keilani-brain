@@ -1,18 +1,19 @@
 // netlify/functions/tts.js
-// POST { text, voice?:string, speed?:number, emotion?:string, format?:'mp3'|'wav' }
-// -> audio bytes
-// - Uses OpenAI TTS by default (o4-mini-tts). If ELEVEN_API_KEY+ELEVEN_VOICE_ID exist, uses ElevenLabs.
-// - Applies simple emotion → prosody mapping.
+// POST { text, voice?:string, speed?:number, emotion?:string, emotion_state?:{...}, format?:'mp3'|'wav' }
+// -> audio bytes (base64), Content-Type audio/*
+// - Prosody mapping from mood+intensity → speed (+voice choice).
+// - Uses ElevenLabs if ELEVEN_API_KEY & ELEVEN_VOICE_ID exist, else OpenAI.
 
-const EMO = {
-  calm:      { speed: 0.95, pitch: 0,   voice: "alloy" },
-  happy:     { speed: 1.10, pitch: 2,   voice: "alloy" },
-  friendly:  { speed: 1.05, pitch: 1,   voice: "alloy" },
-  playful:   { speed: 1.15, pitch: 3,   voice: "alloy" },
-  concerned: { speed: 0.98, pitch: -1,  voice: "alloy" },
-  curious:   { speed: 1.05, pitch: 1,   voice: "alloy" },
-  sad:       { speed: 0.90, pitch: -3,  voice: "alloy" },
-  angry:     { speed: 1.00, pitch: -2,  voice: "alloy" },
+const EMO_BASE = {
+  calm:      { speed: 0.95, voice: "alloy" },
+  happy:     { speed: 1.10, voice: "alloy" },
+  friendly:  { speed: 1.05, voice: "alloy" },
+  playful:   { speed: 1.15, voice: "alloy" },
+  concerned: { speed: 0.98, voice: "alloy" },
+  curious:   { speed: 1.06, voice: "alloy" },
+  confident: { speed: 1.03, voice: "alloy" },
+  sad:       { speed: 0.90, voice: "alloy" },
+  angry:     { speed: 1.00, voice: "alloy" },
 };
 
 function json(status, body) {
@@ -26,6 +27,19 @@ function json(status, body) {
     },
     body: JSON.stringify(body),
   };
+}
+
+function normalizeEmotionName(name) {
+  const s = String(name || "").toLowerCase().trim();
+  return EMO_BASE[s] ? s : "calm";
+}
+
+function prosodyFromAffect(emotion, affect) {
+  // scale speed by intensity a bit (±7%)
+  const base = EMO_BASE[emotion] || EMO_BASE.calm;
+  const intensity = Number(affect?.intensity ?? 0.25);
+  const speed = Math.max(0.8, Math.min(1.25, base.speed + (intensity - 0.25) * 0.14));
+  return { speed, voice: base.voice };
 }
 
 exports.handler = async (event) => {
@@ -49,22 +63,22 @@ exports.handler = async (event) => {
   const text = String(body.text || "").trim();
   if (!text) return json(400, { error: "missing_text" });
 
-  // Map emotion → prosody defaults
-  const emKey = (body.emotion || "").toLowerCase();
-  const emo = EMO[emKey] || EMO.calm;
-
-  // Caller can override
   const fmt = (body.format || "mp3").toLowerCase();
-  const speed = typeof body.speed === "number" ? body.speed : emo.speed;
-  const voicePref = String(body.voice || emo.voice);
+  // prefer explicit emotion name; else use mood from emotion_state; fallback calm
+  const emotionName = body.emotion
+    ? normalizeEmotionName(body.emotion)
+    : normalizeEmotionName(body.emotion_state?.mood || "calm");
 
-  // Prefer Eleven if configured, else OpenAI TTS
+  const prosody = prosodyFromAffect(emotionName, body.emotion_state);
+  const speed = typeof body.speed === "number" ? body.speed : prosody.speed;
+  const voice = String(body.voice || prosody.voice);
+
+  // Prefer Eleven if configured
   const EL_KEY = process.env.ELEVEN_API_KEY;
   const EL_VOICE = process.env.ELEVEN_VOICE_ID;
 
   try {
     if (EL_KEY && EL_VOICE) {
-      // ---- ElevenLabs ----
       const url = `https://api.elevenlabs.io/v1/text-to-speech/${EL_VOICE}`;
       const resp = await fetch(url, {
         method: "POST",
@@ -77,9 +91,9 @@ exports.handler = async (event) => {
           text,
           model_id: "eleven_monolingual_v1",
           voice_settings: {
-            stability: 0.5,
+            stability: 0.55,
             similarity_boost: 0.8,
-            style: Math.max(0, Math.min(100, 50 + (emo.pitch * 5))), // simple style tweak
+            style: Math.round(50 + (body.emotion_state?.intensity ?? 0.25) * 40),
             use_speaker_boost: true
           }
         })
@@ -102,7 +116,7 @@ exports.handler = async (event) => {
       };
     }
 
-    // ---- OpenAI TTS ----
+    // OpenAI TTS
     const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
     if (!OPENAI_API_KEY) return json(500, { error: "missing_openai_key" });
 
@@ -116,9 +130,8 @@ exports.handler = async (event) => {
       body: JSON.stringify({
         model,
         input: text,
-        voice: voicePref,
+        voice,
         format: fmt,
-        // OpenAI doesn't expose pitch directly; speed is honored.
         speed
       }),
     });
