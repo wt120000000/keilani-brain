@@ -1,15 +1,21 @@
 // public/assets/chat.js
-// BUILD: 2025-09-20T21:45Z
+// BUILD: 2025-09-20T20:30Z
 
 (() => {
-  // --------- Config ---------
+  // ---------- Config ----------
   const API_ORIGIN = location.origin;
-  const STT_URL  = `${API_ORIGIN}/.netlify/functions/stt`;
-  const CHAT_URL = `${API_ORIGIN}/.netlify/functions/chat`;
-  const TTS_URL  = `${API_ORIGIN}/.netlify/functions/tts`;
+  const STT_URL   = `${API_ORIGIN}/.netlify/functions/stt`;
+  const CHAT_URL  = `${API_ORIGIN}/.netlify/functions/chat`;
+  const TTS_URL   = `${API_ORIGIN}/.netlify/functions/tts`;
+  const SEARCH_URL= `${API_ORIGIN}/.netlify/functions/search`;
 
-  // --------- Logger ---------
+  // ---------- Logger ----------
   const logEl = document.getElementById("log");
+  const buildTagEl = document.getElementById("buildTag");
+  const uiOk = document.getElementById("uiOk");
+  const uiBad = document.getElementById("uiBad");
+  if (buildTagEl) buildTagEl.textContent = (new Date()).toISOString();
+
   function log(...args) {
     console.log("[CHAT]", ...args);
     if (!logEl) return;
@@ -17,129 +23,82 @@
     logEl.textContent += (logEl.textContent ? "\n" : "") + line;
     logEl.scrollTop = logEl.scrollHeight;
   }
-  if (logEl && !logEl.textContent) logEl.textContent = "DOM not ready…";
 
-  // --------- DOM wiring (supports new & legacy IDs) ---------
+  // ---------- DOM wiring (robust against older IDs) ----------
   function getButtons() {
-    const record = document.getElementById("recordBtn") || document.querySelector('[data-action="record"]');
-    const stop   = document.getElementById("stopBtn")   || document.querySelector('[data-action="stop"]');
-    const say    = document.getElementById("sayBtn")    || document.querySelector('[data-action="say"]');
-
-    const legacyRecord = document.getElementById("btnRecord");
-    const legacyStop   = document.getElementById("btnStop");
-    const legacySay    = document.getElementById("btnSpeakTest");
-
-    return {
-      recordBtn: record || legacyRecord || null,
-      stopBtn:   stop   || legacyStop   || null,
-      sayBtn:    say    || legacySay    || null,
-    };
+    const record = document.getElementById("recordBtn") || document.querySelector('[data-action="record"]') || document.getElementById("btnRecord");
+    const stop   = document.getElementById("stopBtn")   || document.querySelector('[data-action="stop"]')   || document.getElementById("btnStop");
+    const say    = document.getElementById("sayBtn")    || document.querySelector('[data-action="say"]')    || document.getElementById("btnSpeakTest");
+    const hands  = document.getElementById("handsFree");
+    return {record, stop, say, hands};
   }
 
   function wireUI() {
-    const { recordBtn, stopBtn, sayBtn } = getButtons();
-    if (!recordBtn || !stopBtn || !sayBtn) {
-      log("UI buttons not found yet, retrying…");
-      return false;
-    }
-    recordBtn.addEventListener("click", () => { log("record click"); startRecording(); });
-    stopBtn.addEventListener("click",   () => { log("stop click");   stopRecording(); });
-    sayBtn.addEventListener("click",    () => { log("tts click");    speak("Hey — Keilani here.", { speed: 1.08 }); });
+    const {record, stop, say} = getButtons();
+    if (!record || !stop || !say) return false;
+    record.addEventListener("click", () => { log("record click"); startRecording(); });
+    stop.addEventListener("click",   () => { log("stop click");   stopRecording(); });
+    say.addEventListener("click",    () => { log("tts click");    speak("Hey — Keilani here. Testing one, two."); });
+    if (uiOk) uiOk.hidden = false;
+    if (uiBad) uiBad.hidden = true;
     log("DOMContentLoaded; wiring handlers");
     return true;
   }
 
-  let __wireTries = 0;
+  let tries = 0;
   function ensureWired() {
     if (wireUI()) return;
-    if (__wireTries++ < 20) setTimeout(ensureWired, 250);
+    if (uiOk) uiOk.hidden = true;
+    if (uiBad) uiBad.hidden = false;
+    if (tries++ < 20) setTimeout(ensureWired, 250);
   }
   document.addEventListener("DOMContentLoaded", ensureWired);
 
-  // --------- Audio helpers ---------
+  // ---------- State ----------
   let mediaRecorder = null;
   let mediaStream = null;
   let chunks = [];
   let autoTimer = null;
-  const AUTO_MS = 6000;
+  const AUTO_MS = 6000;              // recorder auto-stop window
+  let lastEmotion = null;
 
-  function clearTimer() { if (autoTimer) { clearTimeout(autoTimer); autoTimer = null; } }
-  function stopTracks() { try { mediaStream?.getTracks?.().forEach(t => t.stop()); } catch {} mediaStream = null; }
-
-  function blobToBase64Raw(blob) {
-    return new Promise((resolve, reject) => {
-      const fr = new FileReader();
-      fr.onloadend = () => {
-        const s = fr.result || "";
-        const i = s.indexOf(",");
-        resolve(i >= 0 ? s.slice(i + 1) : s);
-      };
-      fr.onerror = reject;
-      fr.readAsDataURL(blob);
-    });
+  function handsFreeOn() {
+    const {hands} = getButtons();
+    // default true if checkbox missing
+    return hands ? !!hands.checked : true;
   }
 
-  // ---- STT: send JSON (base64) to match backend ----
-  async function sttUploadBlob_JSON(blob) {
-    const audioBase64 = await blobToBase64Raw(blob);
-    const simpleMime = (blob.type || "").split(";")[0] || "application/octet-stream";
-    const filename =
-      simpleMime.includes("webm") ? "audio.webm" :
-      simpleMime.includes("ogg")  ? "audio.ogg"  :
-      simpleMime.includes("mpeg") || simpleMime.includes("mp3") ? "audio.mp3" :
-      simpleMime.includes("m4a") || simpleMime.includes("mp4") ? "audio.m4a" :
-      simpleMime.includes("wav")  ? "audio.wav"  : "audio.bin";
+  function clearTimer(){ if (autoTimer){ clearTimeout(autoTimer); autoTimer = null; } }
+  function stopTracks(){ try { mediaStream?.getTracks?.().forEach(t => t.stop()); } catch {} mediaStream = null; }
 
-    const body = { audioBase64, language: "en", mime: simpleMime, filename };
-
-    const res = await fetch(STT_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
+  // ---------- STT upload (multipart FormData) ----------
+  async function sttUploadBlob(blob) {
+    const fd = new FormData();
+    fd.append("file", blob, "speech.webm");
+    const res = await fetch(STT_URL, { method: "POST", body: fd });
     const data = await res.json().catch(() => ({}));
     log("STT status", res.status, data, "via functions path");
     if (!res.ok) throw new Error(`STT ${res.status}: ${JSON.stringify(data)}`);
     return data;
   }
 
-  // --------- TTS with 404 fallback (no hard-coded voice) ---------
+  // ---------- TTS (returns a Promise that resolves when playback ends) ----------
   async function speak(text, opts = {}) {
-    async function requestTTS(payload) {
-      const res = await fetch(TTS_URL, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify(payload)
-      });
-      const buf = await res.arrayBuffer();
-      return { res, buf };
-    }
-
-    // First try: pass through opts.voice if caller provided; otherwise omit voice
-    const basePayload = {
+    const payload = {
       text: String(text || ""),
-      speed: typeof opts.speed === "number" ? opts.speed : 1.0,
+      voice: opts.voice || undefined,   // use server default voice
+      speed: typeof opts.speed === "number" ? opts.speed : 1.03,
       format: "mp3",
-      // If your server uses ELEVEN_VOICE_ID default, leaving `voice` undefined
-      // will make it choose that env-configured voice.
-      voice: opts.voice, // may be undefined
-      emotion: opts.emotion || undefined,
+      emotion: opts.emotion || undefined
     };
 
-    let { res, buf } = await requestTTS(basePayload);
+    const res = await fetch(TTS_URL, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload)
+    });
 
-    // If the chosen voice doesn't exist on the Eleven account, retry once without voice
-    if (res.status === 404 || res.status === 400) {
-      try {
-        const detail = new TextDecoder().decode(buf);
-        log("TTS first attempt failed", res.status, detail);
-      } catch {}
-      if (basePayload.voice) {
-        delete basePayload.voice;
-        ({ res, buf } = await requestTTS(basePayload));
-      }
-    }
-
+    const buf = await res.arrayBuffer();
     if (!res.ok) {
       let detail = "";
       try { detail = new TextDecoder().decode(buf); } catch {}
@@ -149,79 +108,145 @@
 
     const blob = new Blob([buf], { type: "audio/mpeg" });
     const url = URL.createObjectURL(blob);
-    const audio = new Audio(url);
-    audio.onended = () => URL.revokeObjectURL(url);
-    await audio.play();
-    log("TTS played", blob.size, "bytes");
-  }
-
-  // --------- Chat helper (with filler) ---------
-  let lastEmotion = null;
-  async function askLLM(text) {
-    let cancelled = false;
-    const filler = setTimeout(() => { if (!cancelled) speak("Gimme a sec…", { speed: 1.08 }); }, 350);
-
-    const res = await fetch(CHAT_URL, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ user_id: "global", message: text, emotion_state: lastEmotion || undefined })
+    await new Promise((resolve) => {
+      const audio = new Audio(url);
+      audio.onended = () => { URL.revokeObjectURL(url); resolve(); };
+      audio.play().then(() => log("TTS played", blob.size, "bytes"));
     });
-    clearTimeout(filler); cancelled = true;
-
-    const data = await res.json().catch(() => ({}));
-    log("CHAT status", res.status, data);
-    if (!res.ok) throw new Error(`CHAT ${res.status}: ${JSON.stringify(data)}`);
-
-    lastEmotion = data?.next_emotion_state || null;
-    if (data.reply) await speak(data.reply, { emotion: lastEmotion || undefined, speed: 1.03 });
   }
 
-  // --------- Recording control ---------
-  let mediaPreferred = "audio/webm;codecs=opus";
+  // ---------- Search fallback ----------
+  const TIMEY_HINTS = /(today|latest|now|this week|tonight|breaking|new\s+(update|drop|patch|release))/i;
 
+  async function searchAndSummarize(query) {
+    try {
+      const res = await fetch(SEARCH_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ q: String(query || "").trim(), max: 5 })
+      });
+      const data = await res.json().catch(() => ({}));
+      if (!res.ok) throw new Error(`search ${res.status}: ${JSON.stringify(data)}`);
+
+      // minimal voice-friendly summary
+      const items = Array.isArray(data.results) ? data.results.slice(0,3) : [];
+      if (!items.length) return null;
+
+      const summary = items.map((r, i) => {
+        const title = String(r.title || r.url || "result").replace(/\s+/g, " ").trim();
+        return `${i+1}) ${title}`;
+      }).join(". ");
+
+      return {summary, raw: data};
+    } catch (err) {
+      log("search fallback failed", String(err?.message || err));
+      return null;
+    }
+  }
+
+  // ---------- LLM chat ----------
+  async function askLLM(userText) {
+    // filler so it feels responsive
+    let fillerDone = false;
+    const filler = setTimeout(async () => {
+      if (!fillerDone) { try { await speak("Gimme a sec…", { speed: 1.08 }); } catch {} }
+    }, 350);
+
+    let data = null;
+    try {
+      const res = await fetch(CHAT_URL, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          user_id: "global",
+          message: userText,
+          emotion_state: lastEmotion || undefined,
+          allow_search: true   // tell backend it’s allowed to call /search
+        })
+      });
+      data = await res.json().catch(() => ({}));
+      clearTimeout(filler); fillerDone = true;
+      log("CHAT status", res.status, data);
+      if (!res.ok) throw new Error(`CHAT ${res.status}: ${JSON.stringify(data)}`);
+    } catch (err) {
+      clearTimeout(filler); fillerDone = true;
+      log("askLLM failed", String(err?.message || err));
+      return;
+    }
+
+    // If the backend didn’t actually search but the request was time-sensitive, do a quick client-side check.
+    const wantsSearch = TIMEY_HINTS.test(userText) || /will\s+check|can\s+run\s+a\s+web\s+check/i.test(String(data.reply||""));
+    if (wantsSearch && !data?.meta?.searched) {
+      const result = await searchAndSummarize(userText);
+      if (result && result.summary) {
+        await speak(`Here’s the latest I’m seeing: ${result.summary}. If you want, I can dive deeper on one of those.`, { emotion: lastEmotion || undefined });
+      }
+    }
+
+    if (data.reply) {
+      await speak(data.reply, { emotion: data.next_emotion_state || lastEmotion || undefined });
+    }
+    lastEmotion = data.next_emotion_state || lastEmotion || null;
+
+    // auto re-arm mic if hands-free enabled
+    if (handsFreeOn()) {
+      setTimeout(() => startRecording().catch(()=>{}), 120);
+    }
+  }
+
+  // ---------- Recorder ----------
   async function startRecording() {
+    // if already recording, ignore
     if (mediaRecorder && mediaRecorder.state === "recording") {
       log("already recording; ignoring start");
       return;
     }
+
     try {
+      // make sure any old tracks are gone
+      stopTracks();
+
+      const preferred = MediaRecorder.isTypeSupported("audio/webm;codecs=opus")
+        ? "audio/webm;codecs=opus"
+        : "audio/ogg;codecs=opus";
+
       mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      mediaPreferred = MediaRecorder.isTypeSupported("audio/webm;codecs=opus") ? "audio/webm;codecs=opus" : "audio/ogg;codecs=opus";
-      mediaRecorder = new MediaRecorder(mediaStream, { mimeType: mediaPreferred });
+      mediaRecorder = new MediaRecorder(mediaStream, { mimeType: preferred });
       chunks = [];
 
-      mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size) { chunks.push(e.data); log("chunk", e.data.type, e.data.size, "bytes"); } };
-      mediaRecorder.onerror = (e) => { log("recorder error", String(e?.error || e?.name || e)); };
+      mediaRecorder.ondataavailable = (e) => {
+        if (e.data && e.data.size) { chunks.push(e.data); log("chunk", e.data.type, e.data.size, "bytes"); }
+      };
+
+      mediaRecorder.onerror = (e) => log("recorder error", String(e?.error || e?.name || e));
+
       mediaRecorder.onstop = async () => {
-		clearTimer();
-		const blob = new Blob(chunks, { type: mediaPreferred });
-		log("final blob", blob.type, blob.size, "bytes");
-		stopTracks();
+        clearTimer();
+        const blob = new Blob(chunks, { type: preferred });
+        log("final blob", blob.type, blob.size, "bytes");
+        stopTracks();
 
-	  if (blob.size < 8192) {
-		log("too small; speak a bit longer.");
-		mediaRecorder = null;
-		return;
-	  }
+        if (blob.size < 8192) {
+          log("too small; speak a bit longer.");
+          mediaRecorder = null; chunks = []; return;
+        }
 
-	  try {
-		const stt = await sttUploadBlob_JSON(blob);
-		log("TRANSCRIPT:", stt.transcript);
-		await askLLM(stt.transcript);
-	  } catch (err) {
-		log("STT/CHAT failed", String(err?.message || err));
-	  } finally {
-    // Reset for next recording cycle
-		mediaRecorder = null;
-		chunks = [];
-		mediaStream = null;
-		clearTimer();
-		log("recorder reset — ready for next click");
-	  }
-	};
+        try {
+          const stt = await sttUploadBlob(blob);
+          log("TRANSCRIPT:", stt.transcript);
+          await askLLM(stt.transcript);
+        } catch (err) {
+          log("STT/CHAT failed", String(err?.message || err));
+          // even on failure, try to keep the loop going when hands-free
+          if (handsFreeOn()) setTimeout(() => startRecording().catch(()=>{}), 350);
+        } finally {
+          mediaRecorder = null; chunks = []; mediaStream = null; clearTimer();
+          log("recorder reset — ready");
+        }
+      };
 
       mediaRecorder.start();
-      log("recording started with", mediaPreferred);
+      log("recording started with", preferred);
 
       clearTimer();
       autoTimer = setTimeout(() => {
@@ -245,7 +270,7 @@
     log("stop clicked but no active recorder");
   }
 
-  // Expose for console
+  // ---------- Expose for console tests ----------
   window.startRecording = startRecording;
   window.stopRecording  = stopRecording;
   window.speak          = speak;

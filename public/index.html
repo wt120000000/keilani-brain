@@ -2,13 +2,22 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+    <meta http-equiv="x-ua-compatible" content="ie=edge" />
     <meta
       http-equiv="Content-Security-Policy"
-      content="default-src 'self'; connect-src 'self' https://api.keilani.ai https://*.netlify.app https://api.openai.com https://api.superdevresources.com; img-src 'self' data: blob:; media-src 'self' data: blob:; font-src 'self' data:; style-src 'self' 'unsafe-inline'; script-src 'self'; frame-src https://*.daily.co;"
+      content="default-src 'self';
+               connect-src 'self' https://api.keilani.ai https://*.netlify.app https://api.openai.com https://api.superdevresources.com;
+               img-src 'self' data: blob:;
+               media-src 'self' data: blob:;
+               font-src 'self' data:;
+               style-src 'self' 'unsafe-inline';
+               script-src 'self';
+               frame-src https://*.daily.co;"
     />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
     <title>Keilani Brain — Live</title>
     <link rel="icon" href="/favicon.ico" />
+
     <style>
       :root {
         color-scheme: dark;
@@ -48,6 +57,7 @@
         gap: 10px;
         flex-wrap: wrap;
         margin: 16px 0 18px;
+        align-items: center;
       }
       button {
         background: #181b22;
@@ -66,6 +76,13 @@
       }
       button:active {
         transform: translateY(1px);
+      }
+      label.toggle {
+        display: inline-flex;
+        align-items: center;
+        gap: 8px;
+        font-size: 14px;
+        color: #c7cfdd;
       }
       #log {
         font-family:
@@ -91,30 +108,12 @@
         color: #f87171;
       }
     </style>
-    <script>
-      // Allow forcing SW off with ?no-sw=1
-      (function () {
-        const u = new URL(location.href);
-        if (
-          u.searchParams.get("no-sw") === "1" &&
-          "serviceWorker" in navigator
-        ) {
-          navigator.serviceWorker
-            .getRegistrations()
-            .then((rs) => rs.forEach((r) => r.unregister()));
-          caches
-            ?.keys?.()
-            .then((keys) => keys.forEach((k) => caches.delete(k)));
-          console.info("[PWA] Service worker disabled via ?no-sw=1");
-        }
-      })();
-    </script>
   </head>
   <body>
     <div class="wrap">
       <h1>Keilani Brain — Live</h1>
       <p class="hint">
-        If things look stale, append <code>?no-sw=1&v=NOW</code> to the URL,
+        If things look stale, append <code>?no-sw=1&v=NOW</code> to the URL and
         hard-reload with DevTools “Disable cache”.
       </p>
 
@@ -124,6 +123,11 @@
           ⏹️ Stop &amp; Transcribe
         </button>
         <button id="sayBtn" data-action="say">💬 Speak Test Line</button>
+
+        <label class="toggle">
+          <input type="checkbox" id="handsFree" checked />
+          Hands-free (auto-listen)
+        </label>
       </div>
 
       <div id="log" role="log" aria-live="polite">DOM not ready…</div>
@@ -136,7 +140,9 @@
       </p>
     </div>
 
-    <script src="/assets/pwa.js?v=2025-09-20-02"></script>
-    <script src="/assets/chat.js?v=2025-09-20-02"></script>
+    <!-- PWA helper keeps SW disabled when ?no-sw=1 -->
+    <script src="/assets/pwa.js?v=2025-09-20-02" defer></script>
+    <!-- Main chat UI -->
+    <script src="/assets/chat.js?v=2025-09-20-03" defer></script>
   </body>
 </html>
