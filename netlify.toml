@@ -48,6 +48,22 @@
   status = 200
 
 [[redirects]]
+  from = "/api/memory/upsert"
+  to   = "/.netlify/functions/memory-upsert"
+  status = 200
+
+[[redirects]]
+  from = "/api/search"
+  to   = "/.netlify/functions/search"
+  status = 200
+
+
+[[redirects]]
+  from = "/api/memory/search"
+  to   = "/.netlify/functions/memory-search"
+  status = 200
+
+[[redirects]]
   from = "/api/eleven-token"
   to   = "/.netlify/functions/eleven-token"
   status = 200
