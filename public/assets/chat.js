@@ -193,24 +193,32 @@
       mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size) { chunks.push(e.data); log("chunk", e.data.type, e.data.size, "bytes"); } };
       mediaRecorder.onerror = (e) => { log("recorder error", String(e?.error || e?.name || e)); };
       mediaRecorder.onstop = async () => {
-        clearTimer();
-        const blob = new Blob(chunks, { type: mediaPreferred });
-        log("final blob", blob.type, blob.size, "bytes");
-        stopTracks();
+		clearTimer();
+		const blob = new Blob(chunks, { type: mediaPreferred });
+		log("final blob", blob.type, blob.size, "bytes");
+		stopTracks();
 
-        if (blob.size < 8192) { log("too small; speak a bit longer."); mediaRecorder = null; return; }
+	  if (blob.size < 8192) {
+		log("too small; speak a bit longer.");
+		mediaRecorder = null;
+		return;
+	  }
 
-        try {
-          const stt = await sttUploadBlob_JSON(blob);
-          log("TRANSCRIPT:", stt.transcript);
-          await askLLM(stt.transcript);
-        } catch (err) {
-          log("STT/CHAT failed", String(err?.message || err));
-        } finally {
-          mediaRecorder = null;
-          chunks = [];
-        }
-      };
+	  try {
+		const stt = await sttUploadBlob_JSON(blob);
+		log("TRANSCRIPT:", stt.transcript);
+		await askLLM(stt.transcript);
+	  } catch (err) {
+		log("STT/CHAT failed", String(err?.message || err));
+	  } finally {
+    // Reset for next recording cycle
+		mediaRecorder = null;
+		chunks = [];
+		mediaStream = null;
+		clearTimer();
+		log("recorder reset — ready for next click");
+	  }
+	};
 
       mediaRecorder.start();
       log("recording started with", mediaPreferred);
