@@ -1,83 +1,124 @@
 // netlify/functions/chat.js
-// Uses native fetch instead of the OpenAI SDK to avoid bundling issues.
+// Chat brain: natural tone, concise, lightly mirror user (10–20%), ask 1 smart follow-up when helpful.
+// Uses OpenAI Chat Completions via fetch (no SDK dependency).
 
 const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const OPENAI_MODEL   = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const MODEL = process.env.OPENAI_CHAT_MODEL || "gpt-4o-mini";
 
-const respond = (status, obj) => ({
-  statusCode: status,
-  headers: { "Content-Type": "application/json; charset=utf-8" },
-  body: JSON.stringify(obj),
-});
-
-function keilaniSystemPrompt() {
-  return `
-You are **Keilani** — warm, witty, and street-smart. Be concise and practical.
-Use short, modern phrasing with light slang when it fits (e.g., "low-key", "clean win", "no cap").
-Default to a positive take; a little spicy, never rude.
-If the user asks for "today/latest/now" and you aren't sure, say you can run a quick web check (your caller may handle that).
-Always add one short line that makes the user feel good about themselves — subtle, not cheesy.
-`.trim();
+function cors(extra = {}) {
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Cache-Control": "no-store",
+    ...extra,
+  };
 }
 
 exports.handler = async (event) => {
-  // CORS preflight
-  if (event.httpMethod === "OPTIONS") {
-    return {
-      statusCode: 204,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization",
-      },
-      body: "",
+  try {
+    if (event.httpMethod === "OPTIONS") {
+      return { statusCode: 204, headers: cors() };
+    }
+    if (event.httpMethod !== "POST") {
+      return { statusCode: 405, headers: cors(), body: JSON.stringify({ error: "method_not_allowed" }) };
+    }
+    if (!OPENAI_API_KEY) {
+      return { statusCode: 500, headers: cors(), body: JSON.stringify({ error: "missing_openai_key" }) };
+    }
+
+    let payload;
+    try {
+      payload = JSON.parse(event.body || "{}");
+    } catch (e) {
+      return bad(400, "invalid_json", e.message);
+    }
+
+    const user_id = payload.user_id || "global";
+    const message = (payload.message || "").toString().trim();
+    const emotion_state = payload.emotion_state || null;
+    // optional last transcript (helps light mirroring)
+    const last_utterance = (payload.last_transcript || message || "").slice(-400);
+
+    if (!message) {
+      return bad(400, "missing_message", "Expected 'message' (string).");
+    }
+
+    // Persona: grounded, concise, lightly mirror user tone. One helpful follow-up max.
+    const system = [
+      "You are Keilani: warm, grounded, and helpful.",
+      "Speak naturally. Keep replies concise (2–5 sentences).",
+      "Lightly mirror the user's word choice and mood (about 10–20%), not more.",
+      "Avoid hype or repetitive slang. No filler like 'just a sec' unless *explicitly* asked to stall.",
+      "Offer one focused follow-up question only if it helps you assist better. Otherwise, no extra questions.",
+      "If an opinion is requested, take a clear but respectful stance with one reason.",
+      "If the user seems down, acknowledge briefly and offer one practical nudge.",
+      "Be precise; prefer concrete suggestions and options over vague encouragement.",
+    ].join(" ");
+
+    // A short analyzer hint for the model
+    const mirrorHint = [
+      "User tone sample (recent):",
+      last_utterance || "(none)",
+      "Lightly mirror, but keep it professional and clear.",
+    ].join("\n");
+
+    // Build messages
+    const messages = [
+      { role: "system", content: system },
+      // Tiny tool-free context with emotion / state if provided
+      emotion_state
+        ? { role: "system", content: `Current conversation affect/state (for subtle delivery only): ${JSON.stringify(emotion_state)}` }
+        : null,
+      { role: "system", content: mirrorHint },
+      { role: "user", content: message },
+    ].filter(Boolean);
+
+    const body = {
+      model: MODEL,
+      messages,
+      temperature: 0.6,
+      max_tokens: 450,
+      // Keep responses crisp
+      presence_penalty: 0.1,
+      frequency_penalty: 0.2,
     };
-  }
 
-  if (event.httpMethod !== "POST") return respond(405, { error: "method_not_allowed" });
-  if (!OPENAI_API_KEY)           return respond(500, { error: "missing_openai_key" });
-
-  let body;
-  try {
-    body = JSON.parse(event.body || "{}");
-  } catch (e) {
-    return respond(400, { error: "invalid_json", detail: String(e?.message || e) });
-  }
-
-  const user_id = body.user_id || "global";
-  const message = (body.message || "").toString().trim();
-  const emotion_state = body.emotion_state || null;
-  if (!message) return respond(400, { error: "missing_message" });
-
-  const payload = {
-    model: OPENAI_MODEL,
-    temperature: 0.7,
-    messages: [
-      { role: "system", content: keilaniSystemPrompt() },
-      { role: "user",   content: message }
-    ]
-  };
-
-  try {
-    const r = await fetch("https://api.openai.com/v1/chat/completions", {
+    const res = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
         "Content-Type": "application/json",
-        "Authorization": `Bearer ${OPENAI_API_KEY}`,
       },
-      body: JSON.stringify(payload),
+      body: JSON.stringify(body),
     });
 
-    const text = await r.text();
-    if (!r.ok) {
-      return respond(r.status, { error: "openai_error", detail: safeParse(text) || text });
+    const data = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return bad(res.status, "openai_chat_error", data);
     }
-    const data = safeParse(text) || {};
-    const reply = data?.choices?.[0]?.message?.content?.trim() || "All set.";
-    return respond(200, { reply, next_emotion_state: emotion_state || null, meta: { model: data.model || OPENAI_MODEL } });
-  } catch (e) {
-    return respond(502, { error: "chat_exception", detail: String(e?.message || e) });
+
+    const reply =
+      data?.choices?.[0]?.message?.content?.trim() ||
+      "Sorry—mind repeating that in a different way?";
+
+    // Placeholder: if you compute next_emotion_state elsewhere, return it here.
+    const next_emotion_state = null;
+
+    return {
+      statusCode: 200,
+      headers: cors({ "Content-Type": "application/json" }),
+      body: JSON.stringify({
+        reply,
+        next_emotion_state,
+        meta: { model: MODEL },
+      }),
+    };
+  } catch (err) {
+    return bad(500, "server_error", String(err?.message || err));
+  }
+
+  function bad(code, error, detail) {
+    return { statusCode: code, headers: cors(), body: JSON.stringify({ error, detail }) };
   }
 };
-
-function safeParse(s) { try { return JSON.parse(s); } catch { return null; } }
