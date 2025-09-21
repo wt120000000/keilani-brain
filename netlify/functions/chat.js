@@ -1,169 +1,103 @@
 // netlify/functions/chat.js
-// BUILD: 2025-09-21T02:10Z
-// - Broader search trigger (look it up / check online / what's new / update today / etc.)
-// - Fast search with timeout (2.5s); graceful fallback if slow
-// - Concise, natural persona with subtle mirroring
+// Routes user text → (optional) web search → OpenAI; returns reply + next_emotion_state
 
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-const MODEL = process.env.OPENAI_CHAT_MODEL || "gpt-4o-mini";
+const fetch = require("node-fetch");
+const OpenAI = require("openai");
+const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// Free/basic search service key you added in Netlify env:
-const SUPERDEV_API_KEY = process.env.SUPERDEV_API_KEY;
-const SEARCH_ENDPOINT  = "https://api.superdevresources.com/search";
+const SEARCH_FN = `${process.env.URL || "https://api.keilani.ai"}/.netlify/functions/search`;
 
-function cors(extra = {}) {
-  return {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Cache-Control": "no-store",
-    ...extra,
-  };
+function shouldSearch(text) {
+  if (!text) return false;
+
+  // explicit override
+  if (/^search:/i.test(text)) return true;
+
+  // time-sensitive phrasing
+  const recency = /(today|this week|latest|right now|just (dropped|released)|patch notes|update)/i.test(text);
+
+  // task verbs implying lookup
+  const lookup = /(look (it|this) up|check online|what (changed|added)|can you (check|find))/i.test(text);
+
+  return recency || lookup;
 }
 
-function bad(code, error, detail) {
-  return { statusCode: code, headers: cors(), body: JSON.stringify({ error, detail }) };
-}
-
-/** More generous detector for “please search” intent */
-const SEARCH_PHRASES = [
-  "search:",            // explicit prefix
-  "look it up",
-  "look this up",
-  "look that up",
-  "check online",
-  "check the web",
-  "check the internet",
-  "google it",
-  "bing it",
-  "find the latest",
-  "what's new",
-  "what is new",
-  "update today",
-  "latest update",
-  "patch notes",
-  "release notes",
-  "news today",
-  "current price",
-  "today", "tonight", "this week", "this month", "this year", "right now"
-];
-
-function wantsSearch(msg) {
-  if (!msg) return false;
-  const m = msg.toLowerCase();
-  if (m.startsWith("search:")) return true;
-  return SEARCH_PHRASES.some(p => m.includes(p));
-}
-
-/** Do a quick web search with timeout; normalize compact notes */
-async function doSearch(q, timeoutMs = 2500) {
-  if (!SUPERDEV_API_KEY) return { notes: null, error: "no_search_key" };
-
-  const ctrl = new AbortController();
-  const t = setTimeout(() => ctrl.abort(), timeoutMs);
-
-  try {
-    const res = await fetch(SEARCH_ENDPOINT, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        "x-api-key": SUPERDEV_API_KEY
-      },
-      body: JSON.stringify({ q, count: 5, fresh: true }),
-      signal: ctrl.signal
-    });
-    clearTimeout(t);
-
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) return { notes: null, error: `search_${res.status}` };
-
-    const items = (data.results || []).map((r, i) =>
-      `(${i + 1}) ${r.title || ""}\n${(r.snippet || "").trim()}\nSource: ${r.url || ""}`
-    );
-    const notes = items.slice(0, 5).join("\n\n");
-    return { notes, error: null };
-  } catch (e) {
-    clearTimeout(t);
-    return { notes: null, error: "search_timeout_or_network" };
-  }
+function personaSystem() {
+  return [
+    {
+      role: "system",
+      content:
+        "You are Keilani: warm, helpful, naturally conversational. " +
+        "Keep replies tight. Ask one smart follow-up if needed. " +
+        "If web data is provided, be SPECIFIC (names, items, numbers). " +
+        "One subtle compliment about the user when appropriate. " +
+        "Avoid filler unless the client announces a loading cue.",
+    },
+  ];
 }
 
 exports.handler = async (event) => {
   try {
-    if (event.httpMethod === "OPTIONS") return { statusCode: 204, headers: cors() };
-    if (event.httpMethod !== "POST")   return bad(405, "method_not_allowed", "Use POST");
-
-    if (!OPENAI_API_KEY) return bad(500, "missing_openai_key", "Set OPENAI_API_KEY");
-
-    let body;
-    try { body = JSON.parse(event.body || "{}"); }
-    catch (e) { return bad(400, "invalid_json", e.message); }
-
-    const message = (body.message || "").toString().trim();
-    const user_id = body.user_id || "global";
-    const emotion_state = body.emotion_state || null;
-    const last_transcript = (body.last_transcript || message || "").slice(-400);
-
-    if (!message) return bad(400, "missing_message", "Expected 'message' (string).");
-
-    // Decide if we should search
-    const shouldSearch = wantsSearch(message);
-    let webNotes = null;
-    let usedSearch = false;
-
-    if (shouldSearch) {
-      const query = message.replace(/^search\s*:/i, "").trim() || message;
-      const { notes } = await doSearch(query, 2500);
-      if (notes) { webNotes = notes; usedSearch = true; }
+    if (event.httpMethod !== "POST") {
+      return { statusCode: 405, body: "POST only" };
+    }
+    const { user_id = "global", message = "" } = JSON.parse(event.body || "{}");
+    if (!message) {
+      return { statusCode: 400, body: JSON.stringify({ error: "bad_request", detail: "message is required" }) };
     }
 
-    const persona = [
-      "You are Keilani. Warm, grounded, concise.",
-      "Speak naturally in 2–5 sentences.",
-      "Subtly mirror the user's vibe/wording if helpful (light touch).",
-      "Ask at most one short, relevant follow-up if it helps you assist.",
-      "Give a clear, respectful opinion when asked (one strong reason).",
-      "If search notes are provided, synthesize them; avoid link dumps."
-    ].join(" ");
+    let web = null;
 
-    const msgs = [
-      { role: "system", content: persona },
-      emotion_state ? { role: "system", content: `Conversation affect: ${JSON.stringify(emotion_state)}` } : null,
-      { role: "system", content: `Recent user phrasing sample (for subtle mirroring only): ${last_transcript}` },
-      webNotes ? { role: "system", content: `Fresh web notes (summarize, keep it tight):\n${webNotes}` } : null,
-      { role: "user", content: message }
+    if (shouldSearch(message)) {
+      // call our own search function (which uses serper.dev)
+      const sRes = await fetch(SEARCH_FN, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ q: message, fresh: true, max: 6 }),
+      });
+      if (sRes.ok) {
+        web = await sRes.json();
+      } else {
+        // Non-fatal: continue without web data
+        web = { answer: "(Search failed)", results: [] };
+      }
+    }
+
+    const messages = [
+      ...personaSystem(),
+      web
+        ? {
+            role: "system",
+            content:
+              "You have fresh web context. Use it precisely. Prefer concrete details over generalities.\n" +
+              `Web summary:\n${web.answer}\n\nLinks:\n${(web.results || [])
+                .map((r, i) => `[${i + 1}] ${r.title} — ${r.url}`)
+                .join("\n")}`,
+          }
+        : null,
+      { role: "user", content: message },
     ].filter(Boolean);
 
-    const req = {
-      model: MODEL,
-      messages: msgs,
-      temperature: 0.5,
-      max_tokens: 420,
-      presence_penalty: 0.1,
-      frequency_penalty: 0.2
-    };
-
-    const res = await fetch("https://api.openai.com/v1/chat/completions", {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
-      body: JSON.stringify(req)
+    const chat = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      messages,
+      temperature: web ? 0.3 : 0.6,
+      max_tokens: 350,
     });
-    const data = await res.json().catch(() => ({}));
-    if (!res.ok) return bad(res.status, "openai_chat_error", data);
 
-    const reply = data?.choices?.[0]?.message?.content?.trim()
-      || "Sorry—could you rephrase that?";
-
+    const reply = chat.choices?.[0]?.message?.content?.trim() || "Got it.";
     return {
       statusCode: 200,
-      headers: cors({ "Content-Type": "application/json" }),
       body: JSON.stringify({
         reply,
         next_emotion_state: null,
-        meta: { model: MODEL, used_search: usedSearch }
-      })
+        meta: { searched: !!web, provider: "serper.dev" },
+      }),
     };
   } catch (err) {
-    return bad(500, "server_error", String(err?.message || err));
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ error: "chat_function_error", detail: String(err && err.message || err) }),
+    };
   }
 };
