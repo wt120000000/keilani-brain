@@ -1,210 +1,78 @@
 // netlify/functions/stt.js
-// POST { audioBase64: "<base64 or data URL>", language?: "en", mime?: "audio/webm;codecs=opus"|"audio/mpeg", filename?: "audio.webm"|... }
-// -> { transcript, meta? }
+// Accepts JSON: { audioBase64, mime, filename } and forwards to OpenAI Whisper
+// No external deps -> fixes Netlify bundling errors.
 
-function json(status, body) {
-  return {
-    statusCode: status,
-    headers: {
-      "Content-Type": "application/json",
-      "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
-      "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With",
-    },
-    body: JSON.stringify(body),
-  };
+const OA_URL = "https://api.openai.com/v1/audio/transcriptions";
+const MODEL  = "whisper-1"; // or "gpt-4o-mini-transcribe" if you prefer
+
+function need(name) {
+  const v = process.env[name];
+  if (!v) throw new Error(`Missing env var ${name}`);
+  return v;
 }
 
 exports.handler = async (event) => {
-  // CORS preflight
-  if (event.httpMethod === "OPTIONS") {
+  try {
+    if (event.httpMethod !== "POST") {
+      return { statusCode: 405, body: "Method Not Allowed" };
+    }
+
+    const apiKey = need("OPENAI_API_KEY");
+    const headers = {
+      "Authorization": `Bearer ${apiKey}`
+    };
+
+    // Expect JSON body with base64
+    const isJson = /application\/json/i.test(event.headers?.["content-type"] || "");
+    if (!isJson) {
+      return {
+        statusCode: 400,
+        body: JSON.stringify({
+          error: "invalid_content_type",
+          detail: "Send JSON: { audioBase64, mime, filename }"
+        })
+      };
+    }
+
+    const { audioBase64, mime = "audio/webm", filename = "speech.webm" } =
+      JSON.parse(event.body || "{}");
+
+    if (!audioBase64) {
+      return {
+        statusCode: 400,
+        body: JSON.stringify({ error: "missing_audio", detail: "audioBase64 is required" })
+      };
+    }
+
+    // Build a multipart body locally
+    const bin = Buffer.from(audioBase64, "base64");
+    const blob = new Blob([bin], { type: mime });
+    const fd = new FormData();
+    fd.append("file", blob, filename);
+    fd.append("model", MODEL);
+
+    const res = await fetch(OA_URL, { method: "POST", headers, body: fd });
+    const js  = await res.json().catch(() => ({}));
+    if (!res.ok) {
+      return {
+        statusCode: res.status,
+        body: JSON.stringify({ error: "openai_error", detail: js })
+      };
+    }
+
+    // Whisper returns { text: "..." }
+    const transcript = js.text || "";
     return {
-      statusCode: 204,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With",
-      },
-      body: "",
+      statusCode: 200,
+      body: JSON.stringify({
+        transcript,
+        meta: { bytes: bin.length, mime, model: MODEL, via: "json_base64" }
+      })
+    };
+  } catch (err) {
+    return {
+      statusCode: 500,
+      body: JSON.stringify({ error: "stt_error", detail: String(err?.message || err) })
     };
   }
-
-  if (event.httpMethod !== "POST") return json(405, { error: "method_not_allowed" });
-
-  const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
-  const MODEL = process.env.OPENAI_STT_MODEL || "gpt-4o-mini-transcribe";
-  if (!OPENAI_API_KEY) return json(500, { error: "missing_openai_key" });
-
-  // ---------- Parse body ----------
-  let audioBase64 = "";
-  let mimeHint = "";
-  let filenameHint = "";
-  let language;
-
-  try {
-    const body = JSON.parse(event.body || "{}");
-    const raw = (body.audioBase64 || "").trim();
-    language = body.language || undefined;
-    mimeHint = (body.mime || "").toLowerCase();
-    filenameHint = (body.filename || "").trim();
-
-    if (!raw) return json(400, { error: "missing_audio" });
-
-    if (raw.startsWith("data:")) {
-      const comma = raw.indexOf(",");
-      if (comma < 0) return json(400, { error: "bad_data_url" });
-      const header = raw.slice(0, comma);
-      audioBase64 = raw.slice(comma + 1);
-      const m = header.match(/^data:([^;]+)/);
-      if (m) mimeHint = (m[1] || "").toLowerCase();
-    } else {
-      audioBase64 = raw;
-    }
-  } catch (e) {
-    return json(400, { error: "invalid_json", detail: String(e.message || e) });
-  }
-
-  // ---------- Decode & validate ----------
-  let buf;
-  try {
-    buf = Buffer.from(audioBase64, "base64");
-  } catch (e) {
-    return json(400, { error: "bad_base64", detail: String(e.message || e) });
-  }
-
-  if (!buf || buf.length < 4000) {
-    return json(400, {
-      error: "audio_too_small",
-      detail: "Audio is too short or truncated; send a complete utterance (>= 8KB recommended).",
-      meta: { bytes: buf?.length || 0 },
-    });
-  }
-
-  // ---------- Sniff magic bytes ----------
-  const magic = buf.slice(0, 12);
-  const hex = magic.toString("hex");
-
-  const isWav = magic.toString("ascii", 0, 4) === "RIFF" && magic.toString("ascii", 8, 12) === "WAVE";
-  const isOgg = magic.toString("ascii", 0, 4) === "OggS";
-  const isWebm = hex.startsWith("1a45dfa3"); // EBML
-  const isMp4 = magic.toString("ascii", 4, 8) === "ftyp"; // mp4/m4a/iso-bmff
-
-  // MP3 detection:
-  // - ID3 tagged files start "ID3"
-  // - raw MPEG frames start with 0xFF 0xFB (or 0xF3/0xF2 for MPEG2/2.5)
-  const b0 = buf[0], b1 = buf[1];
-  const hasID3 = magic.toString("ascii", 0, 3) === "ID3";
-  const hasMpegSync = b0 === 0xff && (b1 === 0xfb || b1 === 0xf3 || b1 === 0xf2);
-  const isMp3 = hasID3 || hasMpegSync;
-
-  let inferredMime =
-    isWav ? "audio/wav" :
-    isOgg ? "audio/ogg" :
-    isWebm ? "audio/webm" :
-    isMp3 ? "audio/mpeg" :
-    isMp4 ? "audio/m4a" : "";
-
-  // Normalize mimeHint like "audio/webm;codecs=opus" -> "audio/webm"
-  if (mimeHint) {
-    const semi = mimeHint.indexOf(";");
-    if (semi > -1) mimeHint = mimeHint.slice(0, semi);
-  }
-
-  const finalMime = (mimeHint || inferredMime || "application/octet-stream").toLowerCase();
-
-  const fileName =
-    filenameHint ||
-    (finalMime.includes("wav") ? "audio.wav" :
-     finalMime.includes("mpeg") || finalMime.includes("mp3") ? "audio.mp3" :
-     finalMime.includes("m4a") || finalMime.includes("mp4") ? "audio.m4a" :
-     finalMime.includes("ogg") ? "audio.ogg" :
-     finalMime.includes("webm") ? "audio.webm" :
-     "audio.bin");
-
-  // ---------- Helpers ----------
-  const shouldRetry = (status, text) => {
-    if (status === 429) return true;
-    if (status >= 500) return true;
-    if (status === 400 && /timeout|too\s+short|malformed/i.test(text || "")) return true;
-    return false;
-  };
-
-  const backoff = (attempt) =>
-    new Promise((r) => setTimeout(r, 250 * Math.pow(2, attempt) + Math.floor(Math.random() * 100)));
-
-  function buildForm() {
-    const form = new FormData();
-    const blob = new Blob([buf], { type: finalMime });
-    form.append("file", blob, fileName);
-    form.append("model", MODEL);
-    form.append("response_format", "json");
-    if (language) form.append("language", String(language));
-    return form;
-  }
-
-  // ---------- Call OpenAI with retries (rebuild form each time) ----------
-  const MAX_TRIES = 3;
-  let lastStatus = 0;
-  let lastText = "";
-
-  for (let attempt = 0; attempt < MAX_TRIES; attempt++) {
-    try {
-      const form = buildForm();
-      const resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
-        method: "POST",
-        headers: { Authorization: `Bearer ${OPENAI_API_KEY}` },
-        body: form,
-      });
-
-      lastStatus = resp.status;
-      const text = await resp.text();
-      lastText = text;
-
-      if (!resp.ok) {
-        if (shouldRetry(resp.status, text) && attempt < MAX_TRIES - 1) {
-          await backoff(attempt);
-          continue;
-        }
-        return json(resp.status, {
-          error: "openai_stt_error",
-          detail: safeParse(text) || text,
-          meta: { bytes: buf.length, mime: finalMime, model: MODEL, status: resp.status },
-        });
-      }
-
-      const data = safeParse(text) || { text: "" };
-      return json(200, {
-        transcript: data.text || "",
-        meta: { bytes: buf.length, mime: finalMime, model: MODEL, magic: summarizeMagic(magic) },
-      });
-    } catch (e) {
-      lastStatus = -1;
-      lastText = String(e?.message || e);
-      if (attempt < MAX_TRIES - 1) {
-        await backoff(attempt);
-        continue;
-      }
-      return json(502, {
-        error: "stt_exception",
-        detail: lastText,
-        meta: { bytes: buf.length, mime: finalMime, model: MODEL },
-      });
-    }
-  }
-
-  return json(502, {
-    error: "stt_failed",
-    detail: lastText || "Unknown STT failure",
-    meta: { status: lastStatus },
-  });
 };
-
-/* ---------------- helpers ---------------- */
-
-function safeParse(t) {
-  try { return JSON.parse(t); } catch { return null; }
-}
-
-function summarizeMagic(b) {
-  try { return b.toString("hex").slice(0, 16); } catch { return ""; }
-}
