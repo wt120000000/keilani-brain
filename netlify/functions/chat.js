@@ -1,103 +1,104 @@
 // netlify/functions/chat.js
-// Routes user text → (optional) web search → OpenAI; returns reply + next_emotion_state
+// Purpose: Decide when to search; if searching, call our search function,
+// then ask OpenAI to respond with SPECIFICS + a short opinionated take.
+// Tone: engaged, natural; no filler unless slow path triggers on the client.
 
 const fetch = require("node-fetch");
 const OpenAI = require("openai");
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-const SEARCH_FN = `${process.env.URL || "https://api.keilani.ai"}/.netlify/functions/search`;
-
-function shouldSearch(text) {
-  if (!text) return false;
-
-  // explicit override
-  if (/^search:/i.test(text)) return true;
-
-  // time-sensitive phrasing
-  const recency = /(today|this week|latest|right now|just (dropped|released)|patch notes|update)/i.test(text);
-
-  // task verbs implying lookup
-  const lookup = /(look (it|this) up|check online|what (changed|added)|can you (check|find))/i.test(text);
-
-  return recency || lookup;
+function wantSearch(text = "") {
+  const t = text.toLowerCase();
+  const timey =
+    /\btoday\b|\bthis (week|month)\b|\blatest\b|\bjust (dropped|released|updated)\b|\bpatch notes\b/.test(
+      t
+    );
+  const verbs = /\b(look it up|check online|search|google|find out)\b/.test(t);
+  return timey || verbs;
 }
 
-function personaSystem() {
-  return [
-    {
-      role: "system",
-      content:
-        "You are Keilani: warm, helpful, naturally conversational. " +
-        "Keep replies tight. Ask one smart follow-up if needed. " +
-        "If web data is provided, be SPECIFIC (names, items, numbers). " +
-        "One subtle compliment about the user when appropriate. " +
-        "Avoid filler unless the client announces a loading cue.",
-    },
-  ];
+async function callLocalSearch(q) {
+  const origin =
+    process.env.URL /* Netlify */ ||
+    process.env.DEPLOY_URL /* fallback */ ||
+    "http://localhost:8888";
+  const url = `${origin}/.netlify/functions/search`;
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ q, fresh: true, max: 6 }),
+  });
+  const js = await res.json().catch(() => ({}));
+  if (!res.ok) throw new Error(`search ${res.status}: ${JSON.stringify(js)}`);
+  return js;
 }
 
 exports.handler = async (event) => {
   try {
     if (event.httpMethod !== "POST") {
-      return { statusCode: 405, body: "POST only" };
-    }
-    const { user_id = "global", message = "" } = JSON.parse(event.body || "{}");
-    if (!message) {
-      return { statusCode: 400, body: JSON.stringify({ error: "bad_request", detail: "message is required" }) };
+      return { statusCode: 405, body: "Method Not Allowed" };
     }
 
-    let web = null;
+    const { user_id = "global", message = "", emotion_state = null } = JSON.parse(
+      event.body || "{}"
+    );
 
-    if (shouldSearch(message)) {
-      // call our own search function (which uses serper.dev)
-      const sRes = await fetch(SEARCH_FN, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ q: message, fresh: true, max: 6 }),
-      });
-      if (sRes.ok) {
-        web = await sRes.json();
-      } else {
-        // Non-fatal: continue without web data
-        web = { answer: "(Search failed)", results: [] };
-      }
+    const shouldSearch = wantSearch(message);
+
+    let searchPack = null;
+    if (shouldSearch) {
+      // Push the user’s exact intent; let search.js structure the facts
+      searchPack = await callLocalSearch(message);
     }
+
+    // Build system prompt to keep Keilani grounded & specific
+    const system =
+      "You are Keilani, an engaged, warm assistant. Be concise, specific, and curious.\n" +
+      "Ask 1 clarifying question only when it meaningfully unlocks a better answer. Avoid generic filler.\n" +
+      "When given search facts, synthesize concrete bullets (characters/skins, weapons, map, modes, balance) and add a short, tasteful opinion.\n" +
+      "Match the user’s tone lightly (never overdo slang). 2–4 short sentences max unless the user asks for detail.\n";
 
     const messages = [
-      ...personaSystem(),
-      web
-        ? {
-            role: "system",
-            content:
-              "You have fresh web context. Use it precisely. Prefer concrete details over generalities.\n" +
-              `Web summary:\n${web.answer}\n\nLinks:\n${(web.results || [])
-                .map((r, i) => `[${i + 1}] ${r.title} — ${r.url}`)
-                .join("\n")}`,
-          }
-        : null,
-      { role: "user", content: message },
-    ].filter(Boolean);
+      { role: "system", content: system },
+    ];
 
-    const chat = await openai.chat.completions.create({
-      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
-      messages,
-      temperature: web ? 0.3 : 0.6,
-      max_tokens: 350,
+    if (searchPack?.answer) {
+      messages.push({
+        role: "system",
+        content:
+          "Fresh web notes (already filtered for specifics):\n" +
+          searchPack.answer,
+      });
+    }
+
+    messages.push({
+      role: "user",
+      content: message,
     });
 
-    const reply = chat.choices?.[0]?.message?.content?.trim() || "Got it.";
+    const resp = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      temperature: 0.45,
+      messages,
+    });
+
+    const reply = resp.choices?.[0]?.message?.content?.trim() || "Got it.";
+
     return {
       statusCode: 200,
       body: JSON.stringify({
         reply,
-        next_emotion_state: null,
-        meta: { searched: !!web, provider: "serper.dev" },
+        next_emotion_state: emotion_state || null,
+        meta: {
+          searched: !!shouldSearch,
+          sources: searchPack?.results?.slice(0, 4) || [],
+        },
       }),
     };
   } catch (err) {
     return {
       statusCode: 500,
-      body: JSON.stringify({ error: "chat_function_error", detail: String(err && err.message || err) }),
+      body: JSON.stringify({ error: "chat_error", detail: String(err?.message || err) }),
     };
   }
 };
