@@ -1,179 +1,152 @@
 // netlify/functions/chat.js
-// CommonJS Netlify v1 handler (event, context) -> { statusCode, headers, body }
-// SDK-free; uses global fetch.
-
-function json(status, obj) {
-  return {
-    statusCode: status,
-    headers: { "Content-Type": "application/json; charset=utf-8" },
-    body: JSON.stringify(obj),
-  };
-}
-const ok = (o) => json(200, o);
-
-function systemPrompt() {
-  return `
-You are **Keilani** — warm, on-point, and practical. Match the user's tone naturally.
-Style: concise (4–8 sentences), specific, lightly opinionated. One subtle compliment max.
-
-IF SEARCH MATERIAL IS PROVIDED:
-- Use it. Name exact items/characters/features and call out 1–2 standouts.
-- Add short parenthetical tags like (Epic patch notes), (IGN), (GameSpot). No raw URLs.
-
-IF UNCERTAIN:
-- Say what's known + what you'd verify next.
-- Do NOT imply you browsed if no search bundle is provided.
-`.trim();
-}
-
-function buildUserContent(message, searchBundle, userId) {
-  if (!searchBundle) return `${message}\n\nUserID: ${userId}`;
-  const items = (searchBundle.results || searchBundle.news || []).slice(0, 6);
-  const lines = [];
-  if (searchBundle.answer) lines.push(`Search synthesis:\n${searchBundle.answer}`);
-  if (items.length) {
-    lines.push("Key items:");
-    for (const it of items) {
-      const title = it.title || it.source || "result";
-      const src = it.source || "";
-      const url = it.url || it.link || "";
-      lines.push(`- ${title}${src ? ` — ${src}` : ""}${url ? ` — ${url}` : ""}`);
-    }
-  }
-  lines.push("");
-  lines.push(`User asked: ${message}`);
-  lines.push(
-    "Write a SPECIFIC answer grounded in items above. For Fortnite: list named skins/characters, LTM/modes, unique mechanics or weapons (2–4 bullets or tight paragraphs). Include a brief opinion and add parenthetical source tags like (Epic patch notes), (IGN)."
-  );
-  lines.push(`UserID: ${userId}`);
-  return lines.join("\n");
-}
-
-function pickCitations(s) {
-  const items = s?.results || s?.news || [];
-  return items.slice(0, 3).map((it) => ({
-    title: it.title || it.source || "source",
-    url: it.url || it.link || "",
-  }));
-}
-
-function nextEmotion(prev, msg) {
-  const neutral = { stability: 0.6, similarity: 0.7, style: 0.4 };
-  try {
-    const m = String(msg || "").toLowerCase();
-    if (/\b(awesome|great|nice|love|dope|fire|let's go|hype)\b/.test(m)) {
-      return { stability: 0.65, similarity: 0.75, style: 0.5 };
-    }
-    if (/\b(sad|ugh|annoy|mad|angry|frustrat|confus)\b/.test(m)) {
-      return { stability: 0.7, similarity: 0.6, style: 0.25 };
-    }
-    return prev || neutral;
-  } catch {
-    return prev || neutral;
-  }
-}
+const fetch = require("node-fetch");
 
 exports.handler = async (event, context) => {
+  if (event.httpMethod === "OPTIONS") {
+    return {
+      statusCode: 204,
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With",
+      },
+      body: "",
+    };
+  }
+
+  if (event.httpMethod !== "POST") {
+    return {
+      statusCode: 405,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ error: "Method Not Allowed" }),
+    };
+  }
+
   try {
-    if (event.httpMethod !== "POST") return json(405, { error: "method_not_allowed" });
-
-    const body = JSON.parse(event.body || "{}");
-    const user_id = typeof body.user_id === "string" && body.user_id.trim() ? body.user_id.trim() : "global";
-    const message = typeof body.message === "string" ? body.message : "";
-    const emotion_state = body.emotion_state || null;
-
-    if (!message.trim()) {
-      return ok({ error: "missing_message" });
+    const { user_id = "anon", message } = JSON.parse(event.body || "{}");
+    if (!message) {
+      return {
+        statusCode: 400,
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ error: "Missing `message`" }),
+      };
     }
 
-    // Heuristic: decide when to search
-    const m = message.toLowerCase();
-    const shouldSearch =
-      m.startsWith("search:") ||
-      /\b(today|this week|latest|right now|breaking|patch notes|update)\b/.test(m) ||
-      /\b(look it up|can you check|what changed|find out)\b/.test(m);
+    // ---------------------------
+    // Force absolute base URL
+    // ---------------------------
+    const base =
+      process.env.URL ||
+      process.env.SITE_URL ||
+      (context && context.site && context.site.url) ||
+      "https://api.keilani.ai";
+
+    // Decide if this message should trigger a search
+    const lower = message.toLowerCase();
+    const needsSearch =
+      lower.includes("today") ||
+      lower.includes("this week") ||
+      lower.startsWith("search:") ||
+      lower.includes("latest") ||
+      lower.includes("new update") ||
+      lower.includes("patch notes");
 
     let searchBundle = null;
-    if (shouldSearch) {
-      const q = m.startsWith("search:")
-        ? message.replace(/^search:\s*/i, "")
-        : `${message} site:fortnite.com OR site:epicgames.com OR site:ign.com OR site:gamespot.com OR site:polygon.com`;
 
-      const base =
-        process.env.URL ||
-        process.env.SITE_URL ||
-        (context && context.site && context.site.url) ||
-        "";
-
-      const searchUrl = base
-        ? `${base}/.netlify/functions/search`
-        : "/.netlify/functions/search";
-
+    if (needsSearch) {
       try {
-        const sRes = await fetch(searchUrl, {
+        const q = message.replace(/^search:/i, "").trim();
+        const resp = await fetch(`${base}/.netlify/functions/search`, {
           method: "POST",
-          headers: { "Content-Type": "application/json; charset=utf-8" },
-          body: JSON.stringify({ q, max: 6, fresh: true }),
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ q, fresh: true, max: 6 }),
         });
-        if (sRes.ok) {
-          const sData = await sRes.json().catch(() => ({}));
-          if (sData?.results?.length || sData?.news?.length || sData?.answer) {
-            searchBundle = sData;
-          }
+        if (resp.ok) {
+          searchBundle = await resp.json();
         }
-      } catch {}
+      } catch (err) {
+        console.error("Search error", err);
+      }
     }
 
-    const OPENAI_API_KEY = process.env.OPENAI_API_KEY || "";
-    const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
-    if (!OPENAI_API_KEY) {
-      // Offline fallback
-      const reply = searchBundle?.answer
-        ? searchBundle.answer
-        : `Here's a quick take: ${message}`;
-      return ok({
-        reply,
-        next_emotion_state: nextEmotion(emotion_state, message),
-        meta: { searched: !!searchBundle, offline: true, user_id },
+    // ---------------------------
+    // Build the prompt for the LLM
+    // ---------------------------
+    let systemPrompt = `
+You are Keilani, a helpful, conversational AI.
+Keep answers short but specific, grounded, and natural.
+Match the user's tone and vibe.
+If search results are provided, USE THEM: list notable skins, characters, weapons, collabs, or patch notes, and include parenthetical (source) tags.
+Never make up vague info if specifics are present.
+    `.trim();
+
+    const messages = [
+      { role: "system", content: systemPrompt },
+      { role: "user", content: message },
+    ];
+
+    if (searchBundle && searchBundle.results && searchBundle.results.length > 0) {
+      messages.push({
+        role: "system",
+        content: `Search results:\n${searchBundle.results
+          .slice(0, 5)
+          .map(
+            (r, i) =>
+              `${i + 1}. ${r.title} — ${r.snippet || ""} (${r.source || r.url})`
+          )
+          .join("\n")}\n\nUse these details in your reply.`,
       });
     }
 
-    const payload = {
-      model: OPENAI_MODEL,
-      temperature: Number(process.env.OPENAI_TEMPERATURE ?? 0.5),
-      max_tokens: Number(process.env.OPENAI_MAX_OUTPUT_TOKENS ?? 520),
-      messages: [
-        { role: "system", content: systemPrompt() },
-        { role: "user", content: buildUserContent(message, searchBundle, user_id) },
-      ],
-    };
-
-    const oai = await fetch("https://api.openai.com/v1/chat/completions", {
+    // ---------------------------
+    // Call OpenAI
+    // ---------------------------
+    const openaiResp = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
-        "Content-Type": "application/json; charset=utf-8",
-        Authorization: `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
       },
-      body: JSON.stringify(payload),
+      body: JSON.stringify({
+        model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+        messages,
+        temperature: Number(process.env.OPENAI_TEMPERATURE || 0.7),
+        max_tokens: Number(process.env.OPENAI_MAX_OUTPUT_TOKENS || 400),
+      }),
     });
 
-    if (!oai.ok) {
-      const err = await oai.text();
-      const fallback = searchBundle?.answer || "I couldn’t load the model just now.";
-      return ok({ reply: fallback, meta: { searched: !!searchBundle, openai_error: err, user_id } });
+    if (!openaiResp.ok) {
+      const txt = await openaiResp.text();
+      throw new Error(`OpenAI error: ${txt}`);
     }
 
-    const data = await oai.json().catch(() => ({}));
-    const reply =
-      (data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content || "").trim() ||
-      (searchBundle?.answer || "Got it.");
+    const data = await openaiResp.json();
+    const reply = data.choices?.[0]?.message?.content?.trim() || "(no reply)";
 
-    return ok({
-      reply,
-      next_emotion_state: nextEmotion(emotion_state, message),
-      meta: { searched: !!searchBundle, citations: pickCitations(searchBundle), user_id },
-    });
+    return {
+      statusCode: 200,
+      headers: {
+        "Content-Type": "application/json",
+        "Access-Control-Allow-Origin": "*",
+      },
+      body: JSON.stringify({
+        reply,
+        meta: {
+          searched: !!searchBundle,
+          citations: searchBundle?.results?.map((r) => ({
+            title: r.title,
+            url: r.url,
+            source: r.source,
+          })),
+        },
+      }),
+    };
   } catch (err) {
-    return ok({ error: "chat_unhandled", detail: String(err) });
+    console.error("Chat error", err);
+    return {
+      statusCode: 500,
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ error: err.message }),
+    };
   }
 };
