@@ -1,58 +1,85 @@
 // netlify/functions/chat.js
-const fetch = require("node-fetch");
+// CommonJS + SDK-free. Uses global fetch (Node 18+ / Netlify runtime).
+
+/** CORS helper */
+function corsHeaders() {
+  return {
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With",
+  };
+}
+
+/** Decide if a user message needs a fresh web search */
+function shouldSearch(text) {
+  if (!text) return false;
+  const s = text.toLowerCase().trim();
+  return (
+    s.startsWith("search:") ||
+    s.includes("today") ||
+    s.includes("this week") ||
+    s.includes("latest") ||
+    s.includes("new update") ||
+    s.includes("patch notes") ||
+    s.includes("what changed")
+  );
+}
+
+/** Build absolute origin for internal calls */
+function getBase(event, context) {
+  // Order of preference: Netlify-provided URL envs → event headers → fallback
+  return (
+    process.env.URL ||
+    process.env.SITE_URL ||
+    (event && event.headers && (event.headers["x-forwarded-host"] ? `https://${event.headers["x-forwarded-host"]}` : null)) ||
+    "https://api.keilani.ai"
+  );
+}
+
+/** Shape search bundle into a compact, LLM-friendly string */
+function summarizeResults(bundle) {
+  if (!bundle || !Array.isArray(bundle.results)) return "";
+  return bundle.results
+    .slice(0, 5)
+    .map((r, i) => {
+      const src = r.source || r.url || "";
+      const snip = r.snippet ? ` — ${r.snippet}` : "";
+      return `${i + 1}. ${r.title}${snip} (${src})`;
+    })
+    .join("\n");
+}
 
 exports.handler = async (event, context) => {
+  // Preflight
   if (event.httpMethod === "OPTIONS") {
-    return {
-      statusCode: 204,
-      headers: {
-        "Access-Control-Allow-Origin": "*",
-        "Access-Control-Allow-Methods": "POST, OPTIONS",
-        "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With",
-      },
-      body: "",
-    };
+    return { statusCode: 204, headers: corsHeaders(), body: "" };
   }
 
   if (event.httpMethod !== "POST") {
     return {
       statusCode: 405,
-      headers: { "Content-Type": "application/json" },
+      headers: { ...corsHeaders(), "Content-Type": "application/json" },
       body: JSON.stringify({ error: "Method Not Allowed" }),
     };
   }
 
   try {
-    const { user_id = "anon", message } = JSON.parse(event.body || "{}");
+    const body = JSON.parse(event.body || "{}");
+    const user_id = String(body.user_id || "anon"); // use it so ESLint chills
+    const message = String(body.message || "").trim();
+
     if (!message) {
       return {
         statusCode: 400,
-        headers: { "Content-Type": "application/json" },
+        headers: { ...corsHeaders(), "Content-Type": "application/json" },
         body: JSON.stringify({ error: "Missing `message`" }),
       };
     }
 
-    // ---------------------------
-    // Force absolute base URL
-    // ---------------------------
-    const base =
-      process.env.URL ||
-      process.env.SITE_URL ||
-      (context && context.site && context.site.url) ||
-      "https://api.keilani.ai";
-
-    // Decide if this message should trigger a search
-    const lower = message.toLowerCase();
-    const needsSearch =
-      lower.includes("today") ||
-      lower.includes("this week") ||
-      lower.startsWith("search:") ||
-      lower.includes("latest") ||
-      lower.includes("new update") ||
-      lower.includes("patch notes");
+    const base = getBase(event, context);
+    const needsSearch = shouldSearch(message);
 
     let searchBundle = null;
-
     if (needsSearch) {
       try {
         const q = message.replace(/^search:/i, "").trim();
@@ -63,90 +90,97 @@ exports.handler = async (event, context) => {
         });
         if (resp.ok) {
           searchBundle = await resp.json();
+        } else {
+          const errTxt = await resp.text().catch(() => "");
+          console.error("search() non-200:", resp.status, errTxt);
         }
-      } catch (err) {
-        console.error("Search error", err);
+      } catch (e) {
+        console.error("search() error:", e);
       }
     }
 
-    // ---------------------------
-    // Build the prompt for the LLM
-    // ---------------------------
-    let systemPrompt = `
-You are Keilani, a helpful, conversational AI.
-Keep answers short but specific, grounded, and natural.
-Match the user's tone and vibe.
-If search results are provided, USE THEM: list notable skins, characters, weapons, collabs, or patch notes, and include parenthetical (source) tags.
-Never make up vague info if specifics are present.
-    `.trim();
+    // ——— Prompting ———
+    const systemPrompt = [
+      "You are Keilani, a helpful, grounded, down-to-earth assistant.",
+      "Keep responses **specific and concise**. Match the user's tone without overdoing slang.",
+      "If search results are provided, **use concrete details** (e.g., named skins, weapons, bosses, modes).",
+      "Cite sources briefly in parentheses like (Fortnite News) or (GameSpot).",
+      "Avoid generic filler. Only add a quick, natural buffer phrase if the user asked for something complex AND the explanation is long.",
+      "If info is unclear in sources, say what’s uncertain and ask a short follow-up question.",
+    ].join(" ");
 
     const messages = [
       { role: "system", content: systemPrompt },
-      { role: "user", content: message },
+      {
+        role: "user",
+        content: `User (${user_id}) says: ${message}`,
+      },
     ];
 
-    if (searchBundle && searchBundle.results && searchBundle.results.length > 0) {
+    if (searchBundle && Array.isArray(searchBundle.results) && searchBundle.results.length) {
       messages.push({
         role: "system",
-        content: `Search results:\n${searchBundle.results
-          .slice(0, 5)
-          .map(
-            (r, i) =>
-              `${i + 1}. ${r.title} — ${r.snippet || ""} (${r.source || r.url})`
-          )
-          .join("\n")}\n\nUse these details in your reply.`,
+        content:
+          "Use these recent search results. Pull **specific** items and reflect them directly in your answer:\n" +
+          summarizeResults(searchBundle),
       });
     }
 
-    // ---------------------------
-    // Call OpenAI
-    // ---------------------------
-    const openaiResp = await fetch("https://api.openai.com/v1/chat/completions", {
+    // ——— Call OpenAI ———
+    const openaiKey = process.env.OPENAI_API_KEY;
+    if (!openaiKey) {
+      throw new Error("OPENAI_API_KEY not configured");
+    }
+
+    const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
+    const temperature = Number(process.env.OPENAI_TEMPERATURE || 0.6);
+    const maxTokens = Number(process.env.OPENAI_MAX_OUTPUT_TOKENS || 500);
+
+    const aiResp = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
       headers: {
         "Content-Type": "application/json",
-        Authorization: `Bearer ${process.env.OPENAI_API_KEY}`,
+        Authorization: `Bearer ${openaiKey}`,
       },
       body: JSON.stringify({
-        model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+        model,
         messages,
-        temperature: Number(process.env.OPENAI_TEMPERATURE || 0.7),
-        max_tokens: Number(process.env.OPENAI_MAX_OUTPUT_TOKENS || 400),
+        temperature,
+        max_tokens: maxTokens,
       }),
     });
 
-    if (!openaiResp.ok) {
-      const txt = await openaiResp.text();
-      throw new Error(`OpenAI error: ${txt}`);
+    if (!aiResp.ok) {
+      const errTxt = await aiResp.text().catch(() => "");
+      throw new Error(`OpenAI error ${aiResp.status}: ${errTxt}`);
     }
 
-    const data = await openaiResp.json();
-    const reply = data.choices?.[0]?.message?.content?.trim() || "(no reply)";
+    const aiData = await aiResp.json();
+    const reply = aiData?.choices?.[0]?.message?.content?.trim() || "Sorry—no reply came back.";
+
+    // Build meta, including light citations if we searched
+    const citations =
+      searchBundle?.results?.slice(0, 5).map((r) => ({
+        title: r.title,
+        url: r.url,
+        source: r.source || null,
+        published: r.published || null,
+      })) || [];
 
     return {
       statusCode: 200,
-      headers: {
-        "Content-Type": "application/json",
-        "Access-Control-Allow-Origin": "*",
-      },
+      headers: { ...corsHeaders(), "Content-Type": "application/json" },
       body: JSON.stringify({
         reply,
-        meta: {
-          searched: !!searchBundle,
-          citations: searchBundle?.results?.map((r) => ({
-            title: r.title,
-            url: r.url,
-            source: r.source,
-          })),
-        },
+        meta: { searched: !!searchBundle, citations },
       }),
     };
   } catch (err) {
-    console.error("Chat error", err);
+    console.error("chat handler error:", err);
     return {
       statusCode: 500,
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ error: err.message }),
+      headers: { ...corsHeaders(), "Content-Type": "application/json" },
+      body: JSON.stringify({ error: String(err.message || err) }),
     };
   }
 };
