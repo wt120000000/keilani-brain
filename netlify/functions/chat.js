@@ -1,7 +1,6 @@
 // netlify/functions/chat.js
-// CommonJS + SDK-free. Uses global fetch (Node 18+ / Netlify runtime).
+// CommonJS, SDK-free, Node 18+ (global fetch). Grounded, stylish summaries.
 
-/** CORS helper */
 function corsHeaders() {
   return {
     "Access-Control-Allow-Origin": "*",
@@ -10,10 +9,9 @@ function corsHeaders() {
   };
 }
 
-/** Decide if a user message needs a fresh web search */
 function shouldSearch(text) {
   if (!text) return false;
-  const s = text.toLowerCase().trim();
+  const s = text.toLowerCase();
   return (
     s.startsWith("search:") ||
     s.includes("today") ||
@@ -25,36 +23,41 @@ function shouldSearch(text) {
   );
 }
 
-/** Build absolute origin for internal calls */
-function getBase(event, context) {
-  // Order of preference: Netlify-provided URL envs → event headers → fallback
+function getBase(event) {
   return (
     process.env.URL ||
     process.env.SITE_URL ||
-    (event && event.headers && (event.headers["x-forwarded-host"] ? `https://${event.headers["x-forwarded-host"]}` : null)) ||
+    (event?.headers?.["x-forwarded-host"] ? `https://${event.headers["x-forwarded-host"]}` : null) ||
     "https://api.keilani.ai"
   );
 }
 
-/** Shape search bundle into a compact, LLM-friendly string */
-function summarizeResults(bundle) {
+function briefResults(bundle) {
   if (!bundle || !Array.isArray(bundle.results)) return "";
-  return bundle.results
-    .slice(0, 5)
-    .map((r, i) => {
-      const src = r.source || r.url || "";
-      const snip = r.snippet ? ` — ${r.snippet}` : "";
-      return `${i + 1}. ${r.title}${snip} (${src})`;
-    })
-    .join("\n");
+  // Very compact, high-signal context for the model
+  return bundle.results.slice(0, 6).map((r, i) => {
+    const title = r.title || "";
+    const source = r.source || (r.url ? new URL(r.url).hostname : "");
+    const when = r.published ? ` • ${r.published}` : "";
+    const snip = r.snippet ? ` — ${r.snippet}` : "";
+    return `${i + 1}. ${title} (${source}${when})${snip}`;
+  }).join("\n");
 }
 
-exports.handler = async (event, context) => {
-  // Preflight
+function compactSourceList(bundle) {
+  if (!bundle || !Array.isArray(bundle.results)) return "";
+  const names = [];
+  for (const r of bundle.results.slice(0, 5)) {
+    const s = r.source || (r.url ? new URL(r.url).hostname : "");
+    if (s && !names.includes(s)) names.push(s);
+  }
+  return names.join(", ");
+}
+
+exports.handler = async (event) => {
   if (event.httpMethod === "OPTIONS") {
     return { statusCode: 204, headers: corsHeaders(), body: "" };
   }
-
   if (event.httpMethod !== "POST") {
     return {
       statusCode: 405,
@@ -65,9 +68,8 @@ exports.handler = async (event, context) => {
 
   try {
     const body = JSON.parse(event.body || "{}");
-    const user_id = String(body.user_id || "anon"); // use it so ESLint chills
+    const user_id = String(body.user_id || "anon");
     const message = String(body.message || "").trim();
-
     if (!message) {
       return {
         statusCode: 400,
@@ -76,78 +78,69 @@ exports.handler = async (event, context) => {
       };
     }
 
-    const base = getBase(event, context);
+    const base = getBase(event);
     const needsSearch = shouldSearch(message);
-
     let searchBundle = null;
+
     if (needsSearch) {
       try {
         const q = message.replace(/^search:/i, "").trim();
         const resp = await fetch(`${base}/.netlify/functions/search`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({ q, fresh: true, max: 6 }),
+          body: JSON.stringify({ q, fresh: true, max: 8 }),
         });
-        if (resp.ok) {
-          searchBundle = await resp.json();
-        } else {
-          const errTxt = await resp.text().catch(() => "");
-          console.error("search() non-200:", resp.status, errTxt);
-        }
+        if (resp.ok) searchBundle = await resp.json();
+        else console.error("search() non-200:", resp.status, await resp.text().catch(() => ""));
       } catch (e) {
         console.error("search() error:", e);
       }
     }
 
-    // ——— Prompting ———
-    const systemPrompt = [
-      "You are Keilani, a helpful, grounded, down-to-earth assistant.",
-      "Keep responses **specific and concise**. Match the user's tone without overdoing slang.",
-      "If search results are provided, **use concrete details** (e.g., named skins, weapons, bosses, modes).",
-      "Cite sources briefly in parentheses like (Fortnite News) or (GameSpot).",
-      "Avoid generic filler. Only add a quick, natural buffer phrase if the user asked for something complex AND the explanation is long.",
-      "If info is unclear in sources, say what’s uncertain and ask a short follow-up question.",
+    // ===== Prompt guardrails =====
+    const styleRules = [
+      "Speak like a helpful, grounded friend. Match the user's tone; avoid over-slang.",
+      "Do NOT read headlines or URLs back line-by-line. Summarize with specifics.",
+      "Only say a brief buffer like “just a sec” when the explanation is long AND complex.",
+      "Prefer names, numbers, dates, and concrete examples (e.g., named skins, weapons, bosses).",
+      "If the sources disagree or are unclear, state what’s uncertain and ask one tight follow-up.",
+      "Keep it tight. 80–140 words is ideal unless detail is demanded.",
+      "End with compact sources, e.g., (Fortnite News, GameSpot).",
+    ].join(" ");
+
+    const answerFormat = [
+      "FORMAT STRICTLY:",
+      "• First line: **Quick take:** one punchy sentence with your POV.",
+      "• Next up to 3 bullets: crisp specifics that matter (names, changes, dates).",
+      "• One single follow-up question.",
+      "• Final line: (Sources: A, B, C)",
     ].join(" ");
 
     const messages = [
-      { role: "system", content: systemPrompt },
-      {
-        role: "user",
-        content: `User (${user_id}) says: ${message}`,
-      },
+      { role: "system", content: `You are Keilani. ${styleRules} ${answerFormat}` },
+      { role: "user", content: `User (${user_id}) asked: ${message}` },
     ];
 
-    if (searchBundle && Array.isArray(searchBundle.results) && searchBundle.results.length) {
+    if (searchBundle?.results?.length) {
       messages.push({
         role: "system",
         content:
-          "Use these recent search results. Pull **specific** items and reflect them directly in your answer:\n" +
-          summarizeResults(searchBundle),
+          "Use these fresh results as your evidence. Ground your bullets in them without repeating titles verbatim:\n" +
+          briefResults(searchBundle),
       });
     }
 
-    // ——— Call OpenAI ———
+    // OpenAI call
     const openaiKey = process.env.OPENAI_API_KEY;
-    if (!openaiKey) {
-      throw new Error("OPENAI_API_KEY not configured");
-    }
-
+    if (!openaiKey) throw new Error("OPENAI_API_KEY not configured");
     const model = process.env.OPENAI_MODEL || "gpt-4o-mini";
     const temperature = Number(process.env.OPENAI_TEMPERATURE || 0.6);
     const maxTokens = Number(process.env.OPENAI_MAX_OUTPUT_TOKENS || 500);
 
     const aiResp = await fetch("https://api.openai.com/v1/chat/completions", {
       method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${openaiKey}`,
-      },
-      body: JSON.stringify({
-        model,
-        messages,
-        temperature,
-        max_tokens: maxTokens,
-      }),
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${openaiKey}` },
+      body: JSON.stringify({ model, messages, temperature, max_tokens: maxTokens }),
     });
 
     if (!aiResp.ok) {
@@ -155,12 +148,14 @@ exports.handler = async (event, context) => {
       throw new Error(`OpenAI error ${aiResp.status}: ${errTxt}`);
     }
 
-    const aiData = await aiResp.json();
-    const reply = aiData?.choices?.[0]?.message?.content?.trim() || "Sorry—no reply came back.";
+    let reply = (await aiResp.json())?.choices?.[0]?.message?.content?.trim() || "";
+    const srcList = compactSourceList(searchBundle);
+    if (searchBundle?.results?.length && srcList && !reply.includes("(Sources:")) {
+      reply += `\n(Sources: ${srcList})`;
+    }
 
-    // Build meta, including light citations if we searched
     const citations =
-      searchBundle?.results?.slice(0, 5).map((r) => ({
+      searchBundle?.results?.slice(0, 6).map((r) => ({
         title: r.title,
         url: r.url,
         source: r.source || null,
@@ -170,10 +165,7 @@ exports.handler = async (event, context) => {
     return {
       statusCode: 200,
       headers: { ...corsHeaders(), "Content-Type": "application/json" },
-      body: JSON.stringify({
-        reply,
-        meta: { searched: !!searchBundle, citations },
-      }),
+      body: JSON.stringify({ reply, meta: { searched: !!searchBundle, citations } }),
     };
   } catch (err) {
     console.error("chat handler error:", err);
