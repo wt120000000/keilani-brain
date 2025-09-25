@@ -1,35 +1,37 @@
-import { Handler } from '@netlify/functions';
+/**
+ * Health check endpoint
+ * Returns basic service status and build information
+ */
 
-const CORS = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
-  "Access-Control-Allow-Methods": "GET, OPTIONS",
-};
+import type { HandlerEvent, HandlerContext } from "@netlify/functions";
+import { success, handleCors, createRequestContext, withLogging } from "../../lib/http.js";
 
-export const handler: Handler = async (event) => {
-  if (event.httpMethod === "OPTIONS") {
-    return { statusCode: 200, headers: CORS, body: "" };
-  }
+interface HealthCheckResponse {
+  status: "ok";
+  time: string;
+  commit: string | null;
+  environment: string;
+  uptime: number;
+}
+
+export const handler = async (event: HandlerEvent, context: HandlerContext) => {
+  const requestContext = createRequestContext(event.path, event.httpMethod);
   
-  if (event.httpMethod !== "GET") {
-    return { 
-      statusCode: 405, 
-      headers: CORS, 
-      body: JSON.stringify({ error: "Method Not Allowed" })
-    };
+  // Handle CORS preflight
+  const corsResponse = handleCors(event.httpMethod, requestContext.requestId, event.headers.origin);
+  if (corsResponse) {
+    return corsResponse;
   }
 
-  const response = {
-    status: 'ok',
-    time: new Date().toISOString()
-  };
+  return withLogging(requestContext, async () => {
+    const healthData: HealthCheckResponse = {
+      status: "ok",
+      time: new Date().toISOString(),
+      commit: process.env.COMMIT_REF || process.env.GITHUB_SHA || null,
+      environment: process.env.NODE_ENV || "production",
+      uptime: process.uptime(),
+    };
 
-  return {
-    statusCode: 200,
-    headers: { 
-      "content-type": "application/json; charset=utf-8", 
-      ...CORS 
-    },
-    body: JSON.stringify(response),
-  };
+    return success(healthData, requestContext.requestId);
+  })();
 };

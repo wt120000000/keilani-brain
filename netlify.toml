@@ -1,96 +1,56 @@
-# netlify.toml — Keilani Brain
+# Netlify configuration for Keilani Brain API
 
 [build]
-  command   = "npm run build || echo no-build"
-  publish   = "public"
+  command = "npm run build"
+  publish = "out"
   functions = "netlify/functions"
 
+[build.environment]
+  NODE_VERSION = "18"
+
 [functions]
+  directory = "netlify/functions"
   node_bundler = "esbuild"
   external_node_modules = ["stripe", "@supabase/supabase-js"]
-  included_files = ["netlify/functions/**"]
+  included_files = ["lib/**"]
 
-# Map /api/* to serverless functions
+# API routing - map /api/* to functions
 [[redirects]]
-  from = "/api/chat"
-  to   = "/.netlify/functions/chat"
+  from = "/api/healthcheck"
+  to = "/.netlify/functions/healthcheck"
   status = 200
 
 [[redirects]]
-  from = "/api/health"
-  to   = "/.netlify/functions/health"
+  from = "/api/status"
+  to = "/.netlify/functions/status"
   status = 200
 
 [[redirects]]
-  from = "/api/version"
-  to   = "/.netlify/functions/version"
+  from = "/api/*"
+  to = "/.netlify/functions/:splat"
   status = 200
 
-# --- Global security headers ---
+# Security headers
 [[headers]]
-  for = "/*"
+  for = "/api/*"
   [headers.values]
-    X-Frame-Options = "SAMEORIGIN"
+    X-Frame-Options = "DENY"
     X-Content-Type-Options = "nosniff"
+    X-XSS-Protection = "1; mode=block"
     Referrer-Policy = "strict-origin-when-cross-origin"
-    Permissions-Policy = "camera=(), microphone=(), geolocation=()"
-    Strict-Transport-Security = "max-age=63072000; includeSubDomains; preload"
-    # Update connect-src as needed; includes OpenAI/Supabase/Stripe/Netlify/etc.
-    Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-inline' https://*.netlify.app; connect-src 'self' https://keilani-brain.netlify.app https://api.openai.com https://*.supabase.co https://*.netlify.app https://framer.com https://app.framerstatic.com https://api.stripe.com https://api.keilani.ai https://api.d-id.com; img-src 'self' data: blob:; media-src https://*.d-id.com https://*.amazonaws.com 'self' blob: data:; style-src 'self' 'unsafe-inline'; frame-ancestors 'self';"
+    Content-Security-Policy = "default-src 'self'"
 
-# Ensure JS modules get correct MIME
+# CORS for API endpoints
 [[headers]]
-  for = "/js/*"
+  for = "/api/*"
   [headers.values]
-    Content-Type = "application/javascript; charset=utf-8"
-    Cache-Control = "public, max-age=300"
+    Access-Control-Allow-Origin = "*"
+    Access-Control-Allow-Methods = "GET, POST, PUT, DELETE, OPTIONS"
+    Access-Control-Allow-Headers = "Content-Type, Authorization, X-Request-ID"
+    Access-Control-Max-Age = "86400"
 
-# Cache images & icons
+# Cache static assets
 [[headers]]
-  for = "/*.(png|svg|jpg|jpeg|webp|gif|ico)"
+  for = "/*.(js|css|svg|png|jpg|jpeg|gif|ico|woff|woff2)"
   [headers.values]
-    Cache-Control = "public, max-age=604800, immutable"
-
-# --- Streaming (SSE) headers for serverless function ---
-# Important: prevent proxy buffering and force event-stream content type
-[[headers]]
-  for = "/.netlify/functions/stream-chat"
-  [headers.values]
-    Cache-Control = "no-cache, no-transform"
-    Content-Type  = "text/event-stream"
-    Connection    = "keep-alive"
-    X-Accel-Buffering = "no"
-
-# --- (Optional) SSE headers for the Edge stream route, if you hit it directly ---
-[[headers]]
-  for = "/api/chat-stream"
-  [headers.values]
-    Cache-Control = "no-cache, no-transform"
-    Content-Type  = "text/event-stream"
-    Connection    = "keep-alive"
-    X-Accel-Buffering = "no"
-
-[functions."purge-old"]
-  schedule = "15 4 * * *"
-
-# Edge function already defined by you
-[[edge_functions]]
-  path = "/api/chat-stream"
-  function = "chat-stream"
-
-[[headers]]
-  for = "/vendor/*.js"
-  [headers.values]
-    Content-Type = "application/javascript; charset=utf-8"
     Cache-Control = "public, max-age=31536000, immutable"
-
-[[headers]]
-  for = "/vendor/*.css"
-  [headers.values]
-    Content-Type = "text/css; charset=utf-8"
-    Cache-Control = "public, max-age=31536000, immutable"
-
-[[redirects]]
-  from = "/api/did-speak"
-  to   = "/.netlify/functions/did-speak"
-  status = 200

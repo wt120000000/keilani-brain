@@ -1,58 +1,44 @@
-// eslint.config.js
 import js from "@eslint/js";
+import tseslint from "@typescript-eslint/eslint-plugin";
+import tsparser from "@typescript-eslint/parser";
 import globals from "globals";
 
 export default [
   js.configs.recommended,
-
-  // Netlify Functions in CommonJS (e.g., healthz.js)
   {
-    files: ["netlify/functions/**/*.js"],
+    files: ["**/*.ts", "**/*.tsx"],
     languageOptions: {
-      ecmaVersion: "latest",
-      sourceType: "commonjs",
+      parser: tsparser,
+      parserOptions: {
+        ecmaVersion: "latest",
+        sourceType: "module",
+      },
       globals: {
-        ...globals.node,     // process, __dirname, module, etc.
-        ...globals.browser,  // console (and any incidental DOM-ish refs)
+        ...globals.node,
+        ...globals.browser,
       },
     },
-    rules: {
-      "no-unused-vars": "warn",
-      "no-undef": "error",
-      "semi": ["error", "always"],
-      "quotes": ["error", "double"],
-      "no-empty": ["warn", { "allowEmptyCatch": true }]
-    },
-  },
-
-  // Netlify Functions in ESM (.mjs) – Node 18+ exposes fetch/Response globally
-  {
-    files: ["netlify/functions/**/*.mjs"],
-    languageOptions: {
-      ecmaVersion: "latest",
-      sourceType: "module",
-      globals: {
-        ...globals.node,     // process, etc.
-        ...globals.browser,  // fetch, Response, URLSearchParams, console
-      },
+    plugins: {
+      "@typescript-eslint": tseslint,
     },
     rules: {
-      "no-unused-vars": "warn",
-      "no-undef": "error",
-      "semi": ["error", "always"],
-      "quotes": ["error", "double"],
-      "no-empty": ["warn", { "allowEmptyCatch": true }]
+      ...tseslint.configs.recommended.rules,
+      "@typescript-eslint/no-unused-vars": ["error", { argsIgnorePattern: "^_" }],
+      "@typescript-eslint/explicit-function-return-type": "off",
+      "@typescript-eslint/no-explicit-any": "warn",
+      "no-console": "off",
+      "prefer-const": "error",
+      "no-var": "error",
     },
   },
-
-  // Project scripts (if any)
   {
-    files: ["scripts/**/*.js"],
+    files: ["netlify/functions/**/*.js", "netlify/functions/**/*.mjs"],
     languageOptions: {
       ecmaVersion: "latest",
       sourceType: "module",
       globals: {
         ...globals.node,
+        ...globals.browser,
       },
     },
     rules: {
@@ -60,11 +46,9 @@ export default [
       "no-undef": "error",
       "semi": ["error", "always"],
       "quotes": ["error", "double"],
-      "no-empty": ["warn", { "allowEmptyCatch": true }]
+      "no-empty": ["warn", { "allowEmptyCatch": true }],
     },
   },
-
-  // Ignore everything else
   {
     ignores: [
       "node_modules/**",
