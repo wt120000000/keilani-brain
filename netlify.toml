@@ -1,56 +1,40 @@
-# Netlify configuration for Keilani Brain API
-
+# Minimal Netlify config for local dev / Bolt.new
 [build]
-  command = "npm run build"
-  publish = "out"
-  functions = "netlify/functions"
-
-[build.environment]
-  NODE_VERSION = "18"
+  publish = "public"
 
 [functions]
-  directory = "netlify/functions"
   node_bundler = "esbuild"
-  external_node_modules = ["stripe", "@supabase/supabase-js"]
-  included_files = ["lib/**"]
 
-# API routing - map /api/* to functions
+# Basic redirects for functions we need
 [[redirects]]
-  from = "/api/healthcheck"
-  to = "/.netlify/functions/healthcheck"
+  from = "/api/chat"
+  to = "/.netlify/functions/chat"
   status = 200
 
-[[redirects]]
-  from = "/api/status"
-  to = "/.netlify/functions/status"
-  status = 200
+[[edge_functions]]
+  path = "/api/chat-stream"
+  function = "chat-stream"
 
-[[redirects]]
-  from = "/api/*"
-  to = "/.netlify/functions/:splat"
-  status = 200
+[[edge_functions]]
+  path = "/.netlify/functions/chat-stream"
+  function = "chat-stream"
 
-# Security headers
+# Optional: light caching + CORS for static. NO CSP here (it broke TOML parsing).
 [[headers]]
-  for = "/api/*"
+  for = "/*.html"
   [headers.values]
-    X-Frame-Options = "DENY"
-    X-Content-Type-Options = "nosniff"
-    X-XSS-Protection = "1; mode=block"
-    Referrer-Policy = "strict-origin-when-cross-origin"
-    Content-Security-Policy = "default-src 'self'"
+  Cache-Control = "no-store, must-revalidate"
 
-# CORS for API endpoints
 [[headers]]
-  for = "/api/*"
+  for = "/assets/*"
   [headers.values]
-    Access-Control-Allow-Origin = "*"
-    Access-Control-Allow-Methods = "GET, POST, PUT, DELETE, OPTIONS"
-    Access-Control-Allow-Headers = "Content-Type, Authorization, X-Request-ID"
-    Access-Control-Max-Age = "86400"
+  Cache-Control = "max-age=30, must-revalidate"
 
-# Cache static assets
 [[headers]]
-  for = "/*.(js|css|svg|png|jpg|jpeg|gif|ico|woff|woff2)"
+  for = "/*"
   [headers.values]
-    Cache-Control = "public, max-age=31536000, immutable"
+  Access-Control-Allow-Origin = "*"
+  Permissions-Policy = "camera=(self), microphone=(self), geolocation=()"
+  X-Frame-Options = "SAMEORIGIN"
+  X-Content-Type-Options = "nosniff"
+  Referrer-Policy = "strict-origin-when-cross-origin"

@@ -29,7 +29,7 @@
     "tsx": "^4.19.1"
   },
   "scripts": {
-    "dev": "netlify dev",
+    "dev": "netlify dev --port 3000 --staticServerPort 3999",
     "build": "tsc --noEmit && npm run validate-env",
     "typecheck": "tsc --noEmit",
     "validate-env": "tsx scripts/validate-env.ts",
