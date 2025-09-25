@@ -5,19 +5,19 @@
 [functions]
   node_bundler = "esbuild"
 
-# API redirects (Node functions only)
+# Node functions
 [[redirects]]
   from = "/api/chat"
   to   = "/.netlify/functions/chat"
   status = 200
 
-# Use the Node function for streaming in local dev (NO edge)
+# Use the Node streaming function in dev (avoid Edge)
 [[redirects]]
   from = "/api/chat-stream"
   to   = "/.netlify/functions/stream-chat"
   status = 200
 
-# Basic headers (no multiline CSP)
+# Basic headers (no multiline CSP blocks)
 [[headers]]
   for = "/*.html"
   [headers.values]
