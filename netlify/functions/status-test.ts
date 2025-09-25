@@ -38,43 +38,13 @@ vi.mock("../../lib/sheetdb.js", () => ({
 }));
 
 describe("status function", () => {
-  let mockEvent: HandlerEvent;
-  let mockContext: HandlerContext;
-
   beforeEach(() => {
-    mockEvent = {
-      httpMethod: "GET",
-      path: "/api/status",
-      headers: {},
-      body: null,
-      queryStringParameters: null,
-      multiValueQueryStringParameters: null,
-      pathParameters: null,
-      stageVariables: null,
-      requestContext: {} as any,
-      resource: "",
-      isBase64Encoded: false,
-      multiValueHeaders: {},
-    };
-
-    mockContext = {
-      callbackWaitsForEmptyEventLoop: false,
-      functionName: "status",
-      functionVersion: "1",
-      invokedFunctionArn: "test-arn",
-      memoryLimitInMB: "128",
-      awsRequestId: "test-request-id",
-      logGroupName: "test-log-group",
-      logStreamName: "test-log-stream",
-      getRemainingTimeInMillis: () => 30000,
-      done: vi.fn(),
-      fail: vi.fn(),
-      succeed: vi.fn(),
-    };
+    // Setup mocks
   });
 
   it("should return 200 with service status data", async () => {
-    const result = await handler(mockEvent, mockContext);
+    const event = {} as HandlerEvent;
+    const result = await handler(event, {} as any);
 
     expect(result.statusCode).toBe(200);
     expect(result.headers).toMatchObject({
@@ -82,7 +52,8 @@ describe("status function", () => {
       "X-Request-ID": expect.stringMatching(/^req_/),
     });
 
-    const body = JSON.parse(result.body);
+    expect(result.body).toBeDefined();
+    const body = JSON.parse(result.body!);
     expect(body).toMatchObject({
       success: true,
       data: {
@@ -111,10 +82,12 @@ describe("status function", () => {
   });
 
   it("should handle CORS preflight request", async () => {
-    mockEvent.httpMethod = "OPTIONS";
-    mockEvent.headers.origin = "https://example.com";
+    const event = {
+      httpMethod: "OPTIONS",
+      headers: { origin: "https://example.com" }
+    } as HandlerEvent;
 
-    const result = await handler(mockEvent, mockContext);
+    const result = await handler(event, {} as any);
 
     expect(result.statusCode).toBe(204);
     expect(result.headers).toMatchObject({

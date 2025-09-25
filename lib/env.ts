@@ -31,14 +31,17 @@ const envSchema = z.object({
 export type Env = z.infer<typeof envSchema>;
 
 let cachedEnv: Env | null = null;
+export let env: Env;
 
 export function getEnv(): Env {
   if (cachedEnv) {
+    env = cachedEnv;
     return cachedEnv;
   }
 
   try {
     cachedEnv = envSchema.parse(process.env);
+    env = cachedEnv;
     return cachedEnv;
   } catch (error) {
     if (error instanceof z.ZodError) {

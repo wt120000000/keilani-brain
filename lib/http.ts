@@ -16,14 +16,16 @@ export interface ApiResponse<T = unknown> {
 export interface RequestContext extends LogContext {
   requestId: string;
   startTime: number;
+  path: string;
+  method: string;
 }
 
-export function createRequestContext(path?: string, method?: string): RequestContext {
+export function makeRequestContext(event: HandlerEvent): RequestContext {
   return {
-    requestId: generateRequestId(),
+    requestId: crypto.randomUUID(),
     startTime: Date.now(),
-    path,
-    method,
+    path: event.path ?? "",
+    method: event.httpMethod ?? "",
   };
 }
 

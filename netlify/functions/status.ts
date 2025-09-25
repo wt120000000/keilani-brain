@@ -4,7 +4,7 @@
  */
 
 import type { HandlerEvent, HandlerContext } from "@netlify/functions";
-import { success, handleCors, createRequestContext, withLogging } from "../../lib/http.js";
+import { success, handleCors, makeRequestContext, withLogging } from "../../lib/http.js";
 import { getOpenAIClient } from "../../lib/openai.js";
 import { getSupabaseManager } from "../../lib/supabase.js";
 import { getSheetDBClient } from "../../lib/sheetdb.js";
@@ -24,7 +24,7 @@ interface StatusResponse {
 }
 
 export const handler = async (event: HandlerEvent, context: HandlerContext) => {
-  const requestContext = createRequestContext(event.path, event.httpMethod);
+  const requestContext = makeRequestContext(event);
   const logger = createLogger(requestContext);
   
   // Handle CORS preflight
@@ -36,20 +36,24 @@ export const handler = async (event: HandlerEvent, context: HandlerContext) => {
   return withLogging(requestContext, async () => {
     const services: ServiceStatus[] = [];
 
+    const pushService = (name: string, health: { status: "ok" | "error"; latency?: number; error?: string }) => {
+      services.push({
+        name,
+        status: health.status,
+        latency: health.latency ?? 0,
+        error: health.error,
+      });
+    };
+
     // Check OpenAI
     try {
       logger.debug("Checking OpenAI status");
       const openaiClient = getOpenAIClient();
       const openaiHealth = await openaiClient.healthCheck();
-      services.push({
-        name: "openai",
-        status: openaiHealth.status,
-        latency: openaiHealth.latency,
-      });
+      pushService("openai", openaiHealth);
     } catch (error) {
       logger.error("OpenAI status check failed", error);
-      services.push({
-        name: "openai",
+      pushService("openai", {
         status: "error",
         error: error instanceof Error ? error.message : "Unknown error",
       });
@@ -60,15 +64,10 @@ export const handler = async (event: HandlerEvent, context: HandlerContext) => {
       logger.debug("Checking Supabase status");
       const supabaseManager = getSupabaseManager();
       const supabaseHealth = await supabaseManager.healthCheck();
-      services.push({
-        name: "supabase",
-        status: supabaseHealth.status,
-        latency: supabaseHealth.latency,
-      });
+      pushService("supabase", supabaseHealth);
     } catch (error) {
       logger.error("Supabase status check failed", error);
-      services.push({
-        name: "supabase",
+      pushService("supabase", {
         status: "error",
         error: error instanceof Error ? error.message : "Unknown error",
       });
@@ -80,22 +79,14 @@ export const handler = async (event: HandlerEvent, context: HandlerContext) => {
       const sheetdbClient = getSheetDBClient();
       
       if (!sheetdbClient.isConfigured()) {
-        services.push({
-          name: "sheetdb",
-          status: "not_configured",
-        });
+        pushService("sheetdb", { status: "not_configured" as "error" });
       } else {
         const sheetdbHealth = await sheetdbClient.healthCheck();
-        services.push({
-          name: "sheetdb",
-          status: sheetdbHealth.status,
-          latency: sheetdbHealth.latency,
-        });
+        pushService("sheetdb", sheetdbHealth);
       }
     } catch (error) {
       logger.error("SheetDB status check failed", error);
-      services.push({
-        name: "sheetdb",
+      pushService("sheetdb", {
         status: "error",
         error: error instanceof Error ? error.message : "Unknown error",
       });

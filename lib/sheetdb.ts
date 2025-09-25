@@ -2,14 +2,14 @@
  * SheetDB API client wrapper
  */
 
-import { getEnv } from "./env.js";
+import { env } from "./env.js";
 import { createLogger } from "./logger.js";
 
-export interface SheetDBConfig {
-  apiUrl?: string;
+export type SheetDBConfig = {
+  apiUrl: string;
   apiKey?: string;
   timeout?: number;
-}
+};
 
 export interface SheetDBResponse<T = unknown> {
   data?: T;
@@ -22,9 +22,8 @@ export class SheetDBClient {
   private logger = createLogger({ service: "sheetdb" });
 
   constructor(config?: SheetDBConfig) {
-    const env = getEnv();
     this.config = {
-      apiUrl: env.SHEETDB_API_URL,
+      apiUrl: env.SHEETDB_API_URL || "",
       apiKey: env.SHEETDB_API_KEY,
       timeout: 10000,
       ...config,
@@ -142,7 +141,7 @@ export class SheetDBClient {
   }
 
   isConfigured(): boolean {
-    return !!(this.config.apiUrl && this.config.apiKey);
+    return !!(this.config.apiUrl);
   }
 }
 

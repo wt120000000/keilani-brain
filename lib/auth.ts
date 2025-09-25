@@ -29,13 +29,12 @@ export function requireAdminAuth(event: HandlerEvent, requestId: string) {
   return null; // Auth passed
 }
 
+export function getBearerToken(authHeader?: string): string | null {
+  const match = authHeader?.match(/^Bearer\s+(.+)$/i);
+  return match?.[1] ?? null;
+}
+
 export function extractBearerToken(event: HandlerEvent): string | null {
   const authHeader = event.headers.authorization || event.headers.Authorization;
-  
-  if (!authHeader) {
-    return null;
-  }
-
-  const match = authHeader.match(/^Bearer\s+(.+)$/i);
-  return match ? match[1] : null;
+  return getBearerToken(authHeader);
 }

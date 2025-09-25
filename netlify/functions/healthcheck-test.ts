@@ -19,46 +19,14 @@ vi.mock("../../lib/env.js", () => ({
 }));
 
 describe("healthcheck function", () => {
-  let mockEvent: HandlerEvent;
-  let mockContext: HandlerContext;
-
   beforeEach(() => {
-    mockEvent = {
-      httpMethod: "GET",
-      path: "/api/healthcheck",
-      headers: {},
-      body: null,
-      queryStringParameters: null,
-      multiValueQueryStringParameters: null,
-      pathParameters: null,
-      stageVariables: null,
-      requestContext: {} as any,
-      resource: "",
-      isBase64Encoded: false,
-      multiValueHeaders: {},
-    };
-
-    mockContext = {
-      callbackWaitsForEmptyEventLoop: false,
-      functionName: "healthcheck",
-      functionVersion: "1",
-      invokedFunctionArn: "test-arn",
-      memoryLimitInMB: "128",
-      awsRequestId: "test-request-id",
-      logGroupName: "test-log-group",
-      logStreamName: "test-log-stream",
-      getRemainingTimeInMillis: () => 30000,
-      done: vi.fn(),
-      fail: vi.fn(),
-      succeed: vi.fn(),
-    };
-
     // Mock process.uptime
     vi.spyOn(process, "uptime").mockReturnValue(123.45);
   });
 
   it("should return 200 with health data for GET request", async () => {
-    const result = await handler(mockEvent, mockContext);
+    const event = { httpMethod: "GET" } as HandlerEvent;
+    const result = await handler(event, {} as any);
 
     expect(result.statusCode).toBe(200);
     expect(result.headers).toMatchObject({
@@ -66,7 +34,8 @@ describe("healthcheck function", () => {
       "X-Request-ID": expect.stringMatching(/^req_/),
     });
 
-    const body = JSON.parse(result.body);
+    expect(result.body).toBeDefined();
+    const body = JSON.parse(result.body!);
     expect(body).toMatchObject({
       success: true,
       data: {
@@ -82,10 +51,12 @@ describe("healthcheck function", () => {
   });
 
   it("should handle CORS preflight request", async () => {
-    mockEvent.httpMethod = "OPTIONS";
-    mockEvent.headers.origin = "https://example.com";
+    const event = {
+      httpMethod: "OPTIONS",
+      headers: { origin: "https://example.com" }
+    } as HandlerEvent;
 
-    const result = await handler(mockEvent, mockContext);
+    const result = await handler(event, {} as any);
 
     expect(result.statusCode).toBe(204);
     expect(result.headers).toMatchObject({
@@ -100,8 +71,10 @@ describe("healthcheck function", () => {
   it("should include commit hash when available", async () => {
     process.env.COMMIT_REF = "abc123def456";
 
-    const result = await handler(mockEvent, mockContext);
-    const body = JSON.parse(result.body);
+    const event = {} as HandlerEvent;
+    const result = await handler(event, {} as any);
+    expect(result.body).toBeDefined();
+    const body = JSON.parse(result.body!);
 
     expect(body.data.commit).toBe("abc123def456");
 
@@ -111,8 +84,10 @@ describe("healthcheck function", () => {
   it("should use GITHUB_SHA as fallback for commit", async () => {
     process.env.GITHUB_SHA = "github-sha-123";
 
-    const result = await handler(mockEvent, mockContext);
-    const body = JSON.parse(result.body);
+    const event = {} as HandlerEvent;
+    const result = await handler(event, {} as any);
+    expect(result.body).toBeDefined();
+    const body = JSON.parse(result.body!);
 
     expect(body.data.commit).toBe("github-sha-123");
 

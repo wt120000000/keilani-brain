@@ -4,7 +4,7 @@ export default defineConfig({
   test: {
     environment: 'node',
     globals: true,
-    setupFiles: ['./vitest.setup.ts'],
+    include: ["**/*-test.ts", "**/*-test.js", "**/*.test.ts", "**/*.test.js"],
     coverage: {
       provider: 'v8',
       reporter: ['text', 'json', 'html'],

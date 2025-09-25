@@ -4,7 +4,7 @@
  */
 
 import type { HandlerEvent, HandlerContext } from "@netlify/functions";
-import { success, handleCors, createRequestContext, withLogging } from "../../lib/http.js";
+import { success, handleCors, makeRequestContext, withLogging } from "../../lib/http.js";
 
 interface HealthCheckResponse {
   status: "ok";
@@ -15,7 +15,7 @@ interface HealthCheckResponse {
 }
 
 export const handler = async (event: HandlerEvent, context: HandlerContext) => {
-  const requestContext = createRequestContext(event.path, event.httpMethod);
+  const requestContext = makeRequestContext(event);
   
   // Handle CORS preflight
   const corsResponse = handleCors(event.httpMethod, requestContext.requestId, event.headers.origin);
