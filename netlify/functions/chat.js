@@ -19,7 +19,7 @@ const JSONR = (statusCode, obj, extra = {}) => ({
   body: JSON.stringify(obj),
 });
 
-exports.handler = async (event) => {
+export const handler = async (event) => {
   try {
     if (event.httpMethod === "OPTIONS") {
       return { statusCode: 204, headers: CORS };

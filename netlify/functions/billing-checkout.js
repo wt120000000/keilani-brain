@@ -17,7 +17,7 @@ const cors = (origin="") => {
 };
 const json = (code, origin, obj) => ({ statusCode: code, headers: cors(origin), body: JSON.stringify(obj) });
 
-exports.handler = async (event) => {
+export const handler = async (event) => {
   const origin = event.headers.origin || event.headers.Origin || "";
   if (event.httpMethod === "OPTIONS") return { statusCode: 200, headers: cors(origin), body: "" };
   if (event.httpMethod !== "POST")  return json(405, origin, { error: "method_not_allowed" });

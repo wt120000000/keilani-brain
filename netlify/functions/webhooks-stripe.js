@@ -11,7 +11,7 @@ function json(status, body) {
   return { statusCode: status, headers: JSON_HEADERS, body: JSON.stringify(body) };
 }
 
-exports.handler = async (event) => {
+export const handler = async (event) => {
   try {
     if (event.httpMethod !== "POST") {
       return json(405, { error: "method_not_allowed" });

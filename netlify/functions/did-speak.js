@@ -7,7 +7,7 @@ const CORS = {
   "Access-Control-Allow-Headers": "Content-Type, Authorization",
 };
 
-exports.handler = async (event) => {
+export const handler = async (event) => {
   try {
     // CORS preflight
     if (event.httpMethod === "OPTIONS") {

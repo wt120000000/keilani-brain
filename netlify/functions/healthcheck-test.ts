@@ -1,3 +1,4 @@
+﻿import { mockEvent } from '../../tests/helpers/mockEvent';
 /**
  * Tests for healthcheck function
  */
@@ -25,7 +26,7 @@ describe("healthcheck function", () => {
   });
 
   it("should return 200 with health data for GET request", async () => {
-    const event = { httpMethod: "GET" } as HandlerEvent;
+    const event = { httpMethod: "GET" } as unknown as unknown as HandlerEvent;
     const result = await handler(event, {} as any);
 
     expect(result.statusCode).toBe(200);
@@ -54,7 +55,7 @@ describe("healthcheck function", () => {
     const event = {
       httpMethod: "OPTIONS",
       headers: { origin: "https://example.com" }
-    } as HandlerEvent;
+    } as unknown as unknown as HandlerEvent;
 
     const result = await handler(event, {} as any);
 
@@ -71,7 +72,7 @@ describe("healthcheck function", () => {
   it("should include commit hash when available", async () => {
     process.env.COMMIT_REF = "abc123def456";
 
-    const event = {} as HandlerEvent;
+    const event = {} as unknown as unknown as HandlerEvent;
     const result = await handler(event, {} as any);
     expect(result.body).toBeDefined();
     const body = JSON.parse(result.body!);
@@ -84,7 +85,7 @@ describe("healthcheck function", () => {
   it("should use GITHUB_SHA as fallback for commit", async () => {
     process.env.GITHUB_SHA = "github-sha-123";
 
-    const event = {} as HandlerEvent;
+    const event = {} as unknown as unknown as HandlerEvent;
     const result = await handler(event, {} as any);
     expect(result.body).toBeDefined();
     const body = JSON.parse(result.body!);
@@ -94,3 +95,6 @@ describe("healthcheck function", () => {
     delete process.env.GITHUB_SHA;
   });
 });
+
+import { mockEvent } from '../../tests/helpers/mockEvent';
+

@@ -1,4 +1,4 @@
-﻿// netlify/functions/_entitlements.js
+// netlify/functions/_entitlements.js
 const { createClient } = require("@supabase/supabase-js");
 
 const supa = createClient(

@@ -1,179 +1,80 @@
-/**
- * HTTP utilities for Netlify Functions
- */
+﻿import type { HandlerEvent } from "@netlify/functions";
 
-import type { HandlerResponse } from "@netlify/functions";
-import { generateRequestId, createLogger, type LogContext } from "./logger.js";
-
-export interface ApiResponse<T = unknown> {
-  success: boolean;
-  data?: T;
-  error?: string;
-  requestId: string;
-  timestamp: string;
-}
-
-export interface RequestContext extends LogContext {
+export type RequestContext = {
   requestId: string;
   startTime: number;
   path: string;
   method: string;
-}
+};
 
 export function makeRequestContext(event: HandlerEvent): RequestContext {
   return {
-    requestId: crypto.randomUUID(),
+    requestId: (globalThis.crypto?.randomUUID?.() ?? `req_${Math.random().toString(36).slice(2)}`),
     startTime: Date.now(),
     path: event.path ?? "",
     method: event.httpMethod ?? "",
   };
 }
 
-export function json<T>(
-  statusCode: number,
-  data: T,
-  requestId: string,
-  headers: Record<string, string> = {}
-): HandlerResponse {
-  const response: ApiResponse<T> = {
-    success: statusCode >= 200 && statusCode < 300,
-    data,
-    requestId,
-    timestamp: new Date().toISOString(),
-  };
-
-  return {
-    statusCode,
-    headers: {
-      "Content-Type": "application/json",
-      "X-Request-ID": requestId,
-      ...headers,
-    },
-    body: JSON.stringify(response),
-  };
-}
-
-export function success<T>(data: T, requestId: string, headers?: Record<string, string>): HandlerResponse {
-  return json(200, data, requestId, headers);
-}
-
-export function badRequest(message: string, requestId: string): HandlerResponse {
-  const response: ApiResponse = {
-    success: false,
-    error: message,
-    requestId,
-    timestamp: new Date().toISOString(),
-  };
-
-  return {
-    statusCode: 400,
-    headers: {
-      "Content-Type": "application/json",
-      "X-Request-ID": requestId,
-    },
-    body: JSON.stringify(response),
-  };
-}
-
-export function unauthorized(message: string, requestId: string): HandlerResponse {
-  const response: ApiResponse = {
-    success: false,
-    error: message,
-    requestId,
-    timestamp: new Date().toISOString(),
-  };
-
-  return {
-    statusCode: 401,
-    headers: {
-      "Content-Type": "application/json",
-      "X-Request-ID": requestId,
-    },
-    body: JSON.stringify(response),
-  };
-}
-
-export function notFound(message: string, requestId: string): HandlerResponse {
-  const response: ApiResponse = {
-    success: false,
-    error: message,
-    requestId,
-    timestamp: new Date().toISOString(),
-  };
-
-  return {
-    statusCode: 404,
-    headers: {
-      "Content-Type": "application/json",
-      "X-Request-ID": requestId,
-    },
-    body: JSON.stringify(response),
-  };
-}
-
-export function internalError(message: string, requestId: string): HandlerResponse {
-  const response: ApiResponse = {
-    success: false,
-    error: message,
-    requestId,
-    timestamp: new Date().toISOString(),
-  };
-
-  return {
-    statusCode: 500,
-    headers: {
-      "Content-Type": "application/json",
-      "X-Request-ID": requestId,
-    },
-    body: JSON.stringify(response),
-  };
-}
-
-export function corsHeaders(origin?: string): Record<string, string> {
-  return {
-    "Access-Control-Allow-Origin": origin || "*",
+// --- CORS ---
+export function handleCors(method: string | undefined, requestId: string, origin?: string) {
+  const allowedOrigin = origin ?? "*";
+  const baseHeaders = {
+    "Access-Control-Allow-Origin": allowedOrigin,
     "Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
     "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Request-ID",
     "Access-Control-Max-Age": "86400",
-  };
-}
+    "X-Request-ID": requestId,
+  } as const;
 
-export function handleCors(method: string, requestId: string, origin?: string): HandlerResponse | null {
-  if (method === "OPTIONS") {
+  if (method?.toUpperCase() === "OPTIONS") {
     return {
       statusCode: 204,
-      headers: {
-        ...corsHeaders(origin),
-        "X-Request-ID": requestId,
-      },
+      headers: baseHeaders,
       body: "",
     };
   }
   return null;
 }
 
-export function withLogging<T extends Record<string, unknown>>(
-  context: RequestContext,
-  handler: () => Promise<HandlerResponse>
-) {
-  return async (): Promise<HandlerResponse> => {
-    const logger = createLogger(context);
-    
-    try {
-      logger.info("Request started");
-      const response = await handler();
-      
-      const duration = Date.now() - context.startTime;
-      logger.info("Request completed", { 
-        statusCode: response.statusCode,
-        duration 
-      });
-      
-      return response;
-    } catch (error) {
-      const duration = Date.now() - context.startTime;
-      logger.error("Request failed", error, { duration });
-      return internalError("Internal server error", context.requestId);
-    }
+// --- JSON helpers ---
+export function json(statusCode: number, body: unknown, requestId?: string) {
+  return {
+    statusCode,
+    headers: {
+      "Content-Type": "application/json",
+      ...(requestId ? { "X-Request-ID": requestId } : {}),
+    },
+    body: JSON.stringify(body),
   };
+}
+
+export function success(body: unknown, requestId?: string) {
+  return json(200, body, requestId);
+}
+
+export function badRequest(message: string, requestId?: string) {
+  return json(400, { error: { code: "bad_request", message, requestId } }, requestId);
+}
+
+export function internalError(message: string, requestId?: string) {
+  return json(500, { error: { code: "internal", message, requestId } }, requestId);
+}
+
+export function unauthorized(message = "Unauthorized", requestId?: string) {
+  return json(401, { error: { code: "unauthorized", message, requestId } }, requestId);
+}
+
+// --- logging wrapper ---
+export async function withLogging<T>(
+  ctx: RequestContext,
+  fn: () => Promise<T>
+): Promise<T> {
+  try {
+    const result = await fn();
+    return result;
+  } finally {
+    const duration = Date.now() - ctx.startTime;
+    console.log(JSON.stringify({ level: "info", requestId: ctx.requestId, path: ctx.path, method: ctx.method, duration }));
+  }
 }

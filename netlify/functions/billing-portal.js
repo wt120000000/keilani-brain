@@ -26,7 +26,7 @@ function json(statusCode, origin, obj) {
   return { statusCode, headers: corsHeaders(origin), body: JSON.stringify(obj) };
 }
 
-exports.handler = async (event) => {
+export const handler = async (event) => {
   const origin = event.headers.origin || event.headers.Origin || "";
 
   if (event.httpMethod === "OPTIONS") {

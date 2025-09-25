@@ -1,3 +1,4 @@
+﻿import { mockEvent } from '../../tests/helpers/mockEvent';
 /**
  * Tests for status function
  */
@@ -43,7 +44,7 @@ describe("status function", () => {
   });
 
   it("should return 200 with service status data", async () => {
-    const event = {} as HandlerEvent;
+    const event = {} as unknown as HandlerEvent;
     const result = await handler(event, {} as any);
 
     expect(result.statusCode).toBe(200);
@@ -85,7 +86,7 @@ describe("status function", () => {
     const event = {
       httpMethod: "OPTIONS",
       headers: { origin: "https://example.com" }
-    } as HandlerEvent;
+    } as unknown as HandlerEvent;
 
     const result = await handler(event, {} as any);
 

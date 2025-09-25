@@ -4,7 +4,7 @@ function supa(service = false) {
   return createClient(process.env.SUPABASE_URL, service ? process.env.SUPABASE_SERVICE_ROLE : process.env.SUPABASE_ANON_KEY);
 }
 
-exports.handler = async (event) => {
+export const handler = async (event) => {
   try {
     const userId = (event.headers["x-user-id"] || event.headers["X-User-Id"]);
     if (!userId) return { statusCode: 401, body: JSON.stringify({ error: "unauthorized" }) };
