@@ -1,25 +1,23 @@
-# Minimal Netlify config for local dev / Bolt.new
 [build]
   publish = "public"
+  functions = "netlify/functions"
 
 [functions]
   node_bundler = "esbuild"
 
-# Basic redirects for functions we need
+# API redirects (Node functions only)
 [[redirects]]
   from = "/api/chat"
-  to = "/.netlify/functions/chat"
+  to   = "/.netlify/functions/chat"
   status = 200
 
-[[edge_functions]]
-  path = "/api/chat-stream"
-  function = "chat-stream"
+# Use the Node function for streaming in local dev (NO edge)
+[[redirects]]
+  from = "/api/chat-stream"
+  to   = "/.netlify/functions/stream-chat"
+  status = 200
 
-[[edge_functions]]
-  path = "/.netlify/functions/chat-stream"
-  function = "chat-stream"
-
-# Optional: light caching + CORS for static. NO CSP here (it broke TOML parsing).
+# Basic headers (no multiline CSP)
 [[headers]]
   for = "/*.html"
   [headers.values]
