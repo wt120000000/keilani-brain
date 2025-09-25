@@ -22,6 +22,7 @@ export const handler = async (event: HandlerEvent) => {
       requestId: ctx.requestId,
     };
 
-    return success(body, ctx.requestId);
+    return success({ data: body }, ctx.requestId);
   });
 };
+
