@@ -1,23 +1,23 @@
 [build]
-  publish = "public"
+  publish   = "public"
   functions = "netlify/functions"
 
 [functions]
   node_bundler = "esbuild"
 
-# Node functions
+# Node JSON endpoint
 [[redirects]]
   from = "/api/chat"
   to   = "/.netlify/functions/chat"
   status = 200
 
-# Use the Node streaming function in dev (avoid Edge)
+# Use Node streaming function in dev (avoid Edge)
 [[redirects]]
   from = "/api/chat-stream"
   to   = "/.netlify/functions/stream-chat"
   status = 200
 
-# Basic headers (no multiline CSP blocks)
+# Helpful headers (no multiline CSP)
 [[headers]]
   for = "/*.html"
   [headers.values]
