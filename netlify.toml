@@ -35,6 +35,9 @@
   Permissions-Policy = "camera=(self), microphone=(self), geolocation=()"
   X-Frame-Options = "SAMEORIGIN"
   X-Content-Type-Options = "nosniff"
-  Referrer-Policy = "strict-origin-when-cross-origin"[[edge_functions]]
+  Referrer-Policy = "strict-origin-when-cross-origin"
+
+[[edge_functions]]
   function = "chat-stream"
   path = "/api/chat-stream"
+
