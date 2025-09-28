@@ -1,8 +1,12 @@
-// Chat + TTS (Browser/ElevenLabs) + Push-to-talk -> STT -> Chat -> TTS
+// Chat (JSON or SSE stream) + TTS (Browser/ElevenLabs) + Push-to-talk with barge-in + timing
+
+// --- DOM ---
 const sendBtn = document.getElementById("send");
+const stopBtn = document.getElementById("stopStream");
 const msgEl = document.getElementById("message");
 const userEl = document.getElementById("userId");
 const statusEl = document.getElementById("status");
+const latencyEl = document.getElementById("latency");
 const replyEl = document.getElementById("reply");
 const matchesEmpty = document.getElementById("matchesEmpty");
 const matchesTable = document.getElementById("matchesTable");
@@ -10,6 +14,7 @@ const matchesBody = document.getElementById("matchesBody");
 const thresholdEl = document.getElementById("threshold");
 const countEl = document.getElementById("count");
 const skipContextEl = document.getElementById("skipContext");
+const streamToggle = document.getElementById("streamToggle");
 
 const healthBadge = document.getElementById("healthBadge");
 const healthDot = document.getElementById("healthDot");
@@ -32,17 +37,22 @@ const pttBtn = document.getElementById("ptt");
 const lastTranscriptEl = document.getElementById("lastTranscript");
 const lastAudio = document.getElementById("lastAudio");
 
-// ---------- State ----------
+// --- State ---
 let ttsEnabled = true;
 let voices = [];
 let selectedVoice = null;
-let currentAudio = null; // barge-in handle
+let currentAudio = null;       // barge-in handle
 let mediaRecorder = null;
 let mediaStream = null;
+let currentStreamController = null; // AbortController for SSE
+let streamActive = false;
 
-function setStatus(s) { statusEl.textContent = s; }
+function setStatus(s) { statusEl.firstChild.nodeValue = s + " "; }
+function setLatency(firstMs, totalMs) {
+  latencyEl.textContent = (firstMs != null ? `• first ${firstMs} ms` : "") + (totalMs != null ? ` • total ${totalMs} ms` : "");
+}
 
-// ---------- HEALTH ----------
+// --- HEALTH ---
 async function refreshHealth() {
   try {
     healthText.textContent = "checking…";
@@ -68,7 +78,7 @@ healthRefresh.addEventListener("click", refreshHealth);
 refreshHealth();
 setInterval(refreshHealth, 30000);
 
-// ---------- TTS: engine switching ----------
+// --- TTS engine UI ---
 function applyTtsEngineUI() {
   const engine = ttsEngineEl.value;
   if (engine === "elevenlabs") {
@@ -83,7 +93,6 @@ ttsEngineEl.addEventListener("change", () => {
   localStorage.setItem("ttsEngine", ttsEngineEl.value);
   applyTtsEngineUI();
 });
-
 (function bootEngineFromStorage() {
   const saved = localStorage.getItem("ttsEngine");
   if (saved) ttsEngineEl.value = saved;
@@ -91,12 +100,11 @@ ttsEngineEl.addEventListener("change", () => {
   if (savedVoiceId) voiceIdEl.value = savedVoiceId;
   applyTtsEngineUI();
 })();
-
 voiceIdEl.addEventListener("change", () => {
   localStorage.setItem("elevenVoiceId", voiceIdEl.value.trim());
 });
 
-// ---------- TTS: Browser voices ----------
+// --- Browser voices ---
 function populateVoices() {
   voices = (window.speechSynthesis?.getVoices?.() || []).filter((v) => v.lang?.startsWith?.("en"));
   voiceLocalSel.innerHTML =
@@ -124,16 +132,18 @@ speakReplyBtn.addEventListener("click", () => {
   if (text && text !== "–") ttsSpeak(text);
 });
 
-// ---------- TTS core (barge-in) ----------
+// --- Barge-in helpers ---
 function stopAudio() {
-  if (currentAudio) {
-    currentAudio.pause();
-    currentAudio.src = "";
-    currentAudio = null;
-  }
+  if (currentAudio) { currentAudio.pause(); currentAudio.src = ""; currentAudio = null; }
   if (window.speechSynthesis) window.speechSynthesis.cancel();
 }
+function abortStream() {
+  if (currentStreamController) { currentStreamController.abort(); currentStreamController = null; }
+  streamActive = false;
+  stopBtn.disabled = true;
+}
 
+// --- TTS core ---
 async function ttsSpeak(text) {
   if (!ttsEnabled || !text) return;
   stopAudio(); // barge-in
@@ -148,114 +158,158 @@ async function ttsSpeak(text) {
     window.speechSynthesis.speak(u);
     return;
   }
-
-  // ElevenLabs via proxy
   try {
-    const body = {
-      text,
-      voiceId: (voiceIdEl.value || "").trim() || undefined
-    };
+    const body = { text, voiceId: (voiceIdEl.value || "").trim() || undefined };
     const r = await fetch("/.netlify/functions/tts", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body)
+      method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body)
     });
     const data = await r.json();
-    if (!r.ok || !data?.audio) {
-      console.warn("TTS error:", data);
-      return;
-    }
+    if (!r.ok || !data?.audio) { console.warn("TTS error:", data); return; }
     currentAudio = new Audio(data.audio);
-    currentAudio.play().catch(() => {});
-    lastAudio.src = data.audio; // keep a copy under the player
+    currentAudio.play().catch(()=>{});
+    lastAudio.src = data.audio;
   } catch (e) {
     console.warn("TTS exception:", e);
   }
 }
 
-// ---------- Chat (JSON) ----------
-async function sendToKeilani(message) {
+// --- Non-stream JSON chat (kept for toggle) ---
+async function chatJSON(message) {
   const threshold = Number(thresholdEl.value || 0.6);
   const count = Number(countEl.value || 8);
   const skip = skipContextEl.checked;
-
   const qs = new URLSearchParams();
-  if (skip) qs.set("nocontext", "1");
-  else { qs.set("threshold", String(threshold)); qs.set("count", String(count)); }
-
+  if (skip) qs.set("nocontext", "1"); else { qs.set("threshold", String(threshold)); qs.set("count", String(count)); }
   const url = `/api/chat?${qs.toString()}`;
   const body = { userId: userEl.value || "00000000-0000-0000-0000-000000000001", message };
 
-  setStatus("thinking…");
-  sendBtn.disabled = true;
-
+  setStatus("thinking…"); setLatency(null,null); sendBtn.disabled = true;
   try {
     const resp = await fetch(url, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     const data = await resp.json();
-
-    if (!resp.ok) {
-      replyEl.textContent = `⚠️ ${data.error || "Chat error"}`;
-      matchesEmpty.style.display = "block";
-      matchesTable.style.display = "none";
-      return;
-    }
-
+    if (!resp.ok) { replyEl.textContent = `⚠️ ${data.error || "Chat error"}`; matchesEmpty.style.display="block"; matchesTable.style.display="none"; return; }
     replyEl.textContent = data.reply || "—";
     ttsSpeak(data.reply || "");
-
-    const matches = Array.isArray(data.matches) ? data.matches : [];
-    if (matches.length === 0) {
-      matchesEmpty.style.display = "block";
-      matchesTable.style.display = "none";
-    } else {
-      matchesEmpty.style.display = "none";
-      matchesTable.style.display = "";
-      matchesBody.innerHTML = matches
-        .map((m) => `<tr><td>${escapeHtml(m.title || "")}</td><td>${escapeHtml(m.source || "")}</td><td>${Number(m.similarity || 0).toFixed(3)}</td></tr>`)
-        .join("");
-    }
+    renderMatches(data.matches);
   } catch (e) {
     replyEl.textContent = `⚠️ Network error: ${e.message}`;
-    matchesEmpty.style.display = "block";
-    matchesTable.style.display = "none";
+    matchesEmpty.style.display="block"; matchesTable.style.display="none";
+  } finally { setStatus("idle"); sendBtn.disabled = false; }
+}
+
+// --- Streaming chat (SSE) ---
+async function chatStream(message) {
+  // barge-in: stop audio and any existing stream
+  stopAudio();
+  abortStream();
+
+  const payload = { message, history: [] };
+  const url = `/api/chat-stream`;
+
+  setStatus("streaming…"); setLatency(null,null); sendBtn.disabled = true; stopBtn.disabled = false;
+
+  const t0 = performance.now();
+  let tFirst = null;
+  let assistant = "";
+  streamActive = true;
+  currentStreamController = new AbortController();
+
+  try {
+    const resp = await fetch(url, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+      signal: currentStreamController.signal
+    });
+    if (!resp.ok || !resp.body) throw new Error(`Bad stream: ${resp.status}`);
+
+    const reader = resp.body.getReader();
+    const decoder = new TextDecoder();
+    let buffer = "";
+
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buffer += decoder.decode(value, { stream: true });
+
+      // Split into lines and keep the last partial piece in buffer
+      const parts = buffer.split(/\r?\n/);
+      buffer = parts.pop() || "";
+
+      for (const line of parts) {
+        const l = line.trim();
+        if (!l) continue;
+        if (l.startsWith(":")) continue; // comment/keepalive
+        if (l === "data: [DONE]" || l === "[DONE]") { buffer=""; break; }
+
+        let data = l.startsWith("data:") ? l.slice(5).trim() : l;
+
+        // Mark first token
+        if (tFirst == null) { tFirst = Math.round(performance.now() - t0); setLatency(tFirst, null); console.log("[stream] first token", tFirst, "ms"); }
+
+        // Try JSON delta, else treat as raw text
+        try {
+          const obj = JSON.parse(data);
+          const token = obj?.choices?.[0]?.delta?.content ?? obj?.content ?? "";
+          if (token) {
+            assistant += token;
+            replyEl.textContent = assistant;
+          }
+        } catch {
+          assistant += data;
+          replyEl.textContent = assistant;
+        }
+      }
+    }
+  } catch (e) {
+    if (e.name !== "AbortError") {
+      replyEl.textContent = `⚠️ Stream error: ${e.message}`;
+    }
   } finally {
-    setStatus("idle");
-    sendBtn.disabled = false;
+    const tTotal = Math.round(performance.now() - t0);
+    setLatency(tFirst ?? null, tTotal);
+    console.log("[stream] total", tTotal, "ms");
+    streamActive = false; stopBtn.disabled = true; sendBtn.disabled = false;
   }
+
+  if (assistant) ttsSpeak(assistant);
+}
+
+function renderMatches(matches) {
+  const arr = Array.isArray(matches) ? matches : [];
+  if (!arr.length) { matchesEmpty.style.display="block"; matchesTable.style.display="none"; return; }
+  matchesEmpty.style.display = "none"; matchesTable.style.display = "";
+  matchesBody.innerHTML = arr.map((m) =>
+    `<tr><td>${escapeHtml(m.title || "")}</td><td>${escapeHtml(m.source || "")}</td><td>${Number(m.similarity || 0).toFixed(3)}</td></tr>`
+  ).join("");
 }
 
 function escapeHtml(s) {
-  return String(s).replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]));
+  return String(s).replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;" }[c]));
 }
 
+// --- Send handlers ---
 sendBtn.addEventListener("click", () => {
-  const msg = msgEl.value.trim();
-  if (!msg) return;
-  sendToKeilani(msg);
-  msgEl.value = "";
-  msgEl.focus();
+  const msg = msgEl.value.trim(); if (!msg) return;
+  replyEl.textContent = ""; // clear
+  (streamToggle.checked ? chatStream : chatJSON)(msg);
+  msgEl.value = ""; msgEl.focus();
 });
-
+stopBtn.addEventListener("click", () => {
+  abortStream(); stopAudio(); setStatus("idle"); setLatency(null,null);
+});
 msgEl.addEventListener("keydown", (e) => {
-  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) {
-    sendBtn.click();
-  }
+  if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) sendBtn.click();
 });
 
-// ---------- Push-to-talk (MediaRecorder -> STT -> Chat) ----------
+// --- Push-to-talk (STT -> chat [stream or json]) ---
 async function ensureMic() {
   if (mediaStream) return;
   mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
 }
-
 function blobToDataUrl(blob) {
-  return new Promise((res) => {
-    const fr = new FileReader();
-    fr.onloadend = () => res(fr.result);
-    fr.readAsDataURL(blob);
-  });
+  return new Promise((res) => { const fr = new FileReader(); fr.onloadend = () => res(fr.result); fr.readAsDataURL(blob); });
 }
-
 pttBtn.addEventListener("mousedown", startPTT);
 pttBtn.addEventListener("touchstart", startPTT, { passive: true });
 pttBtn.addEventListener("mouseup", stopPTT);
@@ -274,20 +328,19 @@ async function startPTT() {
       try {
         const blob = new Blob(chunks, { type: mime || "application/octet-stream" });
         const dataUrl = await blobToDataUrl(blob);
-        lastAudio.src = dataUrl; // preview mic capture
+        lastAudio.src = dataUrl;
 
-        // Send to STT
         const r = await fetch("/.netlify/functions/stt", {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
+          method: "POST", headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ audioBase64: dataUrl, language: "en" })
         });
         const stt = await r.json();
         const transcript = stt?.transcript || "";
         lastTranscriptEl.textContent = transcript || "–";
         if (transcript) {
-          msgEl.value = transcript;
-          await sendToKeilani(transcript);
+          replyEl.textContent = ""; // clear existing
+          if (streamToggle.checked) await chatStream(transcript);
+          else await chatJSON(transcript);
         }
       } catch (e) {
         lastTranscriptEl.textContent = "⚠️ STT error: " + e.message;
@@ -296,6 +349,10 @@ async function startPTT() {
     mediaRecorder.start();
     pttBtn.textContent = "🛑 Release to send";
     pttBtn.disabled = false;
+
+    // Barge-in immediately when user starts talking
+    stopAudio();
+    abortStream();
   } catch (e) {
     alert("Microphone error: " + e.message);
   }

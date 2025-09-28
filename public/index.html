@@ -128,6 +128,7 @@
         border: 1px solid #263445;
         border-radius: 8px;
         padding: 12px;
+        min-height: 24px;
       }
       .matches {
         margin-top: 12px;
@@ -144,7 +145,9 @@
         padding: 8px 6px;
       }
       .pill {
-        display: inline-block;
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
         font-size: 12px;
         padding: 2px 8px;
         border: 1px solid #334155;
@@ -170,11 +173,6 @@
       }
       .spacer {
         flex: 1;
-      }
-      .vad {
-        display: flex;
-        align-items: center;
-        gap: 8px;
       }
       audio {
         width: 100%;
@@ -230,7 +228,13 @@
             ><input id="skipContext" type="checkbox" /> Skip RAG (OpenAI
             only)</label
           >
-          <span class="pill" id="status">idle</span>
+
+          <label class="notice"
+            ><input id="streamToggle" type="checkbox" checked /> Stream
+            (SSE)</label
+          >
+          <span class="pill" id="status">idle <span id="latency"></span></span>
+
           <span class="spacer"></span>
 
           <!-- TTS Engine -->
@@ -288,6 +292,9 @@
           <button id="send">Send</button>
           <button id="speakReply" class="secondary">Speak Reply</button>
           <button id="ptt" class="secondary">🎙 Hold to talk</button>
+          <button id="stopStream" class="secondary" title="Stop current reply">
+            Stop
+          </button>
         </div>
 
         <div class="meta">
@@ -319,7 +326,6 @@
       </div>
     </main>
 
-    <!-- CSP-safe external JS -->
-    <script src="/js/keilaniStream.js?v=3" defer></script>
+    <script src="/js/keilaniStream.js?v=4" defer></script>
   </body>
 </html>
