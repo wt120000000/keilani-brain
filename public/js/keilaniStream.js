@@ -1,4 +1,4 @@
-// Simple, robust voice loop with barge-in and SSE streaming
+// Voice loop with continuous VAD, robust barge-in, and SSE streaming
 
 // ---- DOM
 const sendBtn = document.getElementById("send");
@@ -21,7 +21,7 @@ const vadEl   = document.getElementById("vad");
 const silenceEl = document.getElementById("silence");
 
 // ---- State
-const SM = { IDLE:"idle", LISTEN:"listening", REC:"recording", REPLY:"replying", SPEAK:"speaking" };
+const SM = { IDLE:"idle", LISTEN:"listening", REC:"recording", REPLY:"replying", SPEAK:"speaking", PROCESS:"processing" };
 let sm = SM.IDLE;
 let auto = false;
 
@@ -34,6 +34,7 @@ let mediaRecorder = null;
 let audioCtx = null;
 let analyser = null;
 let listenLoopOn = false;
+let processingTurn = false; // <— keep VAD loop alive while we do STT/Chat
 
 let voices = [];
 let selectedVoice = null;
@@ -43,7 +44,6 @@ let ttsOn = true;
 const setState = s => { sm = s; stateEl.textContent = "state: " + s; };
 const setStatus = s => { statusEl.firstChild.nodeValue = s + " "; };
 const setLatency = (first, total) => { latEl.textContent = `${first!=null?`• first ${first} ms `:""}${total!=null?`• total ${total} ms`:""}`; };
-
 function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));}
 
 // ---- Audio / TTS
@@ -53,10 +53,10 @@ function stopAudio(){
 }
 
 async function speak(text){
-  if (!ttsOn || !text) { if (auto) startListening(); return; }
+  if (!ttsOn || !text) { if (auto) startListening(); else setState(SM.IDLE); return; }
   setState(SM.SPEAK);
   if (ttsSel.value === "browser"){
-    if (!("speechSynthesis" in window)) { if (auto) startListening(); return; }
+    if (!("speechSynthesis" in window)) { if (auto) startListening(); else setState(SM.IDLE); return; }
     const u = new SpeechSynthesisUtterance(text);
     if (selectedVoice) u.voice = selectedVoice;
     u.onend = ()=> { if (auto) startListening(); else setState(SM.IDLE); };
@@ -157,7 +157,7 @@ pttBtn.addEventListener("mouseup", ()=> stopRecordingTurn());
 pttBtn.addEventListener("mouseleave", ()=> stopRecordingTurn());
 pttBtn.addEventListener("touchend", ()=> stopRecordingTurn());
 
-// ---- Auto talk (hands-free)
+// ---- Auto talk
 autoBtn.addEventListener("click", async ()=>{
   auto=!auto;
   autoBtn.textContent=auto?"🔁 Auto talk: On":"🔁 Auto talk: Off";
@@ -184,34 +184,52 @@ function getRms(){
 
 function startListening(){
   if(!mediaStream) return;
-  if(listenLoopOn) return;
-  listenLoopOn=true; setState(SM.LISTEN);
-  const thr=(Number(vadEl.value)||35)/3000;      // 0.003–0.033 approx
-  const silence=Math.max(200,Math.min(3000,Number(silenceEl.value)||700));
-  let voiced=false, lastSound=performance.now();
+  listenLoopOn = true;
+  setState(SM.LISTEN);
 
-  const loop=()=>{
-    if(!listenLoopOn) return;
-    const rms=getRms(); const now=performance.now();
+  const tick = () => {
+    if (!listenLoopOn) return;
+    const thr = (Number(vadEl.value)||35)/3000;
+    const silence = Math.max(200,Math.min(3000,Number(silenceEl.value)||700));
 
-    // BARGE-IN: if speaking or replying and we detect voice → interrupt & record
-    if((sm===SM.SPEAK || sm===SM.REPLY) && rms>thr){
+    const rms = getRms();
+    const now = performance.now();
+
+    // Store across frames
+    tick.voiced = tick.voiced || false;
+    tick.lastSound = tick.lastSound || now;
+
+    // BARGE-IN: if replying/speaking and voice appears, interrupt & start turn
+    if ((sm===SM.SPEAK || sm===SM.REPLY) && rms > thr && !processingTurn) {
       stopAudio(); abortStream();
-      startRecordingTurn(); voiced=true; lastSound=now; setState(SM.REC);
-      requestAnimationFrame(loop); return;
-    }
-
-    if(rms>thr){
-      if(!voiced && sm===SM.LISTEN){ startRecordingTurn(); setState(SM.REC); }
-      voiced=true; lastSound=now;
-    }else if(voiced && (now-lastSound)>silence){
-      voiced=false; stopRecordingTurn();
-      // wait for onstop path to restart listening
+      startRecordingTurn();
+      tick.voiced = true;
+      tick.lastSound = now;
+      setState(SM.REC);
+      requestAnimationFrame(tick);
       return;
     }
-    requestAnimationFrame(loop);
+
+    if (rms > thr && !processingTurn) {
+      if (!tick.voiced && sm===SM.LISTEN) {
+        startRecordingTurn();
+        setState(SM.REC);
+      }
+      tick.voiced = true;
+      tick.lastSound = now;
+    } else if (tick.voiced && (now - tick.lastSound) > silence) {
+      // speech ended → stop recorder, but KEEP LOOP RUNNING
+      tick.voiced = false;
+      if (mediaRecorder && mediaRecorder.state !== "inactive") {
+        processingTurn = true; // <— keep loop alive but idle
+        mediaRecorder.stop();
+        setState(SM.PROCESS);
+      }
+    }
+
+    requestAnimationFrame(tick);
   };
-  requestAnimationFrame(loop);
+  requestAnimationFrame(tick);
 }
 
 function stopListening(){
@@ -231,19 +249,22 @@ function startRecordingTurn(){
   mediaRecorder.ondataavailable = e => { if(e.data && e.data.size>0) chunks.push(e.data); };
   mediaRecorder.onstop = async () => {
     const blob = new Blob(chunks, { type: mime || "application/octet-stream" });
-    if(!blob || blob.size<5000){ transcriptEl.textContent="⚠️ Speak a bit longer."; if(auto) startListening(); else setState(SM.IDLE); return; }
+    if(!blob || blob.size<5000){ transcriptEl.textContent="⚠️ Speak a bit longer."; processingTurn=false; if(auto) setState(SM.LISTEN); return; }
     const dataUrl = await blobToDataUrl(blob);
-    lastAudio.src = dataUrl;
+    if (typeof dataUrl === "string" && dataUrl.startsWith("data:audio")) lastAudio.src = dataUrl;
+
     try{
       const r=await fetch("/.netlify/functions/stt",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({audioBase64:dataUrl,language:"en"})});
       const j=await r.json();
-      if(!r.ok){ transcriptEl.textContent=`⚠️ STT: ${j?.error||"error"}`; if(auto) startListening(); else setState(SM.IDLE); return; }
+      if(!r.ok){ transcriptEl.textContent=`⚠️ STT: ${j?.error||"error"}`; processingTurn=false; if(auto) setState(SM.LISTEN); return; }
       transcriptEl.textContent=j.transcript||"";
       replyEl.textContent="";
+      processingTurn=false; // allow VAD loop to barge-in during reply/speak
       (modeSel.value==="stream"?chatStream:chatPlain)(j.transcript||"");
     }catch(e){
       transcriptEl.textContent="⚠️ STT error: "+e.message;
-      if(auto) startListening(); else setState(SM.IDLE);
+      processingTurn=false;
+      if(auto) setState(SM.LISTEN);
     }
   };
   mediaRecorder.start(50);
