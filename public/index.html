@@ -67,7 +67,8 @@
       button,
       select,
       input[type="number"],
-      input[type="text"] {
+      input[type="text"],
+      input[type="range"] {
         background: #0b1220;
         color: #e6edf3;
         border: 1px solid #263445;
@@ -171,12 +172,21 @@
         align-items: center;
         flex-wrap: wrap;
       }
+      .vad {
+        display: flex;
+        gap: 10px;
+        align-items: center;
+        flex-wrap: wrap;
+      }
       .spacer {
         flex: 1;
       }
       audio {
         width: 100%;
         margin-top: 8px;
+      }
+      .state {
+        font-weight: 600;
       }
     </style>
   </head>
@@ -233,7 +243,10 @@
             ><input id="streamToggle" type="checkbox" checked /> Stream
             (SSE)</label
           >
-          <span class="pill" id="status">idle <span id="latency"></span></span>
+          <span class="pill" id="status"
+            >idle <span id="latency"></span>
+            <span id="convState" class="state"></span
+          ></span>
 
           <span class="spacer"></span>
 
@@ -283,6 +296,27 @@
           </div>
         </div>
 
+        <div class="row vad" style="margin-top: 10px">
+          <button id="autoTalk" class="secondary">🔁 Auto talk: Off</button>
+          <label class="notice"
+            >VAD:
+            <input id="vad" type="range" min="1" max="100" value="35" />
+          </label>
+          <label class="notice"
+            >Silence ms:
+            <input
+              id="silenceMs"
+              type="number"
+              min="200"
+              max="3000"
+              step="50"
+              value="700"
+              style="width: 90px"
+            />
+          </label>
+          <span class="notice">States: <span id="stateText">idle</span></span>
+        </div>
+
         <div class="row" style="margin-top: 10px">
           <input
             id="userId"
@@ -326,6 +360,6 @@
       </div>
     </main>
 
-    <script src="/js/keilaniStream.js?v=5" defer></script>
+    <script src="/js/keilaniStream.js?v=6" defer></script>
   </body>
 </html>
