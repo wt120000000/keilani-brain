@@ -46,6 +46,7 @@ let mediaRecorder = null;
 let mediaStream = null;
 let currentStreamController = null; // AbortController for SSE
 let streamActive = false;
+let recordingStartedAt = 0;
 
 function setStatus(s) { statusEl.firstChild.nodeValue = s + " "; }
 function setLatency(firstMs, totalMs) {
@@ -165,15 +166,18 @@ async function ttsSpeak(text) {
     });
     const data = await r.json();
     if (!r.ok || !data?.audio) { console.warn("TTS error:", data); return; }
-    currentAudio = new Audio(data.audio);
-    currentAudio.play().catch(()=>{});
-    lastAudio.src = data.audio;
+
+    if (typeof data.audio === "string" && (data.audio.startsWith("data:audio") || data.audio.startsWith("blob:"))) {
+      currentAudio = new Audio(data.audio);
+      currentAudio.play().catch(()=>{});
+      lastAudio.src = data.audio; // preview only if valid
+    }
   } catch (e) {
     console.warn("TTS exception:", e);
   }
 }
 
-// --- Non-stream JSON chat (kept for toggle) ---
+// --- Non-stream JSON chat ---
 async function chatJSON(message) {
   const threshold = Number(thresholdEl.value || 0.6);
   const count = Number(countEl.value || 8);
@@ -199,9 +203,8 @@ async function chatJSON(message) {
 
 // --- Streaming chat (SSE) ---
 async function chatStream(message) {
-  // barge-in: stop audio and any existing stream
-  stopAudio();
-  abortStream();
+  stopAudio();         // barge-in
+  abortStream();       // cancel any previous stream
 
   const payload = { message, history: [] };
   const url = `/api/chat-stream`;
@@ -232,22 +235,18 @@ async function chatStream(message) {
       if (done) break;
       buffer += decoder.decode(value, { stream: true });
 
-      // Split into lines and keep the last partial piece in buffer
       const parts = buffer.split(/\r?\n/);
       buffer = parts.pop() || "";
 
       for (const line of parts) {
         const l = line.trim();
-        if (!l) continue;
-        if (l.startsWith(":")) continue; // comment/keepalive
+        if (!l || l.startsWith(":")) continue;
         if (l === "data: [DONE]" || l === "[DONE]") { buffer=""; break; }
 
         let data = l.startsWith("data:") ? l.slice(5).trim() : l;
 
-        // Mark first token
         if (tFirst == null) { tFirst = Math.round(performance.now() - t0); setLatency(tFirst, null); console.log("[stream] first token", tFirst, "ms"); }
 
-        // Try JSON delta, else treat as raw text
         try {
           const obj = JSON.parse(data);
           const token = obj?.choices?.[0]?.delta?.content ?? obj?.content ?? "";
@@ -310,6 +309,7 @@ async function ensureMic() {
 function blobToDataUrl(blob) {
   return new Promise((res) => { const fr = new FileReader(); fr.onloadend = () => res(fr.result); fr.readAsDataURL(blob); });
 }
+
 pttBtn.addEventListener("mousedown", startPTT);
 pttBtn.addEventListener("touchstart", startPTT, { passive: true });
 pttBtn.addEventListener("mouseup", stopPTT);
@@ -323,18 +323,41 @@ async function startPTT() {
                  MediaRecorder.isTypeSupported("audio/ogg") ? "audio/ogg" : "";
     mediaRecorder = new MediaRecorder(mediaStream, mime ? { mimeType: mime } : undefined);
     const chunks = [];
+    recordingStartedAt = performance.now();
+
     mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
     mediaRecorder.onstop = async () => {
       try {
         const blob = new Blob(chunks, { type: mime || "application/octet-stream" });
-        const dataUrl = await blobToDataUrl(blob);
-        lastAudio.src = dataUrl;
 
+        // Guard: too small / too short? (align with server’s ~4KB threshold)
+        if (!blob || blob.size < 5000) {
+          lastTranscriptEl.textContent = "⚠️ Try speaking a bit longer (clip too short).";
+          return;
+        }
+
+        const dataUrl = await blobToDataUrl(blob);
+        if (typeof dataUrl === "string" && (dataUrl.startsWith("data:audio") || dataUrl.startsWith("blob:"))) {
+          lastAudio.src = dataUrl;
+        }
+
+        // Send to STT
         const r = await fetch("/.netlify/functions/stt", {
-          method: "POST", headers: { "Content-Type": "application/json" },
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
           body: JSON.stringify({ audioBase64: dataUrl, language: "en" })
         });
-        const stt = await r.json();
+
+        let stt;
+        try { stt = await r.json(); } catch { stt = {}; }
+
+        if (!r.ok) {
+          const reason = stt?.error ? `${stt.error}${stt.detail ? ` — ${String(stt.detail).slice(0,120)}` : ""}` : "Unknown STT error";
+          lastTranscriptEl.textContent = "⚠️ " + reason;
+          console.warn("STT 4xx/5xx:", stt);
+          return;
+        }
+
         const transcript = stt?.transcript || "";
         lastTranscriptEl.textContent = transcript || "–";
         if (transcript) {
@@ -346,7 +369,8 @@ async function startPTT() {
         lastTranscriptEl.textContent = "⚠️ STT error: " + e.message;
       }
     };
-    mediaRecorder.start();
+
+    mediaRecorder.start(50); // request small chunks (helps some browsers)
     pttBtn.textContent = "🛑 Release to send";
     pttBtn.disabled = false;
 
