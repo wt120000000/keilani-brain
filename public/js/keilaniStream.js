@@ -1,379 +1,270 @@
-// Chat (JSON or SSE stream) + TTS (Browser/ElevenLabs) + Push-to-talk + Auto talk (VAD) + timing
+// Simple, robust voice loop with barge-in and SSE streaming
 
-// --- DOM refs ---
+// ---- DOM
 const sendBtn = document.getElementById("send");
-const stopBtn = document.getElementById("stopStream");
+const stopBtn = document.getElementById("stop");
 const pttBtn  = document.getElementById("ptt");
-const autoBtn = document.getElementById("autoTalk");
+const autoBtn = document.getElementById("auto");
 
-const streamToggle = document.getElementById("streamToggle");
-const msgEl = document.getElementById("message");
-const userEl = document.getElementById("userId");
-const statusEl = document.getElementById("status");
-const latencyEl = document.getElementById("latency");
+const msgEl   = document.getElementById("message");
 const replyEl = document.getElementById("reply");
-const matchesEmpty = document.getElementById("matchesEmpty");
-const matchesTable = document.getElementById("matchesTable");
-const matchesBody = document.getElementById("matchesBody");
-const thresholdEl = document.getElementById("threshold");
-const countEl = document.getElementById("count");
-const skipContextEl = document.getElementById("skipContext");
-
-const stateText = document.getElementById("stateText");
-const convState = document.getElementById("convState");
-
-const ttsEngineEl = document.getElementById("ttsEngine");
-const voiceLocalSel = document.getElementById("voiceLocal");
-const voiceLocalWrap = document.getElementById("voiceLocalWrap");
-const voiceIdWrap = document.getElementById("voiceIdWrap");
-const voiceIdEl = document.getElementById("voiceId");
-const rateEl = document.getElementById("rate");
-const pitchEl = document.getElementById("pitch");
-const toggleTTSBtn = document.getElementById("toggleTTS");
-const speakReplyBtn = document.getElementById("speakReply");
-
-const vadEl = document.getElementById("vad");
-const silenceMsEl = document.getElementById("silenceMs");
-
-const lastTranscriptEl = document.getElementById("lastTranscript");
+const stateEl = document.getElementById("state");
+const statusEl= document.getElementById("status");
+const latEl   = document.getElementById("lat");
+const transcriptEl = document.getElementById("transcript");
 const lastAudio = document.getElementById("lastAudio");
 
-// Health bits
-const healthRefresh = document.getElementById("healthRefresh");
-const healthDot = document.getElementById("healthDot");
-const healthText = document.getElementById("healthText");
-const healthBadge = document.getElementById("healthBadge");
+const modeSel = document.getElementById("mode");
+const ttsSel  = document.getElementById("ttsEngine");
+const voiceIdEl = document.getElementById("voiceId");
+const vadEl   = document.getElementById("vad");
+const silenceEl = document.getElementById("silence");
 
-// --- Global state ---
-let ttsEnabled = true;
-let currentAudio = null;             // barge-in handle
-let currentStreamController = null;  // AbortController for SSE
-let streamActive = false;
+// ---- State
+const SM = { IDLE:"idle", LISTEN:"listening", REC:"recording", REPLY:"replying", SPEAK:"speaking" };
+let sm = SM.IDLE;
+let auto = false;
 
-let voices = [];
-let selectedVoice = null;
+let currentAudio = null;
+let streamCtl = null;     // AbortController for SSE
+let streamOn = false;
 
-// Mic / Auto talk
 let mediaStream = null;
 let mediaRecorder = null;
 let audioCtx = null;
 let analyser = null;
-let vadTimer = 0;
-let speaking = false;
-let autoMode = false;
-let listenLoopActive = false;
+let listenLoopOn = false;
 
-// Utils
-function setStatus(s) { statusEl.firstChild.nodeValue = s + " "; }
-function setLatency(firstMs, totalMs) {
-  latencyEl.textContent = (firstMs != null ? `• first ${firstMs} ms` : "") + (totalMs != null ? ` • total ${totalMs} ms` : "");
-}
-function setState(s) { stateText.textContent = s; }
-function setConv(s) { convState.textContent = s ? `• ${s}` : ""; }
+let voices = [];
+let selectedVoice = null;
+let ttsOn = true;
 
-// ---------- Health ----------
-async function refreshHealth() {
-  try {
-    healthText.textContent = "checking…";
-    healthDot.className = "dot";
-    const resp = await fetch("/api/health", { cache: "no-store" });
-    const ok = await resp.json();
-    const allTrue = ok.has_OPENAI_API_KEY && ok.has_OPENAI_MODEL && ok.has_EMBED_MODEL && ok.has_SUPABASE_URL && ok.has_SUPABASE_SERVICE_ROLE;
-    healthDot.className = "dot " + (allTrue ? "ok" : "warn");
-    healthText.textContent = allTrue ? "OK" : "Degraded";
-    healthBadge.title = JSON.stringify(ok, null, 2);
-  } catch (e) {
-    healthDot.className = "dot err";
-    healthText.textContent = "Error";
-    healthBadge.title = e.message;
-  }
-}
-healthRefresh.addEventListener("click", refreshHealth);
-refreshHealth(); setInterval(refreshHealth, 30000);
+// ---- Helpers
+const setState = s => { sm = s; stateEl.textContent = "state: " + s; };
+const setStatus = s => { statusEl.firstChild.nodeValue = s + " "; };
+const setLatency = (first, total) => { latEl.textContent = `${first!=null?`• first ${first} ms `:""}${total!=null?`• total ${total} ms`:""}`; };
 
-// ---------- TTS ----------
-function populateVoices() {
-  voices = (window.speechSynthesis?.getVoices?.() || []).filter(v => v.lang?.startsWith?.("en"));
-  voiceLocalSel.innerHTML = voices.length ? voices.map((v,i)=>`<option value="${i}">${v.name} (${v.lang})${v.default?" — default":""}</option>`).join("") : `<option>(No voices)</option>`;
-  selectedVoice = voices[0] || null;
-}
-if ("speechSynthesis" in window) {
-  populateVoices();
-  window.speechSynthesis.onvoiceschanged = populateVoices;
-}
-voiceLocalSel.addEventListener("change", e => { selectedVoice = voices[Number(e.target.value)] || null; });
+function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));}
 
-toggleTTSBtn.addEventListener("click", () => {
-  ttsEnabled = !ttsEnabled;
-  toggleTTSBtn.textContent = ttsEnabled ? "🔊 TTS: On" : "🔇 TTS: Off";
-  toggleTTSBtn.classList.toggle("secondary", true);
-});
-speakReplyBtn.addEventListener("click", () => {
-  const text = replyEl.textContent.trim();
-  if (text && text !== "–") ttsSpeak(text);
-});
-
-function applyTtsEngineUI() {
-  const engine = ttsEngineEl.value;
-  if (engine === "elevenlabs") { voiceLocalWrap.style.display="none"; voiceIdWrap.style.display=""; }
-  else { voiceLocalWrap.style.display=""; voiceIdWrap.style.display="none"; }
-}
-(function bootEngineFromStorage(){
-  const saved = localStorage.getItem("ttsEngine"); if (saved) ttsEngineEl.value = saved;
-  const savedVoiceId = localStorage.getItem("elevenVoiceId"); if (savedVoiceId) voiceIdEl.value = savedVoiceId;
-  applyTtsEngineUI();
-})();
-ttsEngineEl.addEventListener("change", ()=>{ localStorage.setItem("ttsEngine", ttsEngineEl.value); applyTtsEngineUI(); });
-voiceIdEl.addEventListener("change", ()=>{ localStorage.setItem("elevenVoiceId", voiceIdEl.value.trim()); });
-
-function stopAudio() {
-  if (currentAudio) { currentAudio.pause(); currentAudio.src = ""; currentAudio = null; }
+// ---- Audio / TTS
+function stopAudio(){
+  if (currentAudio){ currentAudio.pause(); currentAudio.src=""; currentAudio=null; }
   if (window.speechSynthesis) window.speechSynthesis.cancel();
 }
-function onTtsEnded(cb){
-  if (currentAudio) currentAudio.onended = cb;
-  else if (window.speechSynthesis) {
-    // crude: wait ~duration based on char length if needed, but here we use events
-    // Web Speech has onend on the utterance, so we set it in ttsSpeak.
-  }
-}
-async function ttsSpeak(text) {
-  if (!ttsEnabled || !text) return;
-  stopAudio(); // barge-in
 
-  if (ttsEngineEl.value === "browser") {
-    if (!("speechSynthesis" in window)) return;
+async function speak(text){
+  if (!ttsOn || !text) { if (auto) startListening(); return; }
+  setState(SM.SPEAK);
+  if (ttsSel.value === "browser"){
+    if (!("speechSynthesis" in window)) { if (auto) startListening(); return; }
     const u = new SpeechSynthesisUtterance(text);
     if (selectedVoice) u.voice = selectedVoice;
-    u.rate = Math.min(2, Math.max(0.5, Number(rateEl.value) || 1.0));
-    u.pitch = Math.min(2, Math.max(0, Number(pitchEl.value) || 1.0));
-    u.onend = () => { if (autoMode) startAutoListen(); };
+    u.onend = ()=> { if (auto) startListening(); else setState(SM.IDLE); };
     window.speechSynthesis.speak(u);
     return;
   }
   try {
-    const body = { text, voiceId: (voiceIdEl.value || "").trim() || undefined };
-    const r = await fetch("/.netlify/functions/tts", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body) });
+    const r = await fetch("/.netlify/functions/tts",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({ text, voiceId: voiceIdEl.value.trim()||undefined })});
     const data = await r.json();
-    if (!r.ok || !data?.audio) { console.warn("TTS error:", data); if (autoMode) startAutoListen(); return; }
-    if (typeof data.audio === "string" && data.audio.startsWith("data:audio")) {
+    if (!r.ok || !data?.audio){ if (auto) startListening(); else setState(SM.IDLE); return; }
+    if (typeof data.audio === "string" && data.audio.startsWith("data:audio")){
       currentAudio = new Audio(data.audio);
-      currentAudio.onended = () => { if (autoMode) startAutoListen(); };
-      currentAudio.play().catch(()=>{ if (autoMode) startAutoListen(); });
+      currentAudio.onended = ()=> { if (auto) startListening(); else setState(SM.IDLE); };
+      currentAudio.play().catch(()=>{ if (auto) startListening(); else setState(SM.IDLE); });
       lastAudio.src = data.audio;
-    } else if (autoMode) startAutoListen();
-  } catch (e) {
-    console.warn("TTS exception:", e);
-    if (autoMode) startAutoListen();
+    } else {
+      if (auto) startListening(); else setState(SM.IDLE);
+    }
+  } catch {
+    if (auto) startListening(); else setState(SM.IDLE);
   }
 }
 
-// ---------- Chat ----------
-function renderMatches(matches) {
-  const arr = Array.isArray(matches) ? matches : [];
-  if (!arr.length) { matchesEmpty.style.display="block"; matchesTable.style.display="none"; return; }
-  matchesEmpty.style.display="none"; matchesTable.style.display="";
-  matchesBody.innerHTML = arr.map(m => `<tr><td>${escapeHtml(m.title||"")}</td><td>${escapeHtml(m.source||"")}</td><td>${Number(m.similarity||0).toFixed(3)}</td></tr>`).join("");
-}
-function escapeHtml(s){ return String(s).replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c])); }
+// ---- Streaming chat
+function abortStream(){ if (streamCtl){ streamCtl.abort(); streamCtl=null; } streamOn=false; stopBtn.disabled=true; }
+async function chatStream(prompt){
+  abortStream(); stopAudio();
+  setState(SM.REPLY); setStatus("streaming…"); setLatency(null,null);
+  stopBtn.disabled=false;
 
-async function chatJSON(message) {
-  const qs = new URLSearchParams();
-  const threshold = Number(thresholdEl.value || 0.6);
-  const count = Number(countEl.value || 8);
-  const skip = !!skipContextEl.checked;
-  if (skip) qs.set("nocontext","1"); else { qs.set("threshold", String(threshold)); qs.set("count", String(count)); }
+  const t0=performance.now(); let tFirst=null; let full="";
+  streamCtl=new AbortController(); streamOn=true;
 
-  setStatus("thinking…"); setLatency(null,null); sendBtn.disabled = true;
-  try {
-    const resp = await fetch(`/api/chat?${qs}`, {
-      method:"POST", headers:{ "Content-Type":"application/json" },
-      body: JSON.stringify({ userId: userEl.value || "00000000-0000-0000-0000-000000000001", message })
-    });
-    const data = await resp.json();
-    if (!resp.ok) { replyEl.textContent = `⚠️ ${data.error || "Chat error"}`; matchesEmpty.style.display="block"; matchesTable.style.display="none"; return; }
-    replyEl.textContent = data.reply || "—";
-    renderMatches(data.matches);
-    ttsSpeak(data.reply || "");
-  } catch (e) {
-    replyEl.textContent = `⚠️ Network error: ${e.message}`;
-    matchesEmpty.style.display="block"; matchesTable.style.display="none";
-    if (autoMode) startAutoListen();
-  } finally { setStatus("idle"); sendBtn.disabled = false; }
-}
-
-async function chatStream(message) {
-  stopAudio(); abortStream();
-  setStatus("streaming…"); setLatency(null,null); sendBtn.disabled = true; stopBtn.disabled = false;
-  convState.textContent = "• replying";
-
-  const t0 = performance.now();
-  let tFirst = null, assistant = "";
-  currentStreamController = new AbortController(); streamActive = true;
-
-  try {
-    const resp = await fetch(`/api/chat-stream`, {
-      method:"POST", headers:{ "Content-Type":"application/json" },
-      body: JSON.stringify({ message, history: [] }),
-      signal: currentStreamController.signal
-    });
-    if (!resp.ok || !resp.body) throw new Error(`Bad stream: ${resp.status}`);
-
-    const reader = resp.body.getReader();
-    const decoder = new TextDecoder();
-    let buffer = "";
-
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      buffer += decoder.decode(value, { stream: true });
-      const parts = buffer.split(/\r?\n/); buffer = parts.pop() || "";
-
-      for (const line of parts) {
-        const l = line.trim(); if (!l || l.startsWith(":")) continue;
-        if (l === "data: [DONE]" || l === "[DONE]") { buffer=""; break; }
-        let data = l.startsWith("data:") ? l.slice(5).trim() : l;
-
-        if (tFirst == null) { tFirst = Math.round(performance.now()-t0); setLatency(tFirst,null); console.log("[stream] first token", tFirst, "ms"); }
-
-        try {
-          const obj = JSON.parse(data);
-          const token = obj?.choices?.[0]?.delta?.content ?? obj?.content ?? "";
-          if (token) { assistant += token; replyEl.textContent = assistant; }
-        } catch { assistant += data; replyEl.textContent = assistant; }
+  try{
+    const resp=await fetch("/api/chat-stream",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({message:prompt,history:[]}),signal:streamCtl.signal});
+    if(!resp.ok||!resp.body) throw new Error(`stream ${resp.status}`);
+    const dec=new TextDecoder(); const reader=resp.body.getReader(); let buf="";
+    while(true){
+      const {value,done}=await reader.read(); if(done) break;
+      buf+=dec.decode(value,{stream:true});
+      const lines=buf.split(/\r?\n/); buf=lines.pop()||"";
+      for(const line of lines){
+        const l=line.trim(); if(!l||l.startsWith(":")) continue;
+        if(l==="data: [DONE]"||l==="[DONE]"){ buf=""; break; }
+        const payload=l.startsWith("data:")?l.slice(5).trim():l;
+        if(tFirst==null){ tFirst=Math.round(performance.now()-t0); setLatency(tFirst,null); }
+        try{
+          const j=JSON.parse(payload);
+          const tok=j?.choices?.[0]?.delta?.content ?? j?.content ?? "";
+          if(tok){ full+=tok; replyEl.textContent=full; }
+        }catch{
+          full+=payload; replyEl.textContent=full;
+        }
       }
     }
-  } catch (e) {
-    if (e.name !== "AbortError") replyEl.textContent = `⚠️ Stream error: ${e.message}`;
-  } finally {
-    const tTotal = Math.round(performance.now()-t0);
-    setLatency(tFirst ?? null, tTotal);
-    console.log("[stream] total", tTotal, "ms");
-    streamActive = false; stopBtn.disabled = true; sendBtn.disabled = false; convState.textContent = "";
+  }catch(e){
+    if(e.name!=="AbortError"){ replyEl.textContent=`⚠️ ${e.message}`; }
+  }finally{
+    const tTot=Math.round(performance.now()-t0); setLatency(tFirst??null,tTot);
+    streamOn=false; stopBtn.disabled=true; setStatus("idle");
   }
-  if (assistant) ttsSpeak(assistant);
+  if(full) speak(full); else if(auto) startListening();
 }
 
-sendBtn.addEventListener("click", () => {
-  const msg = msgEl.value.trim(); if (!msg) return;
-  replyEl.textContent = ""; (streamToggle.checked ? chatStream : chatJSON)(msg);
-  msgEl.value = ""; msgEl.focus();
-});
-stopBtn.addEventListener("click", () => { abortStream(); stopAudio(); setStatus("idle"); setLatency(null,null); });
-msgEl.addEventListener("keydown", e => { if (e.key==="Enter" && (e.ctrlKey || e.metaKey)) sendBtn.click(); });
-
-function abortStream(){ if (currentStreamController){ currentStreamController.abort(); currentStreamController=null; } streamActive=false; stopBtn.disabled=true; }
-
-// ---------- Hold-to-talk (manual) ----------
-pttBtn.addEventListener("mousedown", manualStart);
-pttBtn.addEventListener("touchstart", manualStart, { passive:true });
-pttBtn.addEventListener("mouseup", manualStop);
-pttBtn.addEventListener("mouseleave", manualStop);
-pttBtn.addEventListener("touchend", manualStop);
-
-async function manualStart(){ await ensureMic(); startRecorder(); pttBtn.textContent="🛑 Release to send"; stopAudio(); abortStream(); }
-function manualStop(){ if (mediaRecorder && mediaRecorder.state!=="inactive"){ mediaRecorder.stop(); pttBtn.textContent="🎙 Hold to talk"; } }
-
-// ---------- Auto talk (hands-free) ----------
-autoBtn.addEventListener("click", async () => {
-  autoMode = !autoMode;
-  autoBtn.textContent = autoMode ? "🔁 Auto talk: On" : "🔁 Auto talk: Off";
-  autoBtn.classList.toggle("secondary", true);
-  if (autoMode) { await ensureMic(); startAutoListen(); } else { stopAuto(); }
-});
-
-function stopAuto(){
-  listenLoopActive = false;
-  setState("idle"); setConv("");
-  if (mediaRecorder && mediaRecorder.state!=="inactive") mediaRecorder.stop();
+async function chatPlain(prompt){
+  abortStream(); stopAudio();
+  setState(SM.REPLY); setStatus("thinking…"); setLatency(null,null);
+  try{
+    const r=await fetch("/api/chat",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({message:prompt})});
+    const j=await r.json();
+    if(!r.ok){ replyEl.textContent=`⚠️ ${j.error||"chat error"}`; if(auto) startListening(); else setState(SM.IDLE); return; }
+    replyEl.textContent=j.reply||"";
+    speak(j.reply||"");
+  }catch(e){
+    replyEl.textContent=`⚠️ ${e.message}`; if(auto) startListening(); else setState(SM.IDLE);
+  }
 }
 
+// ---- Send / stop
+sendBtn.addEventListener("click", ()=> {
+  const t=msgEl.value.trim(); if(!t) return; replyEl.textContent=""; transcriptEl.textContent="–";
+  (modeSel.value==="stream"?chatStream:chatPlain)(t);
+  msgEl.value=""; msgEl.focus();
+});
+stopBtn.addEventListener("click", ()=> { abortStream(); stopAudio(); setState(SM.IDLE); setLatency(null,null); });
+
+// ---- Browser voices
+function loadVoices(){
+  const arr=(window.speechSynthesis?.getVoices?.()||[]).filter(v=>v.lang?.startsWith?.("en"));
+  voices=arr; selectedVoice=arr[0]||null;
+}
+if("speechSynthesis" in window){ loadVoices(); window.speechSynthesis.onvoiceschanged=loadVoices; }
+
+// ---- Manual hold-to-talk
+pttBtn.addEventListener("mousedown", ()=> startRecordingTurn());
+pttBtn.addEventListener("touchstart", ()=> startRecordingTurn(), {passive:true});
+pttBtn.addEventListener("mouseup", ()=> stopRecordingTurn());
+pttBtn.addEventListener("mouseleave", ()=> stopRecordingTurn());
+pttBtn.addEventListener("touchend", ()=> stopRecordingTurn());
+
+// ---- Auto talk (hands-free)
+autoBtn.addEventListener("click", async ()=>{
+  auto=!auto;
+  autoBtn.textContent=auto?"🔁 Auto talk: On":"🔁 Auto talk: Off";
+  autoBtn.classList.toggle("ghost",true);
+  if(auto){ await ensureMic(); startListening(); } else { stopListening(); }
+});
+
+// ---- Mic / VAD
 async function ensureMic(){
-  if (mediaStream) return;
-  mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
-  const src = audioCtx.createMediaStreamSource(mediaStream);
-  analyser = audioCtx.createAnalyser();
-  analyser.fftSize = 2048;
+  if(mediaStream) return;
+  mediaStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
+  audioCtx=new (window.AudioContext||window.webkitAudioContext)();
+  const src=audioCtx.createMediaStreamSource(mediaStream);
+  analyser=audioCtx.createAnalyser(); analyser.fftSize=2048;
   src.connect(analyser);
 }
 
-function getRms() {
-  const buf = new Uint8Array(analyser.fftSize);
+function getRms(){
+  const buf=new Uint8Array(analyser.fftSize);
   analyser.getByteTimeDomainData(buf);
-  let sum = 0;
-  for (let i=0;i<buf.length;i++){
-    const v = (buf[i]-128)/128; sum += v*v;
-  }
+  let sum=0; for(let i=0;i<buf.length;i++){ const v=(buf[i]-128)/128; sum+=v*v; }
   return Math.sqrt(sum/buf.length);
 }
 
-function startAutoListen(){
-  if (!mediaStream) return;
-  if (listenLoopActive) return;
-  listenLoopActive = true;
-  stopAudio(); abortStream();
-  setState("listening"); setConv("you");
+function startListening(){
+  if(!mediaStream) return;
+  if(listenLoopOn) return;
+  listenLoopOn=true; setState(SM.LISTEN);
+  const thr=(Number(vadEl.value)||35)/3000;      // 0.003–0.033 approx
+  const silence=Math.max(200,Math.min(3000,Number(silenceEl.value)||700));
+  let voiced=false, lastSound=performance.now();
 
-  const threshold = (Number(vadEl.value)||35) / 3000; // rough map: 0.003–0.033
-  const silenceMs = Math.max(200, Math.min(3000, Number(silenceMsEl.value)||700));
-  let voiced = false;
-  let silentSince = performance.now();
+  const loop=()=>{
+    if(!listenLoopOn) return;
+    const rms=getRms(); const now=performance.now();
 
-  const tick = () => {
-    if (!listenLoopActive) return;
-    const rms = getRms();
-    const now = performance.now();
-
-    if (rms > threshold) {
-      // user is speaking
-      if (!voiced) { voiced = true; startRecorder(); setState("recording"); stopAudio(); abortStream(); }
-      silentSince = now;
-    } else if (voiced && (now - silentSince) > silenceMs) {
-      // speech ended
-      voiced = false; if (mediaRecorder && mediaRecorder.state!=="inactive") mediaRecorder.stop();
-      setState("processing");
-      return; // wait for onstop to restart listening
+    // BARGE-IN: if speaking or replying and we detect voice → interrupt & record
+    if((sm===SM.SPEAK || sm===SM.REPLY) && rms>thr){
+      stopAudio(); abortStream();
+      startRecordingTurn(); voiced=true; lastSound=now; setState(SM.REC);
+      requestAnimationFrame(loop); return;
     }
-    requestAnimationFrame(tick);
+
+    if(rms>thr){
+      if(!voiced && sm===SM.LISTEN){ startRecordingTurn(); setState(SM.REC); }
+      voiced=true; lastSound=now;
+    }else if(voiced && (now-lastSound)>silence){
+      voiced=false; stopRecordingTurn();
+      // wait for onstop path to restart listening
+      return;
+    }
+    requestAnimationFrame(loop);
   };
-  requestAnimationFrame(tick);
+  requestAnimationFrame(loop);
 }
 
-function startRecorder(){
+function stopListening(){
+  listenLoopOn=false;
+  if(mediaRecorder && mediaRecorder.state!=="inactive") mediaRecorder.stop();
+  setState(SM.IDLE);
+}
+
+function startRecordingTurn(){
+  if(!mediaStream) return;
+  abortStream(); stopAudio();
+
   const mime = MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm"
-            : MediaRecorder.isTypeSupported("audio/ogg") ? "audio/ogg" : "";
+             : MediaRecorder.isTypeSupported("audio/ogg")  ? "audio/ogg"  : "";
   mediaRecorder = new MediaRecorder(mediaStream, mime ? { mimeType: mime } : undefined);
-  const chunks = [];
-  mediaRecorder.ondataavailable = e => { if (e.data && e.data.size>0) chunks.push(e.data); };
+  const chunks=[];
+  mediaRecorder.ondataavailable = e => { if(e.data && e.data.size>0) chunks.push(e.data); };
   mediaRecorder.onstop = async () => {
     const blob = new Blob(chunks, { type: mime || "application/octet-stream" });
-    if (!blob || blob.size < 5000) { lastTranscriptEl.textContent = "⚠️ Try speaking a bit longer (clip too short)."; if (autoMode) startAutoListen(); return; }
+    if(!blob || blob.size<5000){ transcriptEl.textContent="⚠️ Speak a bit longer."; if(auto) startListening(); else setState(SM.IDLE); return; }
     const dataUrl = await blobToDataUrl(blob);
-    if (typeof dataUrl === "string" && dataUrl.startsWith("data:audio")) lastAudio.src = dataUrl;
-
-    try {
-      const r = await fetch("/.netlify/functions/stt", {
-        method:"POST", headers:{ "Content-Type":"application/json" },
-        body: JSON.stringify({ audioBase64: dataUrl, language: "en" })
-      });
-      const stt = await r.json();
-      if (!r.ok) { lastTranscriptEl.textContent = `⚠️ STT: ${stt?.error || "error"}`; if (autoMode) startAutoListen(); return; }
-      const transcript = stt?.transcript || "";
-      lastTranscriptEl.textContent = transcript || "–";
-      replyEl.textContent = "";
-      setConv("keilani");
-      if (streamToggle.checked) await chatStream(transcript); else await chatJSON(transcript);
-      // ttsSpeak() will call startAutoListen() when audio ends (or immediately if TTS off)
-      if (!ttsEnabled) { if (autoMode) startAutoListen(); }
-    } catch (e) {
-      lastTranscriptEl.textContent = "⚠️ STT error: " + e.message;
-      if (autoMode) startAutoListen();
+    lastAudio.src = dataUrl;
+    try{
+      const r=await fetch("/.netlify/functions/stt",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({audioBase64:dataUrl,language:"en"})});
+      const j=await r.json();
+      if(!r.ok){ transcriptEl.textContent=`⚠️ STT: ${j?.error||"error"}`; if(auto) startListening(); else setState(SM.IDLE); return; }
+      transcriptEl.textContent=j.transcript||"";
+      replyEl.textContent="";
+      (modeSel.value==="stream"?chatStream:chatPlain)(j.transcript||"");
+    }catch(e){
+      transcriptEl.textContent="⚠️ STT error: "+e.message;
+      if(auto) startListening(); else setState(SM.IDLE);
     }
   };
   mediaRecorder.start(50);
 }
 
-function blobToDataUrl(blob) {
-  return new Promise(res => { const fr = new FileReader(); fr.onloadend = () => res(fr.result); fr.readAsDataURL(blob); });
+function stopRecordingTurn(){
+  if(mediaRecorder && mediaRecorder.state!=="inactive"){ mediaRecorder.stop(); }
 }
+
+function blobToDataUrl(blob){
+  return new Promise(res=>{ const fr=new FileReader(); fr.onloadend=()=>res(fr.result); fr.readAsDataURL(blob); });
+}
+
+// ---- UX niceties
+msgEl.addEventListener("keydown", e=>{ if(e.key==="Enter"&&(e.ctrlKey||e.metaKey)) sendBtn.click(); });
+document.addEventListener("visibilitychange", ()=>{ if(document.hidden){ abortStream(); } });
+
+// Remember engine / voice id
+(function boot(){
+  const e=localStorage.getItem("ttsEngine"); if(e) ttsSel.value=e;
+  const v=localStorage.getItem("elevenVoiceId"); if(v) voiceIdEl.value=v;
+})();
+ttsSel.addEventListener("change", ()=> localStorage.setItem("ttsEngine", ttsSel.value));
+voiceIdEl.addEventListener("change", ()=> localStorage.setItem("elevenVoiceId", voiceIdEl.value.trim()));

@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Keilani Brain — Chat</title>
+    <title>Keilani — Live</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <style>
       :root {
@@ -34,278 +34,141 @@
         margin: 0;
         font-size: 18px;
       }
-      .health {
-        display: flex;
-        align-items: center;
-        gap: 8px;
-      }
-      .badge {
-        display: inline-flex;
-        align-items: center;
-        gap: 6px;
-        padding: 4px 8px;
-        border-radius: 999px;
-        font-size: 12px;
-        border: 1px solid #334155;
-        color: #93a2b9;
-      }
-      .dot {
-        width: 8px;
-        height: 8px;
-        border-radius: 999px;
-        background: #64748b;
-      }
-      .dot.ok {
-        background: #10b981;
-      }
-      .dot.warn {
-        background: #f59e0b;
-      }
-      .dot.err {
-        background: #ef4444;
-      }
-      button,
-      select,
-      input[type="number"],
-      input[type="text"],
-      input[type="range"] {
-        background: #0b1220;
-        color: #e6edf3;
-        border: 1px solid #263445;
-        border-radius: 8px;
-        padding: 8px 10px;
-      }
-      button {
-        background: #2563eb;
-        border: 0;
-        cursor: pointer;
-      }
-      button.secondary {
-        background: #0b1220;
-        border: 1px solid #263445;
-      }
-      button:disabled {
-        opacity: 0.6;
-        cursor: not-allowed;
-      }
-      main {
-        max-width: 1000px;
-        margin: 24px auto;
-        padding: 0 16px 40px;
-      }
-      .card {
-        background: #0f1720;
-        border: 1px solid #1f2937;
-        border-radius: 10px;
-        padding: 16px;
-      }
-      .row {
-        display: flex;
-        gap: 10px;
-        flex-wrap: wrap;
-        align-items: center;
-      }
-      textarea,
-      input[type="text"] {
-        width: 100%;
-        background: #0b1220;
-        color: #e6edf3;
-        border: 1px solid #263445;
-        border-radius: 8px;
-        padding: 10px;
-      }
-      textarea {
-        min-height: 100px;
-        resize: vertical;
-      }
-      .meta {
-        font-size: 12px;
-        color: #93a2b9;
-        margin-top: 6px;
-      }
-      .reply {
-        white-space: pre-wrap;
-        background: #0b1220;
-        border: 1px solid #263445;
-        border-radius: 8px;
-        padding: 12px;
-        min-height: 24px;
-      }
-      .matches {
-        margin-top: 12px;
-        font-size: 13px;
-      }
-      table {
-        width: 100%;
-        border-collapse: collapse;
-      }
-      th,
-      td {
-        text-align: left;
-        border-bottom: 1px solid #1f2937;
-        padding: 8px 6px;
-      }
       .pill {
         display: inline-flex;
         align-items: center;
         gap: 6px;
         font-size: 12px;
-        padding: 2px 8px;
+        padding: 4px 10px;
         border: 1px solid #334155;
         border-radius: 999px;
         color: #93a2b9;
       }
-      .row-opts {
+      main {
+        max-width: 900px;
+        margin: 22px auto;
+        padding: 0 16px 40px;
+      }
+      .card {
+        background: #0f1720;
+        border: 1px solid #1f2937;
+        border-radius: 12px;
+        padding: 16px;
+      }
+      textarea,
+      input,
+      select,
+      button {
+        background: #0b1220;
+        color: #e6edf3;
+        border: 1px solid #263445;
+        border-radius: 10px;
+        padding: 10px 12px;
+      }
+      button.primary {
+        background: #2563eb;
+        border: 0;
+        cursor: pointer;
+      }
+      button.ghost {
+        background: #0b1220;
+      }
+      button:disabled {
+        opacity: 0.6;
+        cursor: not-allowed;
+      }
+      .row {
         display: flex;
         gap: 10px;
         align-items: center;
-        margin: 8px 0 0;
         flex-wrap: wrap;
       }
-      .notice {
+      .grid {
+        display: grid;
+        gap: 12px;
+      }
+      .reply {
+        white-space: pre-wrap;
+        background: #0b1220;
+        border: 1px solid #263445;
+        border-radius: 10px;
+        padding: 12px;
+        min-height: 28px;
+      }
+      .meta {
+        font-size: 12px;
+        color: #93a2b9;
+      }
+      .section {
+        margin-top: 16px;
+      }
+      label small {
         color: #93a2b9;
         font-size: 12px;
-      }
-      .tts {
-        display: flex;
-        gap: 10px;
-        align-items: center;
-        flex-wrap: wrap;
-      }
-      .vad {
-        display: flex;
-        gap: 10px;
-        align-items: center;
-        flex-wrap: wrap;
-      }
-      .spacer {
-        flex: 1;
+        margin-left: 6px;
       }
       audio {
         width: 100%;
         margin-top: 8px;
       }
-      .state {
-        font-weight: 600;
-      }
     </style>
   </head>
   <body>
     <header>
-      <h1>🧠 Keilani Brain — Chat</h1>
-      <div class="health">
-        <span id="healthBadge" class="badge"
-          ><span class="dot" id="healthDot"></span
-          ><span id="healthText">checking…</span></span
-        >
-        <button id="healthRefresh" class="secondary" title="Refresh health">
-          Refresh
-        </button>
-      </div>
+      <h1>🧠 Keilani — Live</h1>
+      <span id="status" class="pill">idle <span id="lat"></span></span>
     </header>
 
     <main>
-      <div class="card">
-        <label for="message">Message to Keilani</label>
-        <textarea id="message" placeholder="Say hi to Keilani…"></textarea>
+      <div class="card grid">
+        <textarea
+          id="message"
+          placeholder="Type to chat… (Ctrl/Cmd+Enter to send)"
+        ></textarea>
 
-        <div class="row-opts">
-          <label class="notice"
-            >Retrieval threshold:
-            <input
-              id="threshold"
-              type="number"
-              min="0"
-              max="1"
-              step="0.05"
-              value="0.6"
-              style="width: 80px"
-            />
+        <div class="row">
+          <button id="send" class="primary">Send</button>
+          <button id="ptt" class="ghost">🎙 Hold to talk</button>
+          <button id="stop" class="ghost" title="Stop speaking / streaming">
+            Stop
+          </button>
+
+          <span style="flex: 1"></span>
+
+          <label
+            >Mode
+            <select id="mode">
+              <option value="stream" selected>Stream (SSE)</option>
+              <option value="plain">Plain</option>
+            </select>
           </label>
-          <label class="notice"
-            >Match count:
-            <input
-              id="count"
-              type="number"
-              min="1"
-              max="20"
-              step="1"
-              value="8"
-              style="width: 80px"
-            />
+
+          <label
+            >TTS
+            <select id="ttsEngine">
+              <option value="elevenlabs" selected>ElevenLabs</option>
+              <option value="browser">Browser</option>
+            </select>
           </label>
-          <label class="notice"
-            ><input id="skipContext" type="checkbox" /> Skip RAG (OpenAI
-            only)</label
-          >
 
-          <label class="notice"
-            ><input id="streamToggle" type="checkbox" checked /> Stream
-            (SSE)</label
-          >
-          <span class="pill" id="status"
-            >idle <span id="latency"></span>
-            <span id="convState" class="state"></span
-          ></span>
-
-          <span class="spacer"></span>
-
-          <!-- TTS Engine -->
-          <div class="tts">
-            <label class="notice">
-              TTS Engine:
-              <select id="ttsEngine">
-                <option value="browser" selected>Browser (Web Speech)</option>
-                <option value="elevenlabs">ElevenLabs</option>
-              </select>
-            </label>
-            <label class="notice" id="voiceLocalWrap">
-              Voice:
-              <select id="voiceLocal"></select>
-            </label>
-            <label class="notice" id="voiceIdWrap" style="display: none">
-              Eleven Voice ID:
-              <input
-                id="voiceId"
-                type="text"
-                placeholder="ELEVEN_VOICE_ID or default"
-                style="width: 260px"
-              />
-            </label>
-            <label class="notice"
-              >Rate:<input
-                id="rate"
-                type="number"
-                step="0.1"
-                min="0.5"
-                max="2"
-                value="1.0"
-                style="width: 70px"
-            /></label>
-            <label class="notice"
-              >Pitch:<input
-                id="pitch"
-                type="number"
-                step="0.1"
-                min="0"
-                max="2"
-                value="1.0"
-                style="width: 70px"
-            /></label>
-            <button id="toggleTTS" class="secondary">🔊 TTS: On</button>
-          </div>
+          <input
+            id="voiceId"
+            type="text"
+            placeholder="Eleven Voice ID (opt)"
+            style="min-width: 220px"
+          />
+          <button id="auto" class="ghost">🔁 Auto talk: Off</button>
         </div>
 
-        <div class="row vad" style="margin-top: 10px">
-          <button id="autoTalk" class="secondary">🔁 Auto talk: Off</button>
-          <label class="notice"
-            >VAD:
+        <div class="row">
+          <label
+            >VAD <small>more ← sensitive → less</small>
             <input id="vad" type="range" min="1" max="100" value="35" />
           </label>
-          <label class="notice"
-            >Silence ms:
+          <label
+            >Silence <small>ms</small>
             <input
-              id="silenceMs"
+              id="silence"
               type="number"
               min="200"
               max="3000"
@@ -314,52 +177,22 @@
               style="width: 90px"
             />
           </label>
-          <span class="notice">States: <span id="stateText">idle</span></span>
+          <span id="state" class="meta">state: idle</span>
         </div>
 
-        <div class="row" style="margin-top: 10px">
-          <input
-            id="userId"
-            type="text"
-            value="00000000-0000-0000-0000-000000000001"
-          />
-          <button id="send">Send</button>
-          <button id="speakReply" class="secondary">Speak Reply</button>
-          <button id="ptt" class="secondary">🎙 Hold to talk</button>
-          <button id="stopStream" class="secondary" title="Stop current reply">
-            Stop
-          </button>
+        <div class="section">
+          <div class="meta">Reply</div>
+          <div id="reply" class="reply">–</div>
         </div>
 
-        <div class="meta">
-          Tip: lower threshold (e.g. 0.5) = more context; raise (e.g. 0.7) =
-          stricter matches.
+        <div class="section">
+          <div class="meta">Last transcript</div>
+          <div id="transcript" class="reply">–</div>
+          <audio id="lastAudio" controls></audio>
         </div>
-
-        <h3 style="margin: 16px 0 6px">Reply</h3>
-        <div id="reply" class="reply">–</div>
-
-        <div class="matches">
-          <h3>Matches</h3>
-          <div id="matchesEmpty" class="notice">No matches yet.</div>
-          <table id="matchesTable" style="display: none">
-            <thead>
-              <tr>
-                <th>Title</th>
-                <th>Source</th>
-                <th>Similarity</th>
-              </tr>
-            </thead>
-            <tbody id="matchesBody"></tbody>
-          </table>
-        </div>
-
-        <h3 style="margin: 16px 0 6px">Last transcript</h3>
-        <div id="lastTranscript" class="reply">–</div>
-        <audio id="lastAudio" controls></audio>
       </div>
     </main>
 
-    <script src="/js/keilaniStream.js?v=6" defer></script>
+    <script src="/js/keilaniStream.js?v=7" defer></script>
   </body>
 </html>
