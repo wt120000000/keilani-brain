@@ -1,5 +1,4 @@
-// Extracted from index.html (CSP-safe). Non-stream JSON chat + local TTS.
-
+// Chat + TTS (Browser/ElevenLabs) + Push-to-talk -> STT -> Chat -> TTS
 const sendBtn = document.getElementById("send");
 const msgEl = document.getElementById("message");
 const userEl = document.getElementById("userId");
@@ -18,15 +17,28 @@ const healthText = document.getElementById("healthText");
 const healthRefresh = document.getElementById("healthRefresh");
 
 // TTS controls
-const voiceSel = document.getElementById("voice");
+const ttsEngineEl = document.getElementById("ttsEngine");
+const voiceLocalSel = document.getElementById("voiceLocal");
 const rateEl = document.getElementById("rate");
 const pitchEl = document.getElementById("pitch");
 const toggleTTSBtn = document.getElementById("toggleTTS");
+const speakReplyBtn = document.getElementById("speakReply");
+
+const voiceIdWrap = document.getElementById("voiceIdWrap");
+const voiceLocalWrap = document.getElementById("voiceLocalWrap");
+const voiceIdEl = document.getElementById("voiceId");
+
+const pttBtn = document.getElementById("ptt");
+const lastTranscriptEl = document.getElementById("lastTranscript");
+const lastAudio = document.getElementById("lastAudio");
 
 // ---------- State ----------
 let ttsEnabled = true;
 let voices = [];
 let selectedVoice = null;
+let currentAudio = null; // barge-in handle
+let mediaRecorder = null;
+let mediaStream = null;
 
 function setStatus(s) { statusEl.textContent = s; }
 
@@ -56,10 +68,38 @@ healthRefresh.addEventListener("click", refreshHealth);
 refreshHealth();
 setInterval(refreshHealth, 30000);
 
-// ---------- TTS ----------
+// ---------- TTS: engine switching ----------
+function applyTtsEngineUI() {
+  const engine = ttsEngineEl.value;
+  if (engine === "elevenlabs") {
+    voiceLocalWrap.style.display = "none";
+    voiceIdWrap.style.display = "";
+  } else {
+    voiceLocalWrap.style.display = "";
+    voiceIdWrap.style.display = "none";
+  }
+}
+ttsEngineEl.addEventListener("change", () => {
+  localStorage.setItem("ttsEngine", ttsEngineEl.value);
+  applyTtsEngineUI();
+});
+
+(function bootEngineFromStorage() {
+  const saved = localStorage.getItem("ttsEngine");
+  if (saved) ttsEngineEl.value = saved;
+  const savedVoiceId = localStorage.getItem("elevenVoiceId");
+  if (savedVoiceId) voiceIdEl.value = savedVoiceId;
+  applyTtsEngineUI();
+})();
+
+voiceIdEl.addEventListener("change", () => {
+  localStorage.setItem("elevenVoiceId", voiceIdEl.value.trim());
+});
+
+// ---------- TTS: Browser voices ----------
 function populateVoices() {
   voices = (window.speechSynthesis?.getVoices?.() || []).filter((v) => v.lang?.startsWith?.("en"));
-  voiceSel.innerHTML =
+  voiceLocalSel.innerHTML =
     voices.map((v, i) => `<option value="${i}">${v.name} (${v.lang})${v.default ? " — default" : ""}</option>`).join("")
     || `<option value="">(No voices found)</option>`;
   selectedVoice = voices[0] || null;
@@ -68,29 +108,72 @@ if ("speechSynthesis" in window) {
   populateVoices();
   window.speechSynthesis.onvoiceschanged = populateVoices;
 }
-
-function speakAsKeilani(text) {
-  if (!ttsEnabled) return;
-  if (!("speechSynthesis" in window)) return;
-  window.speechSynthesis.cancel();
-  const utter = new SpeechSynthesisUtterance(text);
-  if (selectedVoice) utter.voice = selectedVoice;
-  const rate = Math.min(2, Math.max(0.5, Number(rateEl.value) || 1.0));
-  const pitch = Math.min(2, Math.max(0, Number(pitchEl.value) || 1.0));
-  utter.rate = rate; utter.pitch = pitch;
-  window.speechSynthesis.speak(utter);
-}
-voiceSel.addEventListener("change", (e) => {
+voiceLocalSel.addEventListener("change", (e) => {
   const idx = Number(e.target.value);
   selectedVoice = voices[idx] || null;
 });
+
 toggleTTSBtn.addEventListener("click", () => {
   ttsEnabled = !ttsEnabled;
   toggleTTSBtn.textContent = ttsEnabled ? "🔊 TTS: On" : "🔇 TTS: Off";
   toggleTTSBtn.classList.toggle("secondary", true);
 });
 
-// ---------- Chat ----------
+speakReplyBtn.addEventListener("click", () => {
+  const text = replyEl.textContent.trim();
+  if (text && text !== "–") ttsSpeak(text);
+});
+
+// ---------- TTS core (barge-in) ----------
+function stopAudio() {
+  if (currentAudio) {
+    currentAudio.pause();
+    currentAudio.src = "";
+    currentAudio = null;
+  }
+  if (window.speechSynthesis) window.speechSynthesis.cancel();
+}
+
+async function ttsSpeak(text) {
+  if (!ttsEnabled || !text) return;
+  stopAudio(); // barge-in
+
+  const engine = ttsEngineEl.value;
+  if (engine === "browser") {
+    if (!("speechSynthesis" in window)) return;
+    const u = new SpeechSynthesisUtterance(text);
+    if (selectedVoice) u.voice = selectedVoice;
+    u.rate = Math.min(2, Math.max(0.5, Number(rateEl.value) || 1.0));
+    u.pitch = Math.min(2, Math.max(0, Number(pitchEl.value) || 1.0));
+    window.speechSynthesis.speak(u);
+    return;
+  }
+
+  // ElevenLabs via proxy
+  try {
+    const body = {
+      text,
+      voiceId: (voiceIdEl.value || "").trim() || undefined
+    };
+    const r = await fetch("/.netlify/functions/tts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(body)
+    });
+    const data = await r.json();
+    if (!r.ok || !data?.audio) {
+      console.warn("TTS error:", data);
+      return;
+    }
+    currentAudio = new Audio(data.audio);
+    currentAudio.play().catch(() => {});
+    lastAudio.src = data.audio; // keep a copy under the player
+  } catch (e) {
+    console.warn("TTS exception:", e);
+  }
+}
+
+// ---------- Chat (JSON) ----------
 async function sendToKeilani(message) {
   const threshold = Number(thresholdEl.value || 0.6);
   const count = Number(countEl.value || 8);
@@ -118,7 +201,7 @@ async function sendToKeilani(message) {
     }
 
     replyEl.textContent = data.reply || "—";
-    speakAsKeilani(data.reply || "");
+    ttsSpeak(data.reply || "");
 
     const matches = Array.isArray(data.matches) ? data.matches : [];
     if (matches.length === 0) {
@@ -158,3 +241,68 @@ msgEl.addEventListener("keydown", (e) => {
     sendBtn.click();
   }
 });
+
+// ---------- Push-to-talk (MediaRecorder -> STT -> Chat) ----------
+async function ensureMic() {
+  if (mediaStream) return;
+  mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+}
+
+function blobToDataUrl(blob) {
+  return new Promise((res) => {
+    const fr = new FileReader();
+    fr.onloadend = () => res(fr.result);
+    fr.readAsDataURL(blob);
+  });
+}
+
+pttBtn.addEventListener("mousedown", startPTT);
+pttBtn.addEventListener("touchstart", startPTT, { passive: true });
+pttBtn.addEventListener("mouseup", stopPTT);
+pttBtn.addEventListener("mouseleave", stopPTT);
+pttBtn.addEventListener("touchend", stopPTT);
+
+async function startPTT() {
+  try {
+    await ensureMic();
+    const mime = MediaRecorder.isTypeSupported("audio/webm") ? "audio/webm" :
+                 MediaRecorder.isTypeSupported("audio/ogg") ? "audio/ogg" : "";
+    mediaRecorder = new MediaRecorder(mediaStream, mime ? { mimeType: mime } : undefined);
+    const chunks = [];
+    mediaRecorder.ondataavailable = (e) => { if (e.data && e.data.size > 0) chunks.push(e.data); };
+    mediaRecorder.onstop = async () => {
+      try {
+        const blob = new Blob(chunks, { type: mime || "application/octet-stream" });
+        const dataUrl = await blobToDataUrl(blob);
+        lastAudio.src = dataUrl; // preview mic capture
+
+        // Send to STT
+        const r = await fetch("/.netlify/functions/stt", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ audioBase64: dataUrl, language: "en" })
+        });
+        const stt = await r.json();
+        const transcript = stt?.transcript || "";
+        lastTranscriptEl.textContent = transcript || "–";
+        if (transcript) {
+          msgEl.value = transcript;
+          await sendToKeilani(transcript);
+        }
+      } catch (e) {
+        lastTranscriptEl.textContent = "⚠️ STT error: " + e.message;
+      }
+    };
+    mediaRecorder.start();
+    pttBtn.textContent = "🛑 Release to send";
+    pttBtn.disabled = false;
+  } catch (e) {
+    alert("Microphone error: " + e.message);
+  }
+}
+function stopPTT() {
+  if (mediaRecorder && mediaRecorder.state !== "inactive") {
+    mediaRecorder.stop();
+    pttBtn.textContent = "🎙 Hold to talk";
+  }
+}

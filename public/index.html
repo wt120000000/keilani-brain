@@ -66,7 +66,8 @@
       }
       button,
       select,
-      input[type="number"] {
+      input[type="number"],
+      input[type="text"] {
         background: #0b1220;
         color: #e6edf3;
         border: 1px solid #263445;
@@ -101,6 +102,7 @@
         display: flex;
         gap: 10px;
         flex-wrap: wrap;
+        align-items: center;
       }
       textarea,
       input[type="text"] {
@@ -169,6 +171,15 @@
       .spacer {
         flex: 1;
       }
+      .vad {
+        display: flex;
+        align-items: center;
+        gap: 8px;
+      }
+      audio {
+        width: 100%;
+        margin-top: 8px;
+      }
     </style>
   </head>
   <body>
@@ -221,14 +232,31 @@
           >
           <span class="pill" id="status">idle</span>
           <span class="spacer"></span>
+
+          <!-- TTS Engine -->
           <div class="tts">
-            <label class="notice"
-              >Voice:
-              <select id="voice"></select
-            ></label>
-            <label class="notice"
-              >Rate:
+            <label class="notice">
+              TTS Engine:
+              <select id="ttsEngine">
+                <option value="browser" selected>Browser (Web Speech)</option>
+                <option value="elevenlabs">ElevenLabs</option>
+              </select>
+            </label>
+            <label class="notice" id="voiceLocalWrap">
+              Voice:
+              <select id="voiceLocal"></select>
+            </label>
+            <label class="notice" id="voiceIdWrap" style="display: none">
+              Eleven Voice ID:
               <input
+                id="voiceId"
+                type="text"
+                placeholder="ELEVEN_VOICE_ID or default"
+                style="width: 260px"
+              />
+            </label>
+            <label class="notice"
+              >Rate:<input
                 id="rate"
                 type="number"
                 step="0.1"
@@ -238,8 +266,7 @@
                 style="width: 70px"
             /></label>
             <label class="notice"
-              >Pitch:
-              <input
+              >Pitch:<input
                 id="pitch"
                 type="number"
                 step="0.1"
@@ -259,6 +286,8 @@
             value="00000000-0000-0000-0000-000000000001"
           />
           <button id="send">Send</button>
+          <button id="speakReply" class="secondary">Speak Reply</button>
+          <button id="ptt" class="secondary">🎙 Hold to talk</button>
         </div>
 
         <div class="meta">
@@ -283,10 +312,14 @@
             <tbody id="matchesBody"></tbody>
           </table>
         </div>
+
+        <h3 style="margin: 16px 0 6px">Last transcript</h3>
+        <div id="lastTranscript" class="reply">–</div>
+        <audio id="lastAudio" controls></audio>
       </div>
     </main>
 
-    <!-- moved inline JS to external, CSP-safe file -->
-    <script src="/js/keilaniStream.js?v=2" defer></script>
+    <!-- CSP-safe external JS -->
+    <script src="/js/keilaniStream.js?v=3" defer></script>
   </body>
 </html>
