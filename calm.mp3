@@ -1,0 +1,1 @@
+{"error":"tts_eleven_error","detail":"{\"detail\":{\"status\":\"invalid_voice_settings\",\"message\":\"Invalid setting for style received, expected to be greater or equal to 0.0 and less or equal to 1.0, received 50.0.\"}}"}
