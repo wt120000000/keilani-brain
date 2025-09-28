@@ -7,15 +7,24 @@ exports.handler = async (event) => {
     return { statusCode: 405, headers: cors(), body: JSON.stringify({ error: "method_not_allowed" }) };
   }
 
-  const { text = "", voiceId = process.env.ELEVEN_VOICE_ID || "21m00Tcm4TlvDq8ikWAM", modelId = "eleven_multilingual_v2" } =
-    safeJson(event.body || "{}");
+  const { text = "", voiceId, modelId = "eleven_multilingual_v2" } = safeJson(event.body || "{}");
 
-  const KEY = process.env.ELEVENLABS_API_KEY;
+  // Accept any of the common var names
+  const KEY =
+    process.env.ELEVENLABS_API_KEY ||
+    process.env.ELEVEN_API_KEY ||
+    process.env.XI_API_KEY;
+
+  const VOICE =
+    (voiceId || "").trim() ||
+    process.env.ELEVEN_VOICE_ID ||
+    "21m00Tcm4TlvDq8ikWAM"; // fallback voice
+
   if (!KEY) return { statusCode: 500, headers: cors(), body: JSON.stringify({ error: "missing_eleven_key" }) };
-  if (!text.trim()) return { statusCode: 400, headers: cors(), body: JSON.stringify({ error: "missing_text" }) };
+  if (!String(text).trim()) return { statusCode: 400, headers: cors(), body: JSON.stringify({ error: "missing_text" }) };
 
   try {
-    const url = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}/stream`;
+    const url = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(VOICE)}/stream`;
     const r = await fetch(url, {
       method: "POST",
       headers: {
@@ -37,7 +46,7 @@ exports.handler = async (event) => {
 
     const ab = await r.arrayBuffer();
     const b64 = Buffer.from(ab).toString("base64");
-    // Return JSON so the browser can build an <audio> src quickly
+
     return {
       statusCode: 200,
       headers: { ...cors(), "Content-Type": "application/json", "Cache-Control": "no-store" },
