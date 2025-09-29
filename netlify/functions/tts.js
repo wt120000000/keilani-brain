@@ -1,6 +1,6 @@
 // netlify/functions/tts.js
-// POST { text, voiceId? } -> { audio: data:audio/mpeg;base64,... }
-// Accepts ELEVEN_API_KEY or ELEVENLABS_API_KEY.
+// POST { text: string, voiceId?: string, model_id?: string, voice_settings?: {...} }
+// -> { audio: "data:audio/mpeg;base64,...", meta: {...} }
 
 function json(status, body) {
   return {
@@ -16,6 +16,7 @@ function json(status, body) {
 }
 
 exports.handler = async (event) => {
+  // CORS preflight
   if (event.httpMethod === "OPTIONS") {
     return {
       statusCode: 204,
@@ -28,73 +29,92 @@ exports.handler = async (event) => {
     };
   }
 
-  if (event.httpMethod !== "POST") return json(405, { error: "method_not_allowed" });
+  if (event.httpMethod !== "POST") {
+    return json(405, { error: "method_not_allowed" });
+  }
 
   const ELEVEN_KEY =
     process.env.ELEVEN_API_KEY ||
     process.env.ELEVENLABS_API_KEY ||
     "";
 
-  // Useful meta for debugging (never include actual key)
-  const meta = {
-    key_source: process.env.ELEVEN_API_KEY ? "ELEVEN_API_KEY"
-              : process.env.ELEVENLABS_API_KEY ? "ELEVENLABS_API_KEY"
-              : "missing",
-    key_len: ELEVEN_KEY.length,
-  };
-
   if (!ELEVEN_KEY) {
-    return json(401, { error: "missing_eleven_key", meta });
+    return json(401, { error: "missing_eleven_key" });
   }
 
   let body;
   try {
     body = JSON.parse(event.body || "{}");
   } catch (e) {
-    return json(400, { error: "invalid_json", detail: String(e.message || e), meta });
+    return json(400, { error: "invalid_json", detail: String(e?.message || e) });
   }
 
   const text = (body.text || "").trim();
-  const voiceId =
-    (body.voiceId || "").trim() ||
-    (process.env.ELEVEN_VOICE_ID || "").trim() ||
-    "21m00Tcm4TlvDq8ikWAM";
+  const userVoice = (body.voiceId || "").trim();
+  const defaultVoice = (process.env.ELEVEN_VOICE_ID || "").trim(); // optional
+  const voiceId = userVoice || defaultVoice || "21m00Tcm4TlvDq8ikWAM"; // “Rachel”
 
-  if (!text) return json(400, { error: "missing_text", meta });
+  if (!text) {
+    return json(400, { error: "missing_text" });
+  }
+
+  // Optional model + voice settings (safe defaults if none provided)
+  const model_id = body.model_id || "eleven_multilingual_v2";
+  const voice_settings = body.voice_settings || {
+    stability: 0.3,
+    similarity_boost: 0.7,
+  };
 
   try {
+    // Eleven streaming endpoint (returns audio/mpeg)
     const url = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(
       voiceId
-    )}/stream?optimize_streaming_latency=2`;
+    )}/stream`;
 
-    const r = await fetch(url, {
+    const elevenResp = await fetch(url, {
       method: "POST",
       headers: {
-        "xi-api-key": ELEVEN_KEY,      // <- required by ElevenLabs
+        "xi-api-key": ELEVEN_KEY, // <- must be exactly this header
         "Content-Type": "application/json",
-        "Accept": "audio/mpeg",
       },
-      body: JSON.stringify({
-        text,
-        model_id: "eleven_multilingual_v2",
-        voice_settings: { stability: 0.4, similarity_boost: 0.7, style: 0.0, use_speaker_boost: true },
-      }),
+      body: JSON.stringify({ text, model_id, voice_settings }),
     });
 
-    if (!r.ok) {
-      // Bubble up ElevenLabs' explanation so you can see 401 reason
+    // If Eleven returns an error, try to surface their JSON
+    if (!elevenResp.ok) {
       let detail = null;
-      try { detail = await r.json(); } catch { detail = await r.text(); }
-      return json(r.status, { error: "eleven_error", detail, meta: { ...meta, voiceId } });
+      try {
+        detail = await elevenResp.json();
+      } catch {
+        try {
+          detail = await elevenResp.text();
+        } catch {
+          detail = null;
+        }
+      }
+      // 401/403/4xx from Eleven -> pass through 401 to the client (matches your logs)
+      const status = elevenResp.status === 401 ? 401 : 502;
+      return json(status, {
+        error: "eleven_error",
+        detail,
+        meta: { status: elevenResp.status, voiceId, model_id },
+      });
     }
 
-    const ab = await r.arrayBuffer();
-    const b64 = Buffer.from(ab).toString("base64");
+    // Convert audio stream to base64 data URL
+    const arrayBuf = await elevenResp.arrayBuffer();
+    const b64 = Buffer.from(arrayBuf).toString("base64");
+    const dataUrl = `data:audio/mpeg;base64,${b64}`;
+
     return json(200, {
-      audio: `data:audio/mpeg;base64,${b64}`,
-      meta: { ...meta, bytes: ab.byteLength, voiceId },
+      audio: dataUrl,
+      meta: {
+        bytes: b64.length * 0.75, // approx
+        voiceId,
+        model_id,
+      },
     });
   } catch (e) {
-    return json(502, { error: "tts_exception", detail: String(e?.message || e), meta });
+    return json(502, { error: "tts_exception", detail: String(e?.message || e) });
   }
 };
