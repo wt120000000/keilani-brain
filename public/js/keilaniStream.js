@@ -1,4 +1,4 @@
-// Voice loop with output-aware VAD, sustained onset, grace window, and SSE streaming
+// Voice loop with output-aware VAD, sustained onset, and SSE streaming
 
 // ---- DOM
 const sendBtn = document.getElementById("send");
@@ -39,24 +39,31 @@ let outSource = null;
 let listenLoopOn = false;
 let processingTurn = false;
 
+let outIsPlaying = false;   // <- only gate vs output when true
+
 let voices = [];
 let selectedVoice = null;
 let ttsOn = true;
 
 let speakStartedAt = 0;
 
+// Detection constants (looser)
+const REQUIRED_ONSET_FRAMES = 3;   // was 6
+const OUTPUT_MARGIN = 0.008;       // was 0.02
+const TTS_GRACE_MS = 250;          // was 350
+
 // ---- Helpers
 const setState = s => { sm = s; stateEl.textContent = "state: " + s; };
 const setStatus = s => { statusEl.firstChild.nodeValue = s + " "; };
 const setLatency = (first, total) => { latEl.textContent = `${first!=null?`• first ${first} ms `:""}${total!=null?`• total ${total} ms`:""}`; };
 
-function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;"," >":"&gt;","\"":"&quot;","'":"&#39;"}[c]));}
 function ema(prev, next, alpha){ return prev === null ? next : (alpha*next + (1-alpha)*prev); }
 
 // ---- Audio / TTS
 function stopAudio(){
-  if (currentAudio){ currentAudio.pause(); currentAudio.src=""; currentAudio=null; }
+  if (currentAudio){ try { currentAudio.pause(); } catch {} currentAudio.src=""; currentAudio=null; }
   if (window.speechSynthesis) window.speechSynthesis.cancel();
+  outIsPlaying = false;
 }
 
 async function speak(text){
@@ -68,24 +75,33 @@ async function speak(text){
     if (!("speechSynthesis" in window)) { if (auto) startListening(); else setState(SM.IDLE); return; }
     const u = new SpeechSynthesisUtterance(text);
     if (selectedVoice) u.voice = selectedVoice;
-    u.onend = ()=> { if (auto) startListening(); else setState(SM.IDLE); };
+    u.onstart = () => { outIsPlaying = true; };
+    u.onend = ()=> { outIsPlaying = false; if (auto) startListening(); else setState(SM.IDLE); };
     window.speechSynthesis.speak(u);
     return;
   }
   try {
     const r = await fetch("/.netlify/functions/tts",{method:"POST",headers:{"Content-Type":"application/json"},body:JSON.stringify({ text, voiceId: voiceIdEl.value.trim()||undefined })});
-    const data = await r.json();
-    if (!r.ok || !data?.audio){ if (auto) startListening(); else setState(SM.IDLE); return; }
+    const data = await r.json().catch(()=> ({}));
+    if (!r.ok || !data?.audio){
+      console.warn("TTS error:", data);   // <- you’ll see 401 reason from server here
+      // Do not stall the loop if TTS fails
+      if (auto) startListening(); else setState(SM.IDLE);
+      return;
+    }
     if (typeof data.audio === "string" && data.audio.startsWith("data:audio")){
       currentAudio = new Audio(data.audio);
       wireOutputAnalyser(currentAudio);
-      currentAudio.onended = ()=> { if (auto) startListening(); else setState(SM.IDLE); };
-      currentAudio.play().catch(()=>{ if (auto) startListening(); else setState(SM.IDLE); });
+      currentAudio.addEventListener("playing", ()=> outIsPlaying = true);
+      currentAudio.addEventListener("pause",   ()=> outIsPlaying = false);
+      currentAudio.addEventListener("ended",   ()=> { outIsPlaying = false; if (auto) startListening(); else setState(SM.IDLE); });
+      await currentAudio.play().catch(()=>{ outIsPlaying=false; if (auto) startListening(); else setState(SM.IDLE); });
       lastAudio.src = data.audio;
     } else {
       if (auto) startListening(); else setState(SM.IDLE);
     }
-  } catch {
+  } catch (e) {
+    console.warn("TTS exception:", e);
     if (auto) startListening(); else setState(SM.IDLE);
   }
 }
@@ -193,9 +209,8 @@ function wireOutputAnalyser(audioEl){
     outSource = audioCtx.createMediaElementSource(audioEl);
     outAnalyser = audioCtx.createAnalyser(); outAnalyser.fftSize=2048;
     outSource.connect(outAnalyser);
-    // Also send to destination so we can hear it
-    outSource.connect(audioCtx.destination);
-  }catch{ /* MediaElementSource can be created once per element; safe to ignore */ }
+    outSource.connect(audioCtx.destination); // so we hear it
+  }catch{ /* may throw if reused; ok to ignore */ }
 }
 
 function rmsFromAnalyser(an){
@@ -210,8 +225,6 @@ function startListening(){
   listenLoopOn = true;
   setState(SM.LISTEN);
 
-  // onset must be sustained across N frames to count as speech
-  const REQUIRED_ONSET_FRAMES = 6; // ~180ms @ 60fps
   let onsetFrames = 0;
   let voiced = false;
   let lastSound = performance.now();
@@ -220,26 +233,23 @@ function startListening(){
   const loop = () => {
     if (!listenLoopOn) return;
 
-    const thr = (Number(vadEl.value)||35)/3000; // mic threshold ~0.003–0.033
+    const thr = (Number(vadEl.value)||35)/3000;
     const silence = Math.max(200,Math.min(3000,Number(silenceEl.value)||700));
 
     const micRms = micAnalyser ? rmsFromAnalyser(micAnalyser) : 0;
     const outRms = outAnalyser ? rmsFromAnalyser(outAnalyser) : 0;
-    outEma = ema(outEma, outRms, 0.2); // smooth playback energy
+    outEma = ema(outEma, outRms, 0.2);
 
     const now = performance.now();
-    const graceActive = (sm===SM.SPEAK) && (now - speakStartedAt < 350); // grace window after TTS starts
+    const graceActive = (sm===SM.SPEAK) && (now - speakStartedAt < TTS_GRACE_MS);
 
-    // output-aware margin: require mic > playback + margin
-    const margin = 0.02; // tweakable; ~ -34 dBFS
-    const micBeatsOutput = micRms > ((outEma||0) + margin);
+    // Only gate vs output if audio is actually playing
+    const micBeatsOutput = outIsPlaying ? (micRms > ((outEma||0) + OUTPUT_MARGIN)) : true;
 
-    // BARGE-IN candidate: only if not in PROCESS and not in grace window
     if (!processingTurn && !graceActive) {
       if (micRms > thr && micBeatsOutput) {
         onsetFrames++;
         if (!voiced && onsetFrames >= REQUIRED_ONSET_FRAMES) {
-          // start turn
           stopAudio(); abortStream();
           startRecordingTurn();
           setState(SM.REC);
@@ -252,11 +262,8 @@ function startListening(){
       }
     }
 
-    if (voiced) {
-      lastSound = now;
-    }
+    if (voiced) lastSound = now;
 
-    // end of speech -> stop recorder but keep loop alive
     if (voiced && (now - lastSound) > silence) {
       voiced = false;
       if (mediaRecorder && mediaRecorder.state !== "inactive") {
@@ -317,7 +324,7 @@ function blobToDataUrl(blob){
   return new Promise(res=>{ const fr=new FileReader(); fr.onloadend=()=>res(fr.result); fr.readAsDataURL(blob); });
 }
 
-// ---- UX niceties
+// ---- UX
 msgEl.addEventListener("keydown", e=>{ if(e.key==="Enter"&&(e.ctrlKey||e.metaKey)) sendBtn.click(); });
 document.addEventListener("visibilitychange", ()=>{ if(document.hidden){ abortStream(); } });
 

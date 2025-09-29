@@ -14,8 +14,7 @@ function json(status, body) {
   };
 }
 
-exports.handler = async (event, ctx) => {
-  // CORS preflight
+exports.handler = async (event) => {
   if (event.httpMethod === "OPTIONS") {
     return {
       statusCode: 204,
@@ -29,7 +28,6 @@ exports.handler = async (event, ctx) => {
   }
   if (event.httpMethod !== "POST") return json(405, { error: "method_not_allowed" });
 
-  // Accept either name
   const ELEVEN_API_KEY = (process.env.ELEVEN_API_KEY || process.env.ELEVENLABS_API_KEY || "").trim();
   const DEFAULT_VOICE  = (process.env.ELEVEN_VOICE_ID || "").trim();
 
@@ -37,7 +35,6 @@ exports.handler = async (event, ctx) => {
     return json(500, { error: "missing_eleven_key", detail: "Set ELEVEN_API_KEY or ELEVENLABS_API_KEY in Netlify env (production)." });
   }
 
-  // Parse body
   let text = "", voiceId = "";
   try {
     const body = JSON.parse(event.body || "{}");
@@ -48,7 +45,7 @@ exports.handler = async (event, ctx) => {
   }
 
   if (!text) return json(400, { error: "missing_text" });
-  if (!voiceId) voiceId = "21m00Tcm4TlvDq8ikWAM"; // public demo "Rachel"
+  if (!voiceId) voiceId = "21m00Tcm4TlvDq8ikWAM"; // public demo voice
 
   const url = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}?optimize_streaming_latency=3&output_format=mp3_44100_128`;
   const payload = {
@@ -61,7 +58,7 @@ exports.handler = async (event, ctx) => {
     const r = await fetch(url, {
       method: "POST",
       headers: {
-        "xi-api-key": ELEVEN_API_KEY,         // required header
+        "xi-api-key": ELEVEN_API_KEY,
         "Content-Type": "application/json",
         "Accept": "audio/mpeg",
       },
@@ -71,7 +68,6 @@ exports.handler = async (event, ctx) => {
     if (!r.ok) {
       const ct = r.headers.get("content-type") || "";
       const detail = ct.includes("application/json") ? await r.json().catch(() => null) : await r.text();
-      // Log upstream for diagnostics
       console.error("[tts] upstream", r.status, { detail, voiceId });
       return json(r.status, { error: "eleven_error", detail, meta: { status: r.status, voiceId } });
     }
