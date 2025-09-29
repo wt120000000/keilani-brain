@@ -1,4 +1,4 @@
-// Voice loop with continuous VAD, robust barge-in, and SSE streaming
+// Voice loop with output-aware VAD, sustained onset, grace window, and SSE streaming
 
 // ---- DOM
 const sendBtn = document.getElementById("send");
@@ -26,25 +26,32 @@ let sm = SM.IDLE;
 let auto = false;
 
 let currentAudio = null;
-let streamCtl = null;     // AbortController for SSE
+let streamCtl = null;
 let streamOn = false;
 
 let mediaStream = null;
 let mediaRecorder = null;
 let audioCtx = null;
-let analyser = null;
+let micAnalyser = null;
+let outAnalyser = null;
+let micSource = null;
+let outSource = null;
 let listenLoopOn = false;
-let processingTurn = false; // <— keep VAD loop alive while we do STT/Chat
+let processingTurn = false;
 
 let voices = [];
 let selectedVoice = null;
 let ttsOn = true;
 
+let speakStartedAt = 0;
+
 // ---- Helpers
 const setState = s => { sm = s; stateEl.textContent = "state: " + s; };
 const setStatus = s => { statusEl.firstChild.nodeValue = s + " "; };
 const setLatency = (first, total) => { latEl.textContent = `${first!=null?`• first ${first} ms `:""}${total!=null?`• total ${total} ms`:""}`; };
-function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;",">":"&gt;","\"":"&quot;","'":"&#39;"}[c]));}
+
+function escapeHtml(s){return String(s).replace(/[&<>"']/g,c=>({"&":"&amp;","<":"&lt;"," >":"&gt;","\"":"&quot;","'":"&#39;"}[c]));}
+function ema(prev, next, alpha){ return prev === null ? next : (alpha*next + (1-alpha)*prev); }
 
 // ---- Audio / TTS
 function stopAudio(){
@@ -55,6 +62,8 @@ function stopAudio(){
 async function speak(text){
   if (!ttsOn || !text) { if (auto) startListening(); else setState(SM.IDLE); return; }
   setState(SM.SPEAK);
+  speakStartedAt = performance.now();
+
   if (ttsSel.value === "browser"){
     if (!("speechSynthesis" in window)) { if (auto) startListening(); else setState(SM.IDLE); return; }
     const u = new SpeechSynthesisUtterance(text);
@@ -69,6 +78,7 @@ async function speak(text){
     if (!r.ok || !data?.audio){ if (auto) startListening(); else setState(SM.IDLE); return; }
     if (typeof data.audio === "string" && data.audio.startsWith("data:audio")){
       currentAudio = new Audio(data.audio);
+      wireOutputAnalyser(currentAudio);
       currentAudio.onended = ()=> { if (auto) startListening(); else setState(SM.IDLE); };
       currentAudio.play().catch(()=>{ if (auto) startListening(); else setState(SM.IDLE); });
       lastAudio.src = data.audio;
@@ -165,19 +175,32 @@ autoBtn.addEventListener("click", async ()=>{
   if(auto){ await ensureMic(); startListening(); } else { stopListening(); }
 });
 
-// ---- Mic / VAD
+// ---- Mic / VAD (output-aware)
 async function ensureMic(){
   if(mediaStream) return;
-  mediaStream=await navigator.mediaDevices.getUserMedia({audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}});
+  mediaStream=await navigator.mediaDevices.getUserMedia({
+    audio:{echoCancellation:true,noiseSuppression:true,autoGainControl:true}
+  });
   audioCtx=new (window.AudioContext||window.webkitAudioContext)();
-  const src=audioCtx.createMediaStreamSource(mediaStream);
-  analyser=audioCtx.createAnalyser(); analyser.fftSize=2048;
-  src.connect(analyser);
+  micSource = audioCtx.createMediaStreamSource(mediaStream);
+  micAnalyser = audioCtx.createAnalyser(); micAnalyser.fftSize=2048;
+  micSource.connect(micAnalyser);
 }
 
-function getRms(){
-  const buf=new Uint8Array(analyser.fftSize);
-  analyser.getByteTimeDomainData(buf);
+function wireOutputAnalyser(audioEl){
+  if(!audioCtx) return;
+  try{
+    outSource = audioCtx.createMediaElementSource(audioEl);
+    outAnalyser = audioCtx.createAnalyser(); outAnalyser.fftSize=2048;
+    outSource.connect(outAnalyser);
+    // Also send to destination so we can hear it
+    outSource.connect(audioCtx.destination);
+  }catch{ /* MediaElementSource can be created once per element; safe to ignore */ }
+}
+
+function rmsFromAnalyser(an){
+  const buf=new Uint8Array(an.fftSize);
+  an.getByteTimeDomainData(buf);
   let sum=0; for(let i=0;i<buf.length;i++){ const v=(buf[i]-128)/128; sum+=v*v; }
   return Math.sqrt(sum/buf.length);
 }
@@ -187,49 +210,65 @@ function startListening(){
   listenLoopOn = true;
   setState(SM.LISTEN);
 
-  const tick = () => {
+  // onset must be sustained across N frames to count as speech
+  const REQUIRED_ONSET_FRAMES = 6; // ~180ms @ 60fps
+  let onsetFrames = 0;
+  let voiced = false;
+  let lastSound = performance.now();
+  let outEma = null;
+
+  const loop = () => {
     if (!listenLoopOn) return;
-    const thr = (Number(vadEl.value)||35)/3000;
+
+    const thr = (Number(vadEl.value)||35)/3000; // mic threshold ~0.003–0.033
     const silence = Math.max(200,Math.min(3000,Number(silenceEl.value)||700));
 
-    const rms = getRms();
+    const micRms = micAnalyser ? rmsFromAnalyser(micAnalyser) : 0;
+    const outRms = outAnalyser ? rmsFromAnalyser(outAnalyser) : 0;
+    outEma = ema(outEma, outRms, 0.2); // smooth playback energy
+
     const now = performance.now();
+    const graceActive = (sm===SM.SPEAK) && (now - speakStartedAt < 350); // grace window after TTS starts
 
-    // Store across frames
-    tick.voiced = tick.voiced || false;
-    tick.lastSound = tick.lastSound || now;
+    // output-aware margin: require mic > playback + margin
+    const margin = 0.02; // tweakable; ~ -34 dBFS
+    const micBeatsOutput = micRms > ((outEma||0) + margin);
 
-    // BARGE-IN: if replying/speaking and voice appears, interrupt & start turn
-    if ((sm===SM.SPEAK || sm===SM.REPLY) && rms > thr && !processingTurn) {
-      stopAudio(); abortStream();
-      startRecordingTurn();
-      tick.voiced = true;
-      tick.lastSound = now;
-      setState(SM.REC);
-      requestAnimationFrame(tick);
-      return;
+    // BARGE-IN candidate: only if not in PROCESS and not in grace window
+    if (!processingTurn && !graceActive) {
+      if (micRms > thr && micBeatsOutput) {
+        onsetFrames++;
+        if (!voiced && onsetFrames >= REQUIRED_ONSET_FRAMES) {
+          // start turn
+          stopAudio(); abortStream();
+          startRecordingTurn();
+          setState(SM.REC);
+          voiced = true;
+          lastSound = now;
+          onsetFrames = 0;
+        }
+      } else {
+        onsetFrames = 0;
+      }
     }
 
-    if (rms > thr && !processingTurn) {
-      if (!tick.voiced && sm===SM.LISTEN) {
-        startRecordingTurn();
-        setState(SM.REC);
-      }
-      tick.voiced = true;
-      tick.lastSound = now;
-    } else if (tick.voiced && (now - tick.lastSound) > silence) {
-      // speech ended → stop recorder, but KEEP LOOP RUNNING
-      tick.voiced = false;
+    if (voiced) {
+      lastSound = now;
+    }
+
+    // end of speech -> stop recorder but keep loop alive
+    if (voiced && (now - lastSound) > silence) {
+      voiced = false;
       if (mediaRecorder && mediaRecorder.state !== "inactive") {
-        processingTurn = true; // <— keep loop alive but idle
+        processingTurn = true;
         mediaRecorder.stop();
         setState(SM.PROCESS);
       }
     }
 
-    requestAnimationFrame(tick);
+    requestAnimationFrame(loop);
   };
-  requestAnimationFrame(tick);
+  requestAnimationFrame(loop);
 }
 
 function stopListening(){
@@ -259,7 +298,7 @@ function startRecordingTurn(){
       if(!r.ok){ transcriptEl.textContent=`⚠️ STT: ${j?.error||"error"}`; processingTurn=false; if(auto) setState(SM.LISTEN); return; }
       transcriptEl.textContent=j.transcript||"";
       replyEl.textContent="";
-      processingTurn=false; // allow VAD loop to barge-in during reply/speak
+      processingTurn=false;
       (modeSel.value==="stream"?chatStream:chatPlain)(j.transcript||"");
     }catch(e){
       transcriptEl.textContent="⚠️ STT error: "+e.message;
