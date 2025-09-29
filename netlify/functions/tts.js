@@ -14,7 +14,8 @@ function json(status, body) {
   };
 }
 
-exports.handler = async (event) => {
+exports.handler = async (event, ctx) => {
+  // CORS preflight
   if (event.httpMethod === "OPTIONS") {
     return {
       statusCode: 204,
@@ -28,18 +29,15 @@ exports.handler = async (event) => {
   }
   if (event.httpMethod !== "POST") return json(405, { error: "method_not_allowed" });
 
-  // Accept BOTH env var names
-  const ELEVEN_API_KEY =
-    process.env.ELEVEN_API_KEY ||
-    process.env.ELEVENLABS_API_KEY ||
-    "";
-
-  const DEFAULT_VOICE = (process.env.ELEVEN_VOICE_ID || "").trim();
+  // Accept either name
+  const ELEVEN_API_KEY = (process.env.ELEVEN_API_KEY || process.env.ELEVENLABS_API_KEY || "").trim();
+  const DEFAULT_VOICE  = (process.env.ELEVEN_VOICE_ID || "").trim();
 
   if (!ELEVEN_API_KEY) {
-    return json(500, { error: "missing_eleven_key", detail: "Set ELEVEN_API_KEY or ELEVENLABS_API_KEY in Netlify env (production context)." });
+    return json(500, { error: "missing_eleven_key", detail: "Set ELEVEN_API_KEY or ELEVENLABS_API_KEY in Netlify env (production)." });
   }
 
+  // Parse body
   let text = "", voiceId = "";
   try {
     const body = JSON.parse(event.body || "{}");
@@ -50,13 +48,9 @@ exports.handler = async (event) => {
   }
 
   if (!text) return json(400, { error: "missing_text" });
-  if (text.length > 5000) return json(413, { error: "text_too_long", detail: "Max 5000 chars." });
-
-  // Fallback to a public demo voice if none provided
-  if (!voiceId) voiceId = "21m00Tcm4TlvDq8ikWAM"; // Rachel
+  if (!voiceId) voiceId = "21m00Tcm4TlvDq8ikWAM"; // public demo "Rachel"
 
   const url = `https://api.elevenlabs.io/v1/text-to-speech/${encodeURIComponent(voiceId)}?optimize_streaming_latency=3&output_format=mp3_44100_128`;
-
   const payload = {
     text,
     model_id: "eleven_multilingual_v2",
@@ -67,7 +61,7 @@ exports.handler = async (event) => {
     const r = await fetch(url, {
       method: "POST",
       headers: {
-        "xi-api-key": ELEVEN_API_KEY,          // <-- correct header
+        "xi-api-key": ELEVEN_API_KEY,         // required header
         "Content-Type": "application/json",
         "Accept": "audio/mpeg",
       },
@@ -75,18 +69,23 @@ exports.handler = async (event) => {
     });
 
     if (!r.ok) {
-      // Pass through ElevenLabs error message so you see *why* (401, 403, etc.)
       const ct = r.headers.get("content-type") || "";
       const detail = ct.includes("application/json") ? await r.json().catch(() => null) : await r.text();
+      // Log upstream for diagnostics
+      console.error("[tts] upstream", r.status, { detail, voiceId });
       return json(r.status, { error: "eleven_error", detail, meta: { status: r.status, voiceId } });
     }
 
     const buf = Buffer.from(await r.arrayBuffer());
-    if (!buf || buf.length < 1000) return json(502, { error: "eleven_empty_audio", meta: { bytes: buf?.length || 0 } });
+    if (!buf || buf.length < 1000) {
+      console.error("[tts] empty audio", buf?.length);
+      return json(502, { error: "eleven_empty_audio", meta: { bytes: buf?.length || 0 } });
+    }
 
     const dataUrl = `data:audio/mpeg;base64,${buf.toString("base64")}`;
     return json(200, { audio: dataUrl, meta: { bytes: buf.length, voiceId } });
   } catch (e) {
+    console.error("[tts] exception", e);
     return json(502, { error: "tts_exception", detail: String(e.message || e) });
   }
 };
