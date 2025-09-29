@@ -1,5 +1,5 @@
 // netlify/functions/tts-health.js
-// GET -> shows masked env + probes ElevenLabs /v1/voices with the same key the function uses
+// GET -> masked env + live probe to /v1/voices using the exact key used by tts.js
 
 exports.handler = async () => {
   const rawA = process.env.ELEVEN_API_KEY || "";
@@ -25,13 +25,16 @@ exports.handler = async () => {
 
   return {
     statusCode: 200,
-    headers: { "Content-Type": "application/json", "Access-Control-Allow-Origin": "*" },
+    headers: {
+      "Content-Type": "application/json",
+      "Access-Control-Allow-Origin": "*",
+    },
     body: JSON.stringify({
       ELEVEN_API_KEY: mask(rawA),
       ELEVENLABS_API_KEY: mask(rawB),
       ELEVEN_VOICE_ID: voiceId ? `set (${voiceId.slice(0, 4)}… )` : "missing",
-      probe, // <- this is the important bit (what Eleven says about the key)
-      note: "Keys masked; probe hits ElevenLabs /v1/voices with the same key used by tts.js",
+      probe,
+      note: "Keys are masked; this only shows presence/length.",
     }),
   };
 };
