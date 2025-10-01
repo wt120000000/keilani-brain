@@ -2,206 +2,366 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
+    <title>Keilani • Voice Chat</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>Keilani — Live</title>
-    <meta http-equiv="Cache-Control" content="no-store" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' https://api.keilani.ai https://api.openai.com https://api.elevenlabs.io blob: data:; media-src 'self' blob: data:;"
+    />
     <style>
       :root {
-        color-scheme: dark;
+        --bg: #0f1220;
+        --panel: #14192b;
+        --muted: #8aa0b6;
+        --text: #e8f0ff;
+        --accent: #7bc4ff;
+        --ok: #2ecc71;
+        --warn: #f39c12;
+        --err: #ff5c5c;
+      }
+      * {
+        box-sizing: border-box;
       }
       body {
         margin: 0;
         font-family:
+          ui-sans-serif,
           system-ui,
           -apple-system,
           Segoe UI,
           Roboto,
-          Ubuntu,
-          Cantarell,
-          Noto Sans,
           Helvetica,
-          Arial,
-          "Apple Color Emoji",
-          "Segoe UI Emoji";
-        background: #0b0f14;
-        color: #e6edf3;
+          Arial;
+        background: var(--bg);
+        color: var(--text);
       }
-      .wrap {
-        max-width: 980px;
-        margin: 40px auto;
-        padding: 0 16px;
+      header {
+        padding: 14px 18px;
+        display: flex;
+        align-items: center;
+        gap: 12px;
+        background:
+          linear-gradient(
+            0deg,
+            rgba(255, 255, 255, 0.02),
+            rgba(255, 255, 255, 0.02)
+          ),
+          var(--panel);
+        position: sticky;
+        top: 0;
+        z-index: 5;
       }
-      h1 {
-        font-size: 20px;
-        margin: 0 0 20px;
-      }
-      .card {
-        background: #0f1620;
-        border: 1px solid #1e2837;
-        border-radius: 12px;
-        padding: 18px;
+      header h1 {
+        font-size: 16px;
+        font-weight: 700;
+        margin: 0;
+        opacity: 0.9;
       }
       .row {
         display: flex;
-        gap: 12px;
-        align-items: center;
+        gap: 8px;
         flex-wrap: wrap;
+        align-items: center;
       }
-      .row + .row {
-        margin-top: 12px;
-      }
-      .btn {
-        background: #1b2534;
-        color: #e6edf3;
-        border: 1px solid #304057;
+      button,
+      select,
+      input[type="text"] {
+        background: #0e1330;
+        color: var(--text);
+        border: 1px solid #263150;
         border-radius: 10px;
-        padding: 10px 14px;
+        padding: 8px 12px;
+      }
+      button {
         cursor: pointer;
+        transition:
+          0.2s border-color,
+          0.2s background;
       }
-      .btn.primary {
-        background: #2552d1;
-        border-color: #2f64ff;
+      button:hover {
+        border-color: #34508e;
       }
-      .btn:disabled {
-        opacity: 0.55;
-        cursor: not-allowed;
+      button.primary {
+        background: #1a3c6a;
+        border-color: #2b76c5;
       }
-      input[type="text"],
-      select {
-        background: #101827;
-        color: #e6edf3;
-        border: 1px solid #263246;
+      main {
+        max-width: 980px;
+        margin: 20px auto;
+        padding: 0 16px;
+        display: grid;
+        gap: 16px;
+      }
+      .card {
+        background: var(--panel);
+        border: 1px solid #1f2744;
+        border-radius: 16px;
+        padding: 14px;
+      }
+      .split {
+        display: grid;
+        gap: 12px;
+        grid-template-columns: 1fr 1fr;
+      }
+      textarea {
+        width: 100%;
+        min-height: 110px;
+        background: #0b1026;
+        color: var(--text);
+        border: 1px solid #243157;
         border-radius: 10px;
-        padding: 10px 12px;
-        min-width: 260px;
-      }
-      .pill {
-        font-size: 12px;
-        background: #0f1a28;
-        border: 1px solid #263246;
-        border-radius: 999px;
-        padding: 6px 10px;
-      }
-      .grow {
-        flex: 1 1 auto;
+        padding: 10px;
       }
       .mono {
         font-family:
-          ui-monospace, SFMono-Regular, Menlo, Consolas, "Liberation Mono",
-          monospace;
+          ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas,
+          "Liberation Mono", monospace;
       }
-      .small {
+      .muted {
+        color: var(--muted);
+      }
+      .green {
+        color: var(--ok);
+      }
+      .amber {
+        color: var(--warn);
+      }
+      .red {
+        color: var(--err);
+      }
+      .hud {
+        position: fixed;
+        right: 12px;
+        bottom: 12px;
+        background: #0b1124d0;
+        border: 1px solid #1d2a4f;
+        border-radius: 12px;
+        padding: 8px 10px;
         font-size: 12px;
-        opacity: 0.9;
+        line-height: 1.25;
+        min-width: 220px;
+        backdrop-filter: blur(4px);
       }
-      #reply,
-      #transcript {
-        white-space: pre-wrap;
-        word-break: break-word;
-        min-height: 48px;
-      }
-      .slider {
-        display: flex;
-        align-items: center;
+      .grid2 {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
         gap: 10px;
       }
-      .slider input {
-        width: 220px;
+      .adv {
+        display: grid;
+        gap: 10px;
+      }
+      .adv label {
+        font-size: 12px;
+        color: var(--muted);
+        display: flex;
+        justify-content: space-between;
+      }
+      .adv input[type="range"] {
+        width: 100%;
+      }
+      .pill {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        padding: 4px 8px;
+        border-radius: 999px;
+        background: #0d1430;
+        border: 1px solid #24335c;
       }
       audio {
         width: 100%;
-        margin-top: 6px;
+        margin-top: 8px;
+      }
+      .badge {
+        padding: 2px 8px;
+        border-radius: 999px;
+        border: 1px solid #2c3f73;
+        background: #0d1636;
+        font-size: 12px;
+      }
+      .banner {
+        padding: 8px 10px;
+        border: 1px solid #3b2a1b;
+        background: #20140a;
+        color: #ffd7a6;
+        border-radius: 10px;
+        font-size: 13px;
+        display: none;
       }
     </style>
   </head>
   <body>
-    <div class="wrap">
-      <h1>Keilani — Live</h1>
+    <header>
+      <h1>Keilani • Voice Chat</h1>
+      <span id="status" class="pill">idle</span>
+      <span id="state" class="pill">state: idle</span>
+      <span id="lat" class="pill mono">•</span>
+      <span class="pill mono"
+        >mode:
+        <select id="mode">
+          <option value="stream" selected>stream</option>
+          <option value="plain">plain</option>
+        </select>
+      </span>
+      <span class="pill mono"
+        >TTS:
+        <select id="ttsEngine">
+          <option>ElevenLabs</option>
+          <option>browser</option>
+        </select>
+      </span>
+      <span class="pill mono"
+        >voiceId:
+        <input id="voiceId" placeholder="(optional)" size="16" />
+      </span>
+    </header>
+
+    <main>
+      <div class="card">
+        <div class="row">
+          <button id="start" class="primary">▶️ Start chat</button>
+          <button id="stop">⏹️ Stop</button>
+          <button id="ptt">🎙️ Hold to talk</button>
+          <button id="auto">🔁 Auto talk: Off</button>
+          <span id="errBanner" class="banner"></span>
+        </div>
+        <div class="row" style="margin-top: 8px">
+          <select id="micSelect" title="Microphone"></select>
+          <span class="badge">output device: system default</span>
+        </div>
+      </div>
+
+      <div class="card split">
+        <div>
+          <h3>Transcript</h3>
+          <div id="transcript" class="mono muted">–</div>
+          <audio id="lastAudio" controls></audio>
+        </div>
+        <div>
+          <h3>Reply</h3>
+          <div id="reply" class="mono"></div>
+        </div>
+      </div>
 
       <div class="card">
         <div class="row">
-          <button id="start" class="btn primary">▶ Start chat</button>
-          <button id="stop" class="btn">⏸ Stop</button>
-          <span id="state" class="pill">state: idle</span>
-          <span id="status" class="pill">idle</span>
-          <span id="lat" class="pill"></span>
-        </div>
-
-        <div class="row">
-          <label class="small">TTS</label>
-          <select id="ttsEngine">
-            <option>ElevenLabs</option>
-            <option>browser</option>
-          </select>
           <input
-            id="voiceId"
+            id="message"
             type="text"
-            placeholder="ElevenLabs voiceId (optional)"
+            placeholder="Type and ⌘/Ctrl+Enter to send…"
+            style="flex: 1"
           />
-          <select id="mode" style="display: none">
-            <option selected>Stream (SSE)</option>
-            <option>Plain</option>
-          </select>
-          <span class="small mono" id="liveMeters"></span>
-        </div>
-
-        <div class="row slider">
-          <div class="small">VAD</div>
-          <input id="vad" type="range" min="0" max="100" value="35" />
-          <div class="small">more ← sensitive → less</div>
-          <div style="width: 24px"></div>
-          <div class="small">Silence (ms)</div>
-          <input
-            id="silence"
-            type="number"
-            min="200"
-            max="4000"
-            step="50"
-            value="700"
-          />
-        </div>
-
-        <div class="row">
-          <div class="grow">
-            <div class="small">Reply</div>
-            <div
-              id="reply"
-              class="card"
-              style="padding: 12px; margin-top: 6px"
-            ></div>
-          </div>
-        </div>
-
-        <div class="row">
-          <div class="grow">
-            <div class="small">Last transcript</div>
-            <div
-              id="transcript"
-              class="card"
-              style="padding: 12px; margin-top: 6px"
-            ></div>
-          </div>
-        </div>
-
-        <div class="row">
-          <div class="grow">
-            <div class="small">Last audio</div>
-            <audio id="lastAudio" controls></audio>
-          </div>
-        </div>
-
-        <div class="small" style="margin-top: 8px">
-          Tip: Click <span class="mono">Start chat</span> and speak. Barge-in is
-          enabled. <span class="mono">Stop</span> pauses listening.
+          <button id="send">Send</button>
         </div>
       </div>
+
+      <div class="card">
+        <details id="advToggle">
+          <summary>Advanced controls</summary>
+          <div class="adv" style="margin-top: 10px">
+            <div class="grid2">
+              <div>
+                <label
+                  >Silence timeout
+                  <span><code id="silenceOut">700</code> ms</span></label
+                >
+                <input
+                  id="silence"
+                  type="range"
+                  min="200"
+                  max="4000"
+                  step="50"
+                  value="700"
+                />
+              </div>
+              <div>
+                <label
+                  >VAD threshold <span><code id="vadOut">35</code></span></label
+                >
+                <input
+                  id="vad"
+                  type="range"
+                  min="10"
+                  max="100"
+                  step="1"
+                  value="35"
+                />
+              </div>
+            </div>
+            <div class="grid2">
+              <div>
+                <label
+                  >Onset frames <span><code id="onsetOut">3</code></span></label
+                >
+                <input
+                  id="onset"
+                  type="range"
+                  min="1"
+                  max="10"
+                  step="1"
+                  value="3"
+                />
+              </div>
+              <div>
+                <label
+                  >Output margin
+                  <span><code id="marginOut">0.008</code></span></label
+                >
+                <input
+                  id="margin"
+                  type="range"
+                  min="0"
+                  max="0.05"
+                  step="0.001"
+                  value="0.008"
+                />
+              </div>
+            </div>
+            <div class="grid2">
+              <div>
+                <label
+                  >Start TTS after
+                  <span><code id="chunkOut">220</code> chars</span></label
+                >
+                <input
+                  id="ttsChunk"
+                  type="range"
+                  min="60"
+                  max="400"
+                  step="10"
+                  value="220"
+                />
+              </div>
+              <div>
+                <label
+                  >Partial TTS
+                  <span id="partialOut" class="amber">on</span></label
+                >
+                <select id="partialTts">
+                  <option value="on" selected>on</option>
+                  <option value="off">off</option>
+                </select>
+              </div>
+            </div>
+            <div class="row" style="margin-top: 6px">
+              <button id="resetAdv">Reset to defaults</button>
+            </div>
+          </div>
+        </details>
+      </div>
+    </main>
+
+    <div class="hud mono" id="hud">
+      <div><b>HUD</b></div>
+      <div>micRMS: <span id="hudMic">0.000</span></div>
+      <div>outRMS: <span id="hudOut">0.000</span></div>
+      <div>state: <span id="hudState">idle</span></div>
+      <div>latency: <span id="hudLat">–</span></div>
+      <div>last: <span id="hudLast">ok</span></div>
     </div>
 
-    <!-- IMPORTANT: the file must be in public/js/ -->
-    <script
-      src="/js/keilaniStream.js?v=12"
-      type="text/javascript"
-      defer
-    ></script>
+    <!-- keep the JS on its own URL (Netlify will serve with correct MIME) -->
+    <script src="/js/keilaniStream.js" defer></script>
   </body>
 </html>
