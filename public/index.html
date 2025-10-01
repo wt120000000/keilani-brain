@@ -4,6 +4,7 @@
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Keilani — Live</title>
+    <meta http-equiv="Cache-Control" content="no-store" />
     <style>
       :root {
         color-scheme: dark;
@@ -33,9 +34,6 @@
       h1 {
         font-size: 20px;
         margin: 0 0 20px;
-        display: flex;
-        align-items: center;
-        gap: 10px;
       }
       .card {
         background: #0f1620;
@@ -110,13 +108,6 @@
       .slider input {
         width: 220px;
       }
-      footer {
-        margin-top: 14px;
-        display: flex;
-        gap: 10px;
-        align-items: center;
-        flex-wrap: wrap;
-      }
       audio {
         width: 100%;
         margin-top: 6px;
@@ -133,7 +124,7 @@
           <button id="stop" class="btn">⏸ Stop</button>
           <span id="state" class="pill">state: idle</span>
           <span id="status" class="pill">idle</span>
-          <span id="lat" class="pill"> </span>
+          <span id="lat" class="pill"></span>
         </div>
 
         <div class="row">
@@ -147,7 +138,6 @@
             type="text"
             placeholder="ElevenLabs voiceId (optional)"
           />
-          <!-- hidden mode selector (always stream) -->
           <select id="mode" style="display: none">
             <option selected>Stream (SSE)</option>
             <option>Plain</option>
@@ -160,7 +150,7 @@
           <input id="vad" type="range" min="0" max="100" value="35" />
           <div class="small">more ← sensitive → less</div>
           <div style="width: 24px"></div>
-          <div class="small">Silence <span class="small mono">(ms)</span></div>
+          <div class="small">Silence (ms)</div>
           <input
             id="silence"
             type="number"
@@ -200,16 +190,18 @@
           </div>
         </div>
 
-        <footer class="small">
-          <span
-            >Tip: Press <span class="mono">Start chat</span> and just speak;
-            barge-in is enabled. Use <span class="mono">Stop</span> to pause
-            listening.</span
-          >
-        </footer>
+        <div class="small" style="margin-top: 8px">
+          Tip: Click <span class="mono">Start chat</span> and speak. Barge-in is
+          enabled. <span class="mono">Stop</span> pauses listening.
+        </div>
       </div>
     </div>
 
-    <script src="keilaniStream.js?v=11"></script>
+    <!-- IMPORTANT: the file must be in public/js/ -->
+    <script
+      src="/js/keilaniStream.js?v=12"
+      type="text/javascript"
+      defer
+    ></script>
   </body>
 </html>

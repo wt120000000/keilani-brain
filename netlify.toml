@@ -57,7 +57,7 @@
 
 # JS anywhere (not only /js/) — helpful if you ever move the file.
 [[headers]]
-  for = "/*.js"
+  for = "/js/*.js"
   [headers.values]
     Content-Type = "application/javascript; charset=UTF-8"
     Cache-Control = "public, max-age=0, must-revalidate"
