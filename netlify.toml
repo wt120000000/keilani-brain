@@ -6,72 +6,58 @@
 [functions]
   node_bundler = "esbuild"
 
-# ---------- API routes ----------
+# JSON chat endpoint
 [[redirects]]
   from = "/api/chat"
   to   = "/.netlify/functions/chat"
   status = 200
 
+# Local/dev fallback to Node streaming
 [[redirects]]
   from = "/api/chat-stream"
   to   = "/.netlify/functions/stream-chat"
   status = 200
 
+# Map to Edge streaming in prod
 [[edge_functions]]
   function = "chat-stream"
   path = "/api/chat-stream"
 
+# Health check
 [[redirects]]
   from = "/api/health"
   to   = "/.netlify/functions/health"
   status = 200
 
-# ---------- Static assets must never be rewritten ----------
-# This keeps query-stringed assets (e.g. ?v=11) from getting rewritten.
-# Netlify serves real files first, but if any other catch-all exists (e.g. in _redirects),
-# these entries ensure assets win.
+# Supabase logging
 [[redirects]]
-  from = "/js/*"
-  to   = "/js/:splat"
+  from = "/api/log"
+  to   = "/.netlify/functions/log-turn"
   status = 200
 
-[[redirects]]
-  from = "/assets/*"
-  to   = "/assets/:splat"
-  status = 200
-
-# Optional: if you have other folders with static bundles, add them here too.
-
-# ---------- SPA fallback (LAST) ----------
-# Only hits when the requested path is NOT a real file.
-[[redirects]]
-  from = "/*"
-  to   = "/index.html"
-  status = 200
-
-# ---------- Helpful headers ----------
+# Helpful headers
 [[headers]]
   for = "/*.html"
   [headers.values]
     Cache-Control = "no-store, must-revalidate"
-
-# JS anywhere (not only /js/) — helpful if you ever move the file.
-[[headers]]
-  for = "/js/*.js"
-  [headers.values]
-    Content-Type = "application/javascript; charset=UTF-8"
-    Cache-Control = "public, max-age=0, must-revalidate"
 
 [[headers]]
   for = "/assets/*"
   [headers.values]
     Cache-Control = "max-age=30, must-revalidate"
 
-# CSP + feature headers
+# JS files (served with correct MIME)
+[[headers]]
+  for = "/js/*.js"
+  [headers.values]
+    Content-Type = "application/javascript; charset=UTF-8"
+    Cache-Control = "public, max-age=0, must-revalidate"
+
+# CSP – allow jsdelivr (already), plus blob: media for audio, and data:
 [[headers]]
   for = "/*"
   [headers.values]
-    Content-Security-Policy = "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' https://api.keilani.ai https://api.openai.com https://api.elevenlabs.io blob: data:; media-src 'self' blob: data:; frame-ancestors 'self'; base-uri 'self'; form-action 'self'"
+    Content-Security-Policy = "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' https://api.keilani.ai https://api.openai.com https://api.elevenlabs.io https://*.supabase.co blob: data:; media-src 'self' blob: data:; frame-ancestors 'self'; base-uri 'self'; form-action 'self'"
     Access-Control-Allow-Origin = "*"
     Permissions-Policy = "camera=(self), microphone=(self), geolocation=()"
     X-Frame-Options = "SAMEORIGIN"

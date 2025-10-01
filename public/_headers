@@ -12,3 +12,11 @@
 
 /*.(png|svg|jpg|jpeg|webp)
   Cache-Control: public, max-age=604800, immutable
+
+/styles.css
+  Content-Type: text/css; charset=UTF-8
+  Cache-Control: public, max-age=0, must-revalidate
+
+/keilaniStream.js
+  Content-Type: application/javascript; charset=UTF-8
+  Cache-Control: public, max-age=0, must-revalidate
