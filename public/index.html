@@ -1,109 +1,119 @@
 ﻿<!doctype html>
 <html lang="en">
-<head>
-  <meta charset="utf-8" />
-  <title>Keilani • Live Voice Chat</title>
-  <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <meta http-equiv="Cache-Control" content="no-store, must-revalidate" />
-  <link rel="stylesheet" href="/styles.css?v=20" />
-</head>
-<body>
-  <header class="topbar">
-    <h1>Keilani • Live Voice Chat</h1>
-    <div class="hud">
-      <span id="state"  class="hud-pill">state: idle</span>
-      <span id="status" class="hud-pill">idle</span>
-      <span id="lat"    class="hud-pill">• first — ms • total — ms</span>
-    </div>
-  </header>
-
-  <main class="wrap">
-    <section class="panel">
-      <h2>Controls</h2>
-
-      <div class="row">
-        <button id="start" class="btn">▶ Start chat</button>
-        <button id="stop"  class="btn btn-secondary" disabled>■ Stop</button>
-        <button id="ptt"   class="btn btn-tertiary">🎤 Hold to talk</button>
-        <label class="chk">
-          <input id="auto" type="checkbox" /> Auto talk
-        </label>
+  <head>
+    <meta charset="utf-8" />
+    <title>Keilani • Live Voice Chat</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="Cache-Control" content="no-store, must-revalidate" />
+    <link rel="stylesheet" href="/styles.css?v=20" />
+  </head>
+  <body>
+    <header class="topbar">
+      <h1>Keilani • Live Voice Chat</h1>
+      <div class="hud">
+        <span id="state" class="hud-pill">state: idle</span>
+        <span id="status" class="hud-pill">idle</span>
+        <span id="lat" class="hud-pill">• first — ms • total — ms</span>
       </div>
+    </header>
 
-      <div class="row">
-        <label>
-          Mode
-          <select id="mode">
-            <option value="stream" selected>Stream</option>
-            <option value="plain">Plain</option>
-          </select>
-        </label>
+    <main class="wrap">
+      <section class="panel">
+        <h2>Controls</h2>
 
-        <label>
-          TTS
-          <select id="ttsEngine">
-            <option value="ElevenLabs" selected>ElevenLabs</option>
-            <option value="browser">Browser (fallback)</option>
-          </select>
-        </label>
-
-        <label class="grow">
-          ElevenLabs voiceId
-          <input id="voiceId" placeholder="EXAVITQu4vr4xnSDxMaL" />
-        </label>
-      </div>
-
-      <div class="row">
-        <label class="grow">
-          Microphone
-          <select id="mic"></select>
-        </label>
-
-        <label class="grow">
-          Speaker (optional)
-          <select id="spk"></select>
-        </label>
-      </div>
-
-      <div class="row">
-        <label class="grow">
-          VAD sensitivity
-          <input id="vad" type="range" min="0" max="100" value="35" />
-        </label>
-
-        <label class="grow">
-          Silence to stop (ms)
-          <input id="silence" type="number" min="200" max="4000" value="800" />
-        </label>
-      </div>
-    </section>
-
-    <section class="panel">
-      <h2>Conversation</h2>
-
-      <div class="row">
-        <input id="message" class="grow" placeholder="Type a message (Ctrl/Cmd+Enter)"/>
-        <button id="send" class="btn">Send</button>
-      </div>
-
-      <div class="textcols">
-        <div class="col">
-          <h3>Transcript (you)</h3>
-          <pre id="transcript" class="box">—</pre>
+        <div class="row">
+          <button id="start" class="btn">▶ Start chat</button>
+          <button id="stop" class="btn btn-secondary" disabled>■ Stop</button>
+          <button id="ptt" class="btn btn-tertiary">🎤 Hold to talk</button>
+          <label class="chk">
+            <input id="auto" type="checkbox" /> Auto talk
+          </label>
         </div>
-        <div class="col">
-          <h3>Reply (Keilani)</h3>
-          <pre id="reply" class="box"></pre>
+
+        <div class="row">
+          <label>
+            Mode
+            <select id="mode">
+              <option value="stream" selected>Stream</option>
+              <option value="plain">Plain</option>
+            </select>
+          </label>
+
+          <label>
+            TTS
+            <select id="ttsEngine">
+              <option value="ElevenLabs" selected>ElevenLabs</option>
+              <option value="browser">Browser (fallback)</option>
+            </select>
+          </label>
+
+          <label class="grow">
+            ElevenLabs voiceId
+            <input id="voiceId" placeholder="EXAVITQu4vr4xnSDxMaL" />
+          </label>
         </div>
-      </div>
 
-      <div class="row">
-        <audio id="lastAudio" controls></audio>
-      </div>
-    </section>
-  </main>
+        <div class="row">
+          <label class="grow">
+            Microphone
+            <select id="mic"></select>
+          </label>
 
-  <!-- IMPORTANT: js lives under /js -->
-  <script src="/js/keilaniStream.v20.js" defer></script>
-</body>
+          <label class="grow">
+            Speaker (optional)
+            <select id="spk"></select>
+          </label>
+        </div>
+
+        <div class="row">
+          <label class="grow">
+            VAD sensitivity
+            <input id="vad" type="range" min="0" max="100" value="35" />
+          </label>
+
+          <label class="grow">
+            Silence to stop (ms)
+            <input
+              id="silence"
+              type="number"
+              min="200"
+              max="4000"
+              value="800"
+            />
+          </label>
+        </div>
+      </section>
+
+      <section class="panel">
+        <h2>Conversation</h2>
+
+        <div class="row">
+          <input
+            id="message"
+            class="grow"
+            placeholder="Type a message (Ctrl/Cmd+Enter)"
+          />
+          <button id="send" class="btn">Send</button>
+        </div>
+
+        <div class="textcols">
+          <div class="col">
+            <h3>Transcript (you)</h3>
+            <pre id="transcript" class="box">—</pre>
+          </div>
+          <div class="col">
+            <h3>Reply (Keilani)</h3>
+            <pre id="reply" class="box"></pre>
+          </div>
+        </div>
+
+        <div class="row">
+          <audio id="lastAudio" controls></audio>
+        </div>
+      </section>
+    </main>
+
+    <!-- updated to v=21 -->
+    <script src="/js/keilaniStream.v21.js" defer></script>
+  </body>
 </html>
