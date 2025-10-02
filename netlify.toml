@@ -1,7 +1,7 @@
 [build]
-  publish         = "public"
-  functions       = "netlify/functions"
-  edge_functions  = "netlify/edge-functions"
+  publish = "public"
+  functions = "netlify/functions"
+  edge_functions = "netlify/edge-functions"
 
 [functions]
   node_bundler = "esbuild"
@@ -12,52 +12,53 @@
   to   = "/.netlify/functions/chat"
   status = 200
 
-# Local/dev fallback to Node streaming
+# Stream (fallback to node)
 [[redirects]]
   from = "/api/chat-stream"
   to   = "/.netlify/functions/stream-chat"
   status = 200
 
-# Map to Edge streaming in prod
+# Edge streaming in prod
 [[edge_functions]]
   function = "chat-stream"
   path = "/api/chat-stream"
 
-# Health check
+# Health
 [[redirects]]
   from = "/api/health"
   to   = "/.netlify/functions/health"
   status = 200
 
-# Supabase logging
-[[redirects]]
-  from = "/api/log"
-  to   = "/.netlify/functions/log-turn"
-  status = 200
-
-# Helpful headers
+# HTML shouldn't be cached
 [[headers]]
   for = "/*.html"
   [headers.values]
     Cache-Control = "no-store, must-revalidate"
 
+# Assets
 [[headers]]
   for = "/assets/*"
   [headers.values]
     Cache-Control = "max-age=30, must-revalidate"
 
-# JS files (served with correct MIME)
+# JS anywhere (root files like /keilaniStream.v20.js AND /js/*.js)
+[[headers]]
+  for = "/*.js"
+  [headers.values]
+    Content-Type = "application/javascript; charset=UTF-8"
+    Cache-Control = "public, max-age=0, must-revalidate"
+
 [[headers]]
   for = "/js/*.js"
   [headers.values]
     Content-Type = "application/javascript; charset=UTF-8"
     Cache-Control = "public, max-age=0, must-revalidate"
 
-# CSP – allow jsdelivr (already), plus blob: media for audio, and data:
+# CSP etc.
 [[headers]]
   for = "/*"
   [headers.values]
-    Content-Security-Policy = "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' https://api.keilani.ai https://api.openai.com https://api.elevenlabs.io https://*.supabase.co blob: data:; media-src 'self' blob: data:; frame-ancestors 'self'; base-uri 'self'; form-action 'self'"
+    Content-Security-Policy = "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' https://api.keilani.ai https://api.openai.com https://api.elevenlabs.io blob: data:; media-src 'self' blob: data:; frame-ancestors 'self'; base-uri 'self'; form-action 'self'"
     Access-Control-Allow-Origin = "*"
     Permissions-Policy = "camera=(self), microphone=(self), geolocation=()"
     X-Frame-Options = "SAMEORIGIN"
