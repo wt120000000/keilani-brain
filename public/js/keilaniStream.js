@@ -1,40 +1,18 @@
-/* keilaniStream.js
- * Live chat + voice loop with output-aware VAD and barge-in.
- * Works with:
- *  - /.netlify/functions/stt  (POST {audioBase64})
- *  - /.netlify/functions/tts  (POST {text, voiceId?})
- *  - /api/chat                 (plain JSON reply)
- *  - /api/chat-stream          (SSE streaming)
- *
- * UI elements by id (already in index.html):
- *  send, stop, ptt, auto, message, reply, transcript, lastAudio,
- *  mode, ttsEngine, voiceId, vad, silence, state, status, lat
- */
+/* keilaniStream.js (v19) */
 
-/* ---------- DOM ---------- */
-const $ = (id) => document.getElementById(id);
+const q = (id) => document.getElementById(id);
+const on = (el, ev, fn, opts) => el && el.addEventListener(ev, fn, opts);
+const setTxt = (el, s) => { if (el) el.textContent = s; };
+const clamp = (n, lo, hi) => Math.max(lo, Math.min(hi, n));
+const now = () => performance.now();
 
-const sendBtn      = $("send");
-const stopBtn      = $("stop");
-const pttBtn       = $("ptt");
-const autoBtn      = $("auto");
+let startBtn, stopBtn, pttBtn, autoChk;
+let sendBtn, msgEl;
+let replyEl, transcriptEl, lastAudioEl;
+let modeSel, ttsSel, voiceIdEl;
+let vadEl, silenceEl, hudState, hudStatus, hudLat;
+let micSel, spkSel;
 
-const msgEl        = $("message");
-const replyEl      = $("reply");
-const transcriptEl = $("transcript");
-const lastAudioEl  = $("lastAudio");
-
-const modeSel      = $("mode");          // "stream" | "plain"
-const ttsSel       = $("ttsEngine");     // "ElevenLabs" | "browser"
-const voiceIdEl    = $("voiceId");       // optional
-
-const vadEl        = $("vad");           // 0..100 slider (we map to threshold)
-const silenceEl    = $("silence");       // ms
-const stateEl      = $("state");
-const statusEl     = $("status");
-const latEl        = $("lat");
-
-/* ---------- State ---------- */
 const SM = { IDLE:"idle", LISTEN:"listening", REC:"recording", PROCESS:"processing", REPLY:"replying", SPEAK:"speaking" };
 let sm = SM.IDLE;
 let auto = false;
@@ -58,20 +36,22 @@ let selectedVoice = null;
 let speakStartedAt = 0;
 
 let streamCtl = null;
-let streamOn  = false;
+let streamOn = false;
 
-/* ---------- Tunables (more permissive than before) ---------- */
-const REQUIRED_ONSET_FRAMES = 3;     // how many animation frames mic must be hot to "start talking"
-const OUTPUT_MARGIN         = 0.008; // mic must exceed output by this RMS when audio is playing
-const TTS_GRACE_MS          = 200;   // ignore mic for a short grace after TTS begins
+const REQUIRED_ONSET_FRAMES = 3;
+const OUTPUT_MARGIN         = 0.008;
+const TTS_GRACE_MS          = 220;
 
-/* ---------- Helpers ---------- */
-const setState   = (s) => { sm = s; stateEl.textContent  = "state: " + s; };
-const setStatus  = (s) => { statusEl.firstChild.nodeValue = s + " "; };
-const setLatency = (first, total) => { latEl.textContent = `${first!=null?`• first ${first} ms `:""}${total!=null?`• total ${total} ms`:""}`; };
+function setState(s){ sm = s; setTxt(hudState, `state: ${s}`); }
+function setStatus(s){ if (!hudStatus) return; hudStatus.firstChild ? hudStatus.firstChild.nodeValue = s + " " : setTxt(hudStatus, s); }
+function setLatency(first, total){
+  if (!hudLat) return;
+  const a = (first!=null) ? `• first ${first} ms ` : "";
+  const b = (total!=null) ? `• total ${total} ms` : "";
+  setTxt(hudLat, `${a}${b}` || "—");
+}
 
 function ema(prev, next, alpha){ return prev == null ? next : alpha*next + (1-alpha)*prev; }
-
 function rmsFromAnalyser(an){
   if (!an) return 0;
   const buf = new Uint8Array(an.fftSize);
@@ -80,55 +60,102 @@ function rmsFromAnalyser(an){
   for (let i=0;i<buf.length;i++){ const v=(buf[i]-128)/128; sum += v*v; }
   return Math.sqrt(sum / buf.length);
 }
-
 function blobToDataUrl(blob){
   return new Promise(res => { const fr = new FileReader(); fr.onloadend = ()=>res(fr.result); fr.readAsDataURL(blob); });
 }
 
-/* ---------- Audio I/O ---------- */
+async function enumerateDevices(){
+  try{
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    const mics = devices.filter(d=>d.kind==="audioinput");
+    const outs = devices.filter(d=>d.kind==="audiooutput");
+
+    if (micSel){
+      const current = micSel.value;
+      micSel.innerHTML = "";
+      for (const d of mics){
+        const opt = document.createElement("option");
+        opt.value = d.deviceId || "";
+        opt.textContent = d.label || `Microphone ${micSel.length+1}`;
+        micSel.appendChild(opt);
+      }
+      if (current) micSel.value = current;
+    }
+    if (spkSel){
+      const current = spkSel.value;
+      spkSel.innerHTML = "";
+      for (const d of outs){
+        const opt = document.createElement("option");
+        opt.value = d.deviceId || "";
+        opt.textContent = d.label || `Speaker ${spkSel.length+1}`;
+        spkSel.appendChild(opt);
+      }
+      if (current) spkSel.value = current;
+    }
+  }catch(e){
+    console.warn("enumerateDevices()", e);
+  }
+}
+
 async function ensureMic(){
-  if (mediaStream) return;
-  mediaStream = await navigator.mediaDevices.getUserMedia({
-    audio: { echoCancellation:true, noiseSuppression:true, autoGainControl:true }
-  });
-  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  // Don’t ever touch micSel without guards
+  const chosenId = (micSel && typeof micSel.value === "string" && micSel.value.length) ? micSel.value : undefined;
+
+  const constraints = {
+    audio: {
+      ...(chosenId ? { deviceId: { exact: chosenId } } : {}),
+      echoCancellation: true,
+      noiseSuppression: true,
+      autoGainControl: true
+    }
+  };
+
+  // Close previous
+  if (mediaStream){
+    try { mediaStream.getTracks().forEach(t=>t.stop()); } catch {}
+    mediaStream = null;
+  }
+
+  mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
+
+  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+
   micSource = audioCtx.createMediaStreamSource(mediaStream);
   micAnalyser = audioCtx.createAnalyser();
   micAnalyser.fftSize = 2048;
   micSource.connect(micAnalyser);
+
+  if (spkSel && lastAudioEl && typeof lastAudioEl.setSinkId === "function" && spkSel.value){
+    try { await lastAudioEl.setSinkId(spkSel.value); } catch(e){ console.warn("setSinkId", e); }
+  }
 }
 
 function wireOutputAnalyser(audioEl){
-  if (!audioCtx) return;
+  if (!audioCtx || !audioEl) return;
   try {
     outSource = audioCtx.createMediaElementSource(audioEl);
     outAnalyser = audioCtx.createAnalyser();
     outAnalyser.fftSize = 2048;
     outSource.connect(outAnalyser);
-    outSource.connect(audioCtx.destination); // so we hear it
-  } catch {
-    // Safari throws if you reuse a MediaElementSource; safe to ignore
-  }
+    outSource.connect(audioCtx.destination);
+  } catch { /* one MediaElementSource per element limit */ }
 }
 
 function stopAudio(){
   if (currentAudio){
     try { currentAudio.pause(); } catch {}
-    currentAudio.src = "";
   }
   currentAudio = null;
   outIsPlaying = false;
 }
 
-/* ---------- TTS ---------- */
 async function speak(text){
-  if (!text) { if (auto) startListening(); else setState(SM.IDLE); return; }
+  if (!text){ if (auto) startListening(); else setState(SM.IDLE); return; }
 
   setState(SM.SPEAK);
-  speakStartedAt = performance.now();
+  speakStartedAt = now();
 
-  // Browser TTS fallback
-  if (ttsSel.value === "browser"){
+  if (ttsSel && ttsSel.value === "browser"){
     if (!("speechSynthesis" in window)) { if (auto) startListening(); else setState(SM.IDLE); return; }
     const u = new SpeechSynthesisUtterance(text);
     if (selectedVoice) u.voice = selectedVoice;
@@ -139,28 +166,43 @@ async function speak(text){
     return;
   }
 
-  // ElevenLabs (server function)
   try {
+    const body = {
+      text,
+      voiceId: (voiceIdEl && voiceIdEl.value ? voiceIdEl.value.trim() : undefined) || undefined,
+      model_id: "eleven_turbo_v2"
+    };
     const r = await fetch("/.netlify/functions/tts", {
       method: "POST",
       headers: { "Content-Type":"application/json" },
-      body: JSON.stringify({ text, voiceId: (voiceIdEl.value || "").trim() || undefined })
+      body: JSON.stringify(body)
     });
-    const data = await r.json().catch(()=> ({}));
-    if (!r.ok || !data?.audio) {
-      console.warn("TTS error:", data);
-      // Don’t stall the loop if TTS fails
-      if (auto) startListening(); else setState(SM.IDLE);
+
+    let data = null;
+    try { data = await r.clone().json(); } catch {}
+    if (!r.ok || !data || !data.audio){
+      console.warn("TTS fallback:", { http: r.status, data });
+      if (ttsSel && ttsSel.value !== "browser" && "speechSynthesis" in window){
+        const u = new SpeechSynthesisUtterance(text);
+        u.onstart = () => { outIsPlaying = true; };
+        u.onend   = () => { outIsPlaying = false; if (auto) startListening(); else setState(SM.IDLE); };
+        window.speechSynthesis.cancel();
+        window.speechSynthesis.speak(u);
+      } else {
+        if (auto) startListening(); else setState(SM.IDLE);
+      }
       return;
     }
+
     if (typeof data.audio === "string" && data.audio.startsWith("data:audio")){
-      currentAudio = new Audio(data.audio);
+      currentAudio = new Audio();
+      currentAudio.src = data.audio;
       wireOutputAnalyser(currentAudio);
       currentAudio.addEventListener("playing", ()=>{ outIsPlaying=true; });
       currentAudio.addEventListener("pause",   ()=>{ outIsPlaying=false; });
       currentAudio.addEventListener("ended",   ()=>{ outIsPlaying=false; if (auto) startListening(); else setState(SM.IDLE); });
       try { await currentAudio.play(); } catch { outIsPlaying=false; if (auto) startListening(); else setState(SM.IDLE); }
-      lastAudioEl.src = data.audio;
+      if (lastAudioEl && data.audio.startsWith("data:audio")) lastAudioEl.src = data.audio;
     } else {
       if (auto) startListening(); else setState(SM.IDLE);
     }
@@ -170,11 +212,9 @@ async function speak(text){
   }
 }
 
-/* ---------- STT turn ---------- */
 function startRecordingTurn(){
   if (!mediaStream) return;
 
-  // barge-in: stop anything ongoing
   abortStream();
   stopAudio();
 
@@ -188,14 +228,14 @@ function startRecordingTurn(){
   mediaRecorder.onstop = async () => {
     const blob = new Blob(chunks, { type: mime || "application/octet-stream" });
     if (!blob || blob.size < 5000) {
-      transcriptEl.textContent = "⚠️ Speak a bit longer.";
+      setTxt(transcriptEl, "⚠️ Speak a bit longer.");
       processingTurn = false;
       if (auto) setState(SM.LISTEN);
       return;
     }
 
     const dataUrl = await blobToDataUrl(blob);
-    if (typeof dataUrl === "string" && dataUrl.startsWith("data:audio")) {
+    if (typeof dataUrl === "string" && dataUrl.startsWith("data:audio") && lastAudioEl) {
       lastAudioEl.src = dataUrl;
     }
 
@@ -207,22 +247,22 @@ function startRecordingTurn(){
       });
       const j = await r.json();
       if (!r.ok) {
-        transcriptEl.textContent = `⚠️ STT: ${j?.error || "error"}`;
+        setTxt(transcriptEl, `⚠️ STT: ${j?.error || "error"}`);
         processingTurn = false;
         if (auto) setState(SM.LISTEN);
         return;
       }
-      transcriptEl.textContent = j.transcript || "";
-      replyEl.textContent = "";
+      setTxt(transcriptEl, j.transcript || "");
+      setTxt(replyEl, "");
       processingTurn = false;
 
-      if ((modeSel.value || "").toLowerCase().startsWith("stream")) {
+      if ((modeSel?.value || "").toLowerCase().startsWith("stream")) {
         chatStream(j.transcript || "");
       } else {
         chatPlain(j.transcript || "");
       }
     } catch (e) {
-      transcriptEl.textContent = "⚠️ STT error: " + e.message;
+      setTxt(transcriptEl, "⚠️ STT error: " + e.message);
       processingTurn = false;
       if (auto) setState(SM.LISTEN);
     }
@@ -240,8 +280,7 @@ function stopRecordingTurn(){
   }
 }
 
-/* ---------- Streaming / Plain chat ---------- */
-function abortStream(){ if (streamCtl){ streamCtl.abort(); streamCtl=null; } streamOn=false; stopBtn.disabled=true; }
+function abortStream(){ if (streamCtl){ streamCtl.abort(); streamCtl=null; } streamOn=false; if (stopBtn) stopBtn.disabled=true; }
 
 async function chatPlain(prompt){
   abortStream();
@@ -250,11 +289,11 @@ async function chatPlain(prompt){
   try{
     const r = await fetch("/api/chat", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ message: prompt }) });
     const j = await r.json();
-    if (!r.ok){ replyEl.textContent = `⚠️ ${j.error || "chat error"}`; if (auto) startListening(); else setState(SM.IDLE); return; }
-    replyEl.textContent = j.reply || "";
+    if (!r.ok){ setTxt(replyEl, `⚠️ ${j.error || "chat error"}`); if (auto) startListening(); else setState(SM.IDLE); return; }
+    setTxt(replyEl, j.reply || "");
     speak(j.reply || "");
   }catch(e){
-    replyEl.textContent = `⚠️ ${e.message}`;
+    setTxt(replyEl, `⚠️ ${e.message}`);
     if (auto) startListening(); else setState(SM.IDLE);
   }
 }
@@ -263,9 +302,9 @@ async function chatStream(prompt){
   abortStream();
   stopAudio();
   setState(SM.REPLY); setStatus("streaming…"); setLatency(null,null);
-  stopBtn.disabled=false;
+  if (stopBtn) stopBtn.disabled=false;
 
-  const t0 = performance.now();
+  const t0 = now();
   let tFirst = null;
   let full = "";
   streamCtl = new AbortController();
@@ -295,29 +334,28 @@ async function chatStream(prompt){
         if (l === "data: [DONE]" || l === "[DONE]"){ buf=""; break; }
         const payload = l.startsWith("data:") ? l.slice(5).trim() : l;
 
-        if (tFirst == null){ tFirst = Math.round(performance.now() - t0); setLatency(tFirst, null); }
+        if (tFirst == null){ tFirst = Math.round(now() - t0); setLatency(tFirst, null); }
 
         try{
           const j = JSON.parse(payload);
           const tok = j?.choices?.[0]?.delta?.content ?? j?.content ?? "";
-          if (tok){ full += tok; replyEl.textContent = full; }
+          if (tok){ full += tok; setTxt(replyEl, full); }
         }catch{
-          full += payload; replyEl.textContent = full;
+          full += payload; setTxt(replyEl, full);
         }
       }
     }
   }catch(e){
-    if (e.name !== "AbortError"){ replyEl.textContent = `⚠️ ${e.message}`; }
+    if (e.name !== "AbortError"){ setTxt(replyEl, `⚠️ ${e.message}`); }
   }finally{
-    const tTot = Math.round(performance.now() - t0);
+    const tTot = Math.round(now() - t0);
     setLatency(tFirst ?? null, tTot);
-    streamOn=false; stopBtn.disabled=true; setStatus("idle");
+    streamOn=false; if (stopBtn) stopBtn.disabled=true; setStatus("idle");
   }
 
   if (full) speak(full); else if (auto) startListening();
 }
 
-/* ---------- VAD loop ---------- */
 function startListening(){
   if (!mediaStream) return;
   listenLoopOn = true;
@@ -325,23 +363,21 @@ function startListening(){
 
   let onsetFrames = 0;
   let voiced = false;
-  let lastSound = performance.now();
+  let lastSound = now();
   let outEma = null;
 
   const tick = () => {
     if (!listenLoopOn) return;
 
-    const thr     = (Number(vadEl.value) || 35) / 3000;               // slider → ~0.0..0.05
-    const silence = Math.max(200, Math.min(4000, Number(silenceEl.value) || 700));
+    const thr     = ((Number(vadEl?.value) || 35)) / 3000;
+    const silence = clamp(Number(silenceEl?.value) || 800, 200, 4000);
 
     const micRms = rmsFromAnalyser(micAnalyser);
     const outRms = rmsFromAnalyser(outAnalyser);
     outEma = ema(outEma, outRms, 0.2);
 
-    const now = performance.now();
-    const graceActive = (sm === SM.SPEAK) && (now - speakStartedAt < TTS_GRACE_MS);
-
-    // Only gate vs output while audio is playing; otherwise just compare to threshold
+    const t = now();
+    const graceActive = (sm === SM.SPEAK) && (t - speakStartedAt < TTS_GRACE_MS);
     const micBeatsOutput = outIsPlaying ? (micRms > ((outEma || 0) + OUTPUT_MARGIN)) : true;
 
     if (!processingTurn && !graceActive){
@@ -352,7 +388,7 @@ function startListening(){
           abortStream();
           startRecordingTurn();
           voiced = true;
-          lastSound = now;
+          lastSound = t;
           onsetFrames = 0;
         }
       } else {
@@ -360,10 +396,9 @@ function startListening(){
       }
     }
 
-    if (voiced) lastSound = now;
+    if (voiced) lastSound = t;
 
-    // If we were recording and user went quiet long enough, stop to process
-    if (voiced && (now - lastSound) > silence){
+    if (voiced && (t - lastSound) > silence){
       voiced = false;
       stopRecordingTurn();
     }
@@ -382,56 +417,110 @@ function stopListening(){
   setState(SM.IDLE);
 }
 
-/* ---------- UI wiring ---------- */
-sendBtn.addEventListener("click", () => {
-  const t = (msgEl.value || "").trim();
-  if (!t) return;
-  replyEl.textContent = "";
-  transcriptEl.textContent = "–";
-  if ((modeSel.value || "").toLowerCase().startsWith("stream")) chatStream(t);
-  else chatPlain(t);
-  msgEl.value = ""; msgEl.focus();
-});
-
-stopBtn.addEventListener("click", () => { abortStream(); stopAudio(); setLatency(null,null); setState(SM.IDLE); });
-
-// Hold-to-talk
-pttBtn.addEventListener("mousedown",  () => startRecordingTurn());
-pttBtn.addEventListener("touchstart", () => startRecordingTurn(), { passive:true });
-pttBtn.addEventListener("mouseup",    () => stopRecordingTurn());
-pttBtn.addEventListener("mouseleave", () => stopRecordingTurn());
-pttBtn.addEventListener("touchend",   () => stopRecordingTurn());
-
-// Auto-talk toggle
-autoBtn.addEventListener("click", async () => {
-  auto = !auto;
-  autoBtn.textContent = auto ? "🔁 Auto talk: On" : "🔁 Auto talk: Off";
-  localStorage.setItem("autoTalk", auto ? "1" : "0");
-  if (auto){ await ensureMic(); startListening(); } else { stopListening(); }
-});
-
-// Keyboard send
-msgEl.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) sendBtn.click(); });
-
-// Cache prefs
-(function bootPrefs(){
-  const e = localStorage.getItem("ttsEngine");   if (e) ttsSel.value = e;
-  const v = localStorage.getItem("elevenVoiceId"); if (v) voiceIdEl.value = v;
-  const a = localStorage.getItem("autoTalk");    if (a === "1") { auto = true; autoBtn.textContent = "🔁 Auto talk: On"; }
-})();
-ttsSel.addEventListener("change",  ()=> localStorage.setItem("ttsEngine", ttsSel.value));
-voiceIdEl.addEventListener("change", ()=> localStorage.setItem("elevenVoiceId", voiceIdEl.value.trim()));
-
-// Browser voices (for "browser" engine)
 function loadVoices(){
   const arr = (window.speechSynthesis?.getVoices?.() || []).filter(v => v.lang?.startsWith?.("en"));
   selectedVoice = arr[0] || null;
 }
-if ("speechSynthesis" in window){ loadVoices(); window.speechSynthesis.onvoiceschanged = loadVoices; }
 
-/* ---------- Boot ---------- */
-(async function boot(){
-  try { await ensureMic(); } catch {}
-  if (auto) startListening();
+async function boot(){
+  startBtn      = q("start");
+  stopBtn       = q("stop");
+  pttBtn        = q("ptt");
+  autoChk       = q("auto");
+  sendBtn       = q("send");
+  msgEl         = q("message");
+
+  replyEl       = q("reply");
+  transcriptEl  = q("transcript");
+  lastAudioEl   = q("lastAudio");
+
+  modeSel       = q("mode");
+  ttsSel        = q("ttsEngine");
+  voiceIdEl     = q("voiceId");
+
+  vadEl         = q("vad");
+  silenceEl     = q("silence");
+  hudState      = q("state");
+  hudStatus     = q("status");
+  hudLat        = q("lat");
+
+  micSel        = q("mic");
+  spkSel        = q("spk");
+
   setStatus("idle");
-})();
+  setState(SM.IDLE);
+
+  try {
+    const e = localStorage.getItem("ttsEngine");     if (e && ttsSel) ttsSel.value = e;
+    const v = localStorage.getItem("elevenVoiceId"); if (v && voiceIdEl) voiceIdEl.value = v;
+    const a = localStorage.getItem("autoTalk");
+    if (a === "1" && autoChk){ autoChk.checked = true; auto = true; }
+  } catch {}
+
+  on(startBtn, "click", async () => {
+    try {
+      await ensureMic();           // Safe even if micSel is missing
+      if (!listenLoopOn) startListening();
+      setStatus("listening…");
+    } catch (e) {
+      console.warn("start ensureMic()", e);
+    }
+  });
+
+  on(stopBtn, "click", () => { abortStream(); stopAudio(); setLatency(null,null); stopListening(); setStatus("idle"); });
+
+  on(pttBtn, "mousedown",  () => startRecordingTurn());
+  on(pttBtn, "touchstart", () => startRecordingTurn(), { passive:true });
+  on(pttBtn, "mouseup",    () => stopRecordingTurn());
+  on(pttBtn, "mouseleave", () => stopRecordingTurn());
+  on(pttBtn, "touchend",   () => stopRecordingTurn());
+
+  on(autoChk, "change", async () => {
+    auto = !!autoChk.checked;
+    localStorage.setItem("autoTalk", auto ? "1" : "0");
+    if (auto){ await ensureMic(); startListening(); } else { stopListening(); }
+  });
+
+  on(sendBtn, "click", () => {
+    const t = (msgEl?.value || "").trim();
+    if (!t) return;
+    setTxt(replyEl, "");
+    setTxt(transcriptEl, "–");
+    if ((modeSel?.value || "").toLowerCase().startsWith("stream")) chatStream(t);
+    else chatPlain(t);
+    msgEl.value = ""; msgEl.focus();
+  });
+  on(msgEl, "keydown", (e) => { if ((e.key === "Enter") && (e.ctrlKey || e.metaKey)) sendBtn?.click(); });
+
+  on(ttsSel, "change",  ()=> localStorage.setItem("ttsEngine", ttsSel.value));
+  on(voiceIdEl, "change", ()=> localStorage.setItem("elevenVoiceId", (voiceIdEl.value||"").trim()));
+
+  // Re-open stream when mic changes (guarded)
+  on(micSel, "change", async () => {
+    try { await ensureMic(); } catch (e){ console.warn("mic change ensureMic()", e); }
+  });
+
+  // Rebind speaker for <audio> tag when changed (guarded)
+  on(spkSel, "change", async () => {
+    if (spkSel && lastAudioEl && typeof lastAudioEl.setSinkId === "function" && spkSel.value){
+      try { await lastAudioEl.setSinkId(spkSel.value); } catch(e){ console.warn("setSinkId", e); }
+    }
+  });
+
+  if (navigator.mediaDevices?.addEventListener){
+    navigator.mediaDevices.addEventListener("devicechange", enumerateDevices);
+  }
+
+  await enumerateDevices();
+
+  if ("speechSynthesis" in window){
+    loadVoices();
+    window.speechSynthesis.onvoiceschanged = loadVoices;
+  }
+}
+
+if (document.readyState === "loading"){
+  document.addEventListener("DOMContentLoaded", boot);
+} else {
+  boot();
+}
