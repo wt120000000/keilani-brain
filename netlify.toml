@@ -23,6 +23,16 @@
   function = "chat-stream"
   path = "/api/chat-stream"
 
+[[redirects]]
+  from = "/.netlify/functions/memory-upsert"
+  to   = "/.netlify/functions/memory-upsert"
+  status = 200
+
+[[redirects]]
+  from = "/.netlify/functions/memory-search"
+  to   = "/.netlify/functions/memory-search"
+  status = 200
+
 # Health helpers
 [[redirects]]
   from = "/api/health"
