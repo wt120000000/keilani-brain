@@ -5,7 +5,7 @@
     <title>Keilani • Voice Chat</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <!-- CSS (cache-busted) -->
-    <link rel="stylesheet" href="/styles.css?v=15" />
+    <link rel="stylesheet" href="/styles.css?v=16" />
   </head>
   <body>
     <header class="topbar">
@@ -20,12 +20,19 @@
     <main class="wrap">
       <section class="controls">
         <div class="row">
+          <!-- New IDs -->
           <button id="startBtn" class="btn primary">▶ Start chat</button>
           <button id="stopBtn" class="btn">‖ Stop</button>
           <button id="pttBtn" class="btn">🎙 Hold to talk</button>
           <label class="chk"
             ><input id="autoChk" type="checkbox" /> Auto talk</label
           >
+
+          <!-- Legacy IDs (left hidden; keep if your old HTML is still cached) -->
+          <button id="start" style="display: none"></button>
+          <button id="stop" style="display: none"></button>
+          <button id="ptt" style="display: none"></button>
+          <input id="auto" type="checkbox" style="display: none" />
         </div>
 
         <div class="row">
@@ -34,6 +41,7 @@
             <option>ElevenLabs</option>
             <option>browser</option>
           </select>
+          <select id="ttsEngine" style="display: none"></select>
 
           <input
             id="voiceId"
@@ -45,6 +53,14 @@
 
           <label class="lbl">VAD</label>
           <input id="vadEl" type="range" min="0" max="100" value="35" />
+          <input
+            id="vad"
+            type="range"
+            min="0"
+            max="100"
+            value="35"
+            style="display: none"
+          />
           <span class="muted">more ← sensitive → less</span>
 
           <label class="lbl">Silence (ms)</label>
@@ -55,14 +71,24 @@
             max="4000"
             value="700"
           />
+          <input
+            id="silence"
+            type="number"
+            min="200"
+            max="4000"
+            value="700"
+            style="display: none"
+          />
         </div>
 
         <div class="row">
           <label class="lbl">Microphone</label>
           <select id="micSel"></select>
+          <select id="microphone" style="display: none"></select>
 
           <label class="lbl">Output device</label>
           <select id="outSel"></select>
+          <select id="output" style="display: none"></select>
         </div>
       </section>
 
@@ -94,6 +120,6 @@
     </main>
 
     <!-- JS (cache-busted). Placed LAST so elements exist before wiring. -->
-    <script src="/keilaniStream.js?v=15"></script>
+    <script src="/keilaniStream.js?v=16"></script>
   </body>
 </html>
