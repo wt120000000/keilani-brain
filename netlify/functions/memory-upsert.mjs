@@ -1,50 +1,60 @@
 import { createClient } from '@supabase/supabase-js';
 
-/* ---------- config ---------- */
-const supabase = createClient(
-  process.env.SUPABASE_URL,
-  process.env.SUPABASE_SERVICE_KEY
-);
-
 const cors = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Methods': 'POST, OPTIONS',
   'Access-Control-Allow-Headers': 'Content-Type, Authorization',
 };
-
-const json = (statusCode, bodyObj) => ({
+const json = (statusCode, body) => ({
   statusCode,
   headers: { 'Content-Type': 'application/json', ...cors },
-  body: JSON.stringify(bodyObj),
+  body: JSON.stringify(body),
 });
 
-/* ---------- handler ---------- */
+// lazy, safe init
+let _supabase = null;
+function getSupabase() {
+  if (_supabase) return _supabase;
+
+  const url =
+    process.env.SUPABASE_URL ||
+    process.env.SUPABASE_URL_PUBLIC ||
+    process.env.NEXT_PUBLIC_SUPABASE_URL;
+  const key =
+    process.env.SUPABASE_SERVICE_KEY ||
+    process.env.SUPABASE_SECRET ||
+    process.env.SUPABASE_KEY ||
+    process.env.NEXT_PUBLIC_SUPABASE_ANON_KEY;
+
+  if (!url || !key) {
+    const missing = [];
+    if (!url) missing.push('SUPABASE_URL');
+    if (!key) missing.push('SUPABASE_SERVICE_KEY');
+    throw new Error('missing_env:' + missing.join(','));
+  }
+  _supabase = createClient(url, key);
+  return _supabase;
+}
+
 export async function handler(event) {
-  // CORS preflight
-  if (event.httpMethod === 'OPTIONS') {
-    return { statusCode: 204, headers: cors };
-  }
-  if (event.httpMethod !== 'POST') {
-    return json(405, { error: 'method_not_allowed' });
-  }
+  if (event.httpMethod === 'OPTIONS') return { statusCode: 204, headers: cors };
+  if (event.httpMethod !== 'POST') return json(405, { error: 'method_not_allowed' });
 
   try {
-    const body = JSON.parse(event.body || '{}');
+    // env sanity
+    const supabase = getSupabase();
 
-    // accept both snake_case and camelCase
+    const body = JSON.parse(event.body || '{}');
     const userId = body.userId ?? body.user_id ?? null;
     const summary = body.summary ?? body.text ?? null;
 
-    // tags may be array or comma-separated string
     let tags = body.tags;
     if (typeof tags === 'string') {
       tags = tags.split(',').map((s) => s.trim()).filter(Boolean);
     }
     if (!Array.isArray(tags)) tags = [];
 
-    const importance = Number.isFinite(body.importance)
-      ? Number(body.importance)
-      : 0;
+    const importance = Number.isFinite(body.importance) ? Number(body.importance) : 0;
 
     if (!userId || !summary) {
       return json(400, {
@@ -60,9 +70,16 @@ export async function handler(event) {
       .select();
 
     if (error) throw error;
-
-    return json(200, { ok: true, inserted: data?.[0] || null });
-  } catch (err) {
-    return json(400, { error: String(err?.message || err) });
+    return json(200, { ok: true, inserted: data?.[0] ?? null });
+  } catch (e) {
+    const msg = String(e?.message || e);
+    if (msg.startsWith('missing_env:')) {
+      return json(500, {
+        error: 'server_not_configured',
+        detail: 'Required env vars missing on Netlify',
+        missing: msg.replace('missing_env:', '').split(',').filter(Boolean),
+      });
+    }
+    return json(400, { error: msg });
   }
 }
