@@ -4,8 +4,8 @@
     <meta charset="utf-8" />
     <title>Keilani • Live Voice Chat</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <link rel="stylesheet" href="/styles.css?v=18" />
     <meta http-equiv="Cache-Control" content="no-store, must-revalidate" />
+    <link rel="stylesheet" href="/styles.css?v=19" />
   </head>
   <body>
     <header class="topbar">
@@ -54,6 +54,7 @@
         </div>
 
         <div class="row">
+          <!-- These two selects are important: make sure they exist so micSel/spkSel are never null -->
           <label class="grow">
             Microphone
             <select id="mic"></select>
@@ -87,12 +88,11 @@
       <section class="panel">
         <h2>Conversation</h2>
 
-        <!-- Optional text send (fixes sendBtn null and handy for testing) -->
         <div class="row">
           <input
             id="message"
             class="grow"
-            placeholder="Type a message (Ctrl/Cmd+Enter to send)"
+            placeholder="Type a message (Ctrl/Cmd+Enter)"
           />
           <button id="send" class="btn">Send</button>
         </div>
@@ -114,6 +114,6 @@
       </section>
     </main>
 
-    <script src="/keilaniStream.js?v=18" defer></script>
+    <script src="/keilaniStream.js?v=19" defer></script>
   </body>
 </html>
