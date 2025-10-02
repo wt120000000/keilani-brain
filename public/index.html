@@ -4,14 +4,15 @@
     <meta charset="utf-8" />
     <title>Keilani • Voice Chat</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <link href="/styles.css?v=14" rel="stylesheet" />
+    <!-- CSS (cache-busted) -->
+    <link rel="stylesheet" href="/styles.css?v=15" />
   </head>
   <body>
     <header class="topbar">
       <div class="brand">Keilani • Voice Chat</div>
       <div class="status-pill">
-        <span id="hudState" aria-live="polite">idle</span>
-        <span id="hudLatency" title="latency" class="muted"></span>
+        <span id="hudState" aria-live="polite">state: idle</span>
+        <span id="hudLatency" class="muted"></span>
         <span id="hudLast" class="muted"></span>
       </div>
     </header>
@@ -22,7 +23,6 @@
           <button id="startBtn" class="btn primary">▶ Start chat</button>
           <button id="stopBtn" class="btn">‖ Stop</button>
           <button id="pttBtn" class="btn">🎙 Hold to talk</button>
-
           <label class="chk"
             ><input id="autoChk" type="checkbox" /> Auto talk</label
           >
@@ -93,7 +93,7 @@
       </div>
     </main>
 
-    <!-- keep defer so DOM is ready -->
-    <script src="/keilaniStream.js?v=14" defer></script>
+    <!-- JS (cache-busted). Placed LAST so elements exist before wiring. -->
+    <script src="/keilaniStream.js?v=15"></script>
   </body>
 </html>
