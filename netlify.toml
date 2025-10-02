@@ -3,45 +3,9 @@
   functions = "netlify/functions"
   edge_functions = "netlify/edge-functions"
 
-[functions]
-  node_bundler = "esbuild"
+# … your existing redirects/edges/headers …
 
-# JSON chat endpoint
-[[redirects]]
-  from = "/api/chat"
-  to   = "/.netlify/functions/chat"
-  status = 200
-
-# Stream (fallback to node)
-[[redirects]]
-  from = "/api/chat-stream"
-  to   = "/.netlify/functions/stream-chat"
-  status = 200
-
-# Edge streaming in prod
-[[edge_functions]]
-  function = "chat-stream"
-  path = "/api/chat-stream"
-
-# Health
-[[redirects]]
-  from = "/api/health"
-  to   = "/.netlify/functions/health"
-  status = 200
-
-# HTML shouldn't be cached
-[[headers]]
-  for = "/*.html"
-  [headers.values]
-    Cache-Control = "no-store, must-revalidate"
-
-# Assets
-[[headers]]
-  for = "/assets/*"
-  [headers.values]
-    Cache-Control = "max-age=30, must-revalidate"
-
-# JS anywhere (root files like /keilaniStream.v20.js AND /js/*.js)
+# Serve JS with correct MIME, anywhere
 [[headers]]
   for = "/*.js"
   [headers.values]
@@ -54,20 +18,8 @@
     Content-Type = "application/javascript; charset=UTF-8"
     Cache-Control = "public, max-age=0, must-revalidate"
 
-# CSP etc.
-[[headers]]
-  for = "/*"
-  [headers.values]
-    Content-Security-Policy = "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' https://api.keilani.ai https://api.openai.com https://api.elevenlabs.io blob: data:; media-src 'self' blob: data:; frame-ancestors 'self'; base-uri 'self'; form-action 'self'"
-    Access-Control-Allow-Origin = "*"
-    Permissions-Policy = "camera=(self), microphone=(self), geolocation=()"
-    X-Frame-Options = "SAMEORIGIN"
-    X-Content-Type-Options = "nosniff"
-    Referrer-Policy = "strict-origin-when-cross-origin"
-
-# SSE must not be transformed
-[[headers]]
-  for = "/api/chat-stream"
-  [headers.values]
-    Cache-Control = "no-cache, no-transform"
-    Connection = "keep-alive"
+# Redirect old root URL to new /js/ location (catches legacy references)
+[[redirects]]
+  from = "/keilaniStream.v20.js"
+  to   = "/js/keilaniStream.v20.js"
+  status = 200
