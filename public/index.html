@@ -2,124 +2,110 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Keilani • Voice Chat</title>
+    <title>Keilani • Live Voice Chat</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <!-- CSS (cache-busted) -->
-    <link rel="stylesheet" href="/styles.css?v=16" />
+    <link rel="stylesheet" href="/styles.css?v=17" />
+    <!-- Prevent stale caching while we iterate -->
+    <meta http-equiv="Cache-Control" content="no-store, must-revalidate" />
   </head>
   <body>
     <header class="topbar">
-      <div class="brand">Keilani • Voice Chat</div>
-      <div class="status-pill">
-        <span id="hudState" aria-live="polite">state: idle</span>
-        <span id="hudLatency" class="muted"></span>
-        <span id="hudLast" class="muted"></span>
+      <h1>Keilani • Live Voice Chat</h1>
+      <div class="hud">
+        <span id="state" class="hud-pill">state: —</span>
+        <span id="status" class="hud-pill">idle</span>
+        <span id="lat" class="hud-pill">—</span>
       </div>
     </header>
 
     <main class="wrap">
-      <section class="controls">
-        <div class="row">
-          <!-- New IDs -->
-          <button id="startBtn" class="btn primary">▶ Start chat</button>
-          <button id="stopBtn" class="btn">‖ Stop</button>
-          <button id="pttBtn" class="btn">🎙 Hold to talk</button>
-          <label class="chk"
-            ><input id="autoChk" type="checkbox" /> Auto talk</label
-          >
+      <section class="panel">
+        <h2>Controls</h2>
 
-          <!-- Legacy IDs (left hidden; keep if your old HTML is still cached) -->
-          <button id="start" style="display: none"></button>
-          <button id="stop" style="display: none"></button>
-          <button id="ptt" style="display: none"></button>
-          <input id="auto" type="checkbox" style="display: none" />
+        <div class="row">
+          <button id="start" class="btn">▶ Start chat</button>
+          <button id="stop" class="btn btn-secondary" disabled>■ Stop</button>
+          <button id="ptt" class="btn btn-tertiary">🎤 Hold to talk</button>
         </div>
 
         <div class="row">
-          <label class="lbl">TTS</label>
-          <select id="ttsSel">
-            <option>ElevenLabs</option>
-            <option>browser</option>
-          </select>
-          <select id="ttsEngine" style="display: none"></select>
+          <label class="chk">
+            <input id="auto" type="checkbox" /> Auto talk
+          </label>
 
-          <input
-            id="voiceId"
-            class="input"
-            placeholder="ElevenLabs voiceId (optional)"
-          />
+          <label>
+            Mode
+            <select id="mode">
+              <option value="stream" selected>Stream</option>
+              <option value="plain">Plain</option>
+            </select>
+          </label>
 
-          <div class="spacer"></div>
+          <label>
+            TTS
+            <select id="ttsEngine">
+              <option value="ElevenLabs" selected>ElevenLabs</option>
+              <option value="browser">Browser (fallback)</option>
+            </select>
+          </label>
 
-          <label class="lbl">VAD</label>
-          <input id="vadEl" type="range" min="0" max="100" value="35" />
-          <input
-            id="vad"
-            type="range"
-            min="0"
-            max="100"
-            value="35"
-            style="display: none"
-          />
-          <span class="muted">more ← sensitive → less</span>
-
-          <label class="lbl">Silence (ms)</label>
-          <input
-            id="silenceEl"
-            type="number"
-            min="200"
-            max="4000"
-            value="700"
-          />
-          <input
-            id="silence"
-            type="number"
-            min="200"
-            max="4000"
-            value="700"
-            style="display: none"
-          />
+          <label class="grow">
+            ElevenLabs voiceId
+            <input id="voiceId" placeholder="EXAVITQu4vr4xnSDxMaL" />
+          </label>
         </div>
 
         <div class="row">
-          <label class="lbl">Microphone</label>
-          <select id="micSel"></select>
-          <select id="microphone" style="display: none"></select>
+          <label class="grow">
+            Microphone
+            <select id="mic"></select>
+          </label>
 
-          <label class="lbl">Output device</label>
-          <select id="outSel"></select>
-          <select id="output" style="display: none"></select>
+          <label class="grow">
+            Speaker (optional)
+            <select id="spk"></select>
+          </label>
+        </div>
+
+        <div class="row">
+          <label class="grow">
+            VAD sensitivity
+            <input id="vad" type="range" min="0" max="100" value="35" />
+          </label>
+
+          <label class="grow">
+            Silence to stop (ms)
+            <input
+              id="silence"
+              type="number"
+              min="200"
+              max="4000"
+              value="800"
+            />
+          </label>
         </div>
       </section>
 
-      <section class="io">
-        <div class="pane">
-          <h3>Transcript</h3>
-          <div id="transcript" class="box" aria-live="polite"></div>
-          <audio id="lastAudio" controls preload="none"></audio>
-        </div>
-
-        <div class="pane">
-          <h3>Reply</h3>
-          <div id="reply" class="box" aria-live="polite"></div>
-          <div class="send-row">
-            <input
-              id="message"
-              class="input grow"
-              placeholder="Type and ⌘/Ctrl+Enter to send…"
-            />
-            <button id="send" class="btn">Send</button>
+      <section class="panel">
+        <h2>Conversation</h2>
+        <div class="textcols">
+          <div class="col">
+            <h3>Transcript (you)</h3>
+            <pre id="transcript" class="box">—</pre>
+          </div>
+          <div class="col">
+            <h3>Reply (Keilani)</h3>
+            <pre id="reply" class="box"></pre>
           </div>
         </div>
-      </section>
 
-      <div id="hud" class="hud">
-        <div>micRMS: <span id="hudMic">0.000</span></div>
-        <div>outRMS: <span id="hudOut">0.000</span></div>
-      </div>
+        <div class="row">
+          <audio id="lastAudio" controls></audio>
+        </div>
+      </section>
     </main>
 
-    <!-- JS (cache-busted). Placed LAST so elements exist before wiring. -->
-    <script src="/keilaniStream.js?v=16"></script>
+    <!-- Load after DOM to avoid null element lookups -->
+    <script src="/keilaniStream.js?v=17" defer></script>
   </body>
 </html>

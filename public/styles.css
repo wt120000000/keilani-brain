@@ -1,128 +1,152 @@
 :root {
-  color-scheme: dark;
-  --fg: #e8eef7;
-  --muted: #9fb2c8;
-  --bg: #0e1520;
-  --panel: #0f1b2d;
-  --border: #22324a;
-  --pri: #4da3ff;
-  --btn: #16253a;
-  --green: #13d3a2;
+  --bg: #0e0f12;
+  --panel: #15171c;
+  --text: #e8e9ed;
+  --muted: #9aa0aa;
+  --accent: #6aa7ff;
+  --pill: #242833;
+  --btn: #2a2f3b;
+  --btn2: #1e2230;
+  --btn3: #343a46;
+  --border: #2a2e39;
 }
 * {
   box-sizing: border-box;
 }
+html,
 body {
   margin: 0;
+  padding: 0;
   background: var(--bg);
-  color: var(--fg);
-  font:
-    15px/1.4 system-ui,
+  color: var(--text);
+  font-family:
+    ui-sans-serif,
+    system-ui,
     Segoe UI,
     Roboto,
+    Helvetica,
     Arial;
 }
 .topbar {
   display: flex;
-  justify-content: space-between;
   align-items: center;
-  padding: 12px 16px;
+  justify-content: space-between;
+  padding: 16px 20px;
   border-bottom: 1px solid var(--border);
-  background: linear-gradient(180deg, #0f1724, #0b1220);
+  background: #101218;
+  position: sticky;
+  top: 0;
+  z-index: 10;
 }
-.brand {
-  font-weight: 700;
+.topbar h1 {
+  margin: 0;
+  font-size: 18px;
+  letter-spacing: 0.3px;
 }
-.status-pill span {
-  margin-left: 10px;
+.hud {
+  display: flex;
+  gap: 8px;
 }
-.muted {
+.hud-pill {
+  background: var(--pill);
+  padding: 6px 10px;
+  border-radius: 999px;
+  font-size: 12px;
   color: var(--muted);
 }
 .wrap {
-  max-width: 1100px;
-  margin: 18px auto;
-  padding: 0 14px;
+  max-width: 1080px;
+  margin: 20px auto;
+  padding: 0 16px;
 }
-.controls .row {
+.panel {
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 14px;
+  padding: 16px;
+  margin-bottom: 18px;
+  box-shadow: 0 4px 16px rgba(0, 0, 0, 0.3);
+}
+.panel h2 {
+  margin: 0 0 12px 0;
+  font-size: 16px;
+  color: #cfd5df;
+}
+.row {
   display: flex;
+  flex-wrap: wrap;
   gap: 10px;
   align-items: center;
-  margin: 10px 0;
+  margin-bottom: 10px;
 }
-.lbl {
-  opacity: 0.9;
-}
-.input {
-  background: #0c1728;
-  border: 1px solid var(--border);
-  border-radius: 8px;
-  color: var(--fg);
-  padding: 8px 10px;
-}
-.input.grow {
-  flex: 1;
-}
-select {
-  background: #0c1728;
-  border: 1px solid var(--border);
-  color: var(--fg);
-  padding: 8px;
-  border-radius: 8px;
+.grow {
+  flex: 1 1 280px;
 }
 .btn {
   background: var(--btn);
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 8px 12px;
-  color: var(--fg);
+  color: var(--text);
+  padding: 10px 14px;
+  border-radius: 10px;
   cursor: pointer;
 }
-.btn.primary {
-  background: #143456;
-  border-color: #2b77ff;
+.btn:hover {
+  background: #333949;
+}
+.btn-secondary {
+  background: var(--btn2);
+}
+.btn-tertiary {
+  background: var(--btn3);
+}
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 6px;
+  font-size: 12px;
+  color: var(--muted);
+}
+input[type="text"],
+input[type="number"],
+input:not([type]),
+select {
+  appearance: none;
+  border: 1px solid var(--border);
+  background: #0f1117;
+  color: var(--text);
+  border-radius: 10px;
+  padding: 8px 10px;
+  font-size: 14px;
 }
 .chk {
-  display: flex;
+  flex-direction: row;
   align-items: center;
-  gap: 6px;
+  gap: 8px;
 }
-.io {
+.textcols {
   display: grid;
   grid-template-columns: 1fr 1fr;
-  gap: 16px;
-  margin-top: 14px;
+  gap: 12px;
 }
-.pane {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 12px;
-  padding: 12px;
+.col h3 {
+  margin: 0 0 6px 0;
+  font-size: 13px;
+  color: #b9c0cc;
 }
 .box {
-  min-height: 160px;
-  background: #0b1726;
+  min-height: 120px;
+  padding: 12px;
   border: 1px solid var(--border);
+  background: #0f1117;
   border-radius: 10px;
-  padding: 10px;
   white-space: pre-wrap;
-}
-.send-row {
-  display: flex;
-  gap: 10px;
-  margin-top: 12px;
 }
 audio {
   width: 100%;
   margin-top: 8px;
 }
-.hud {
-  position: fixed;
-  right: 10px;
-  bottom: 10px;
-  background: #0b1726;
-  border: 1px solid var(--border);
-  border-radius: 10px;
-  padding: 8px 10px;
-  color: var(--muted);
+@media (max-width: 720px) {
+  .textcols {
+    grid-template-columns: 1fr;
+  }
 }
