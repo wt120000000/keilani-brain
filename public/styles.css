@@ -3,7 +3,6 @@
   --panel: #15171c;
   --text: #e8e9ed;
   --muted: #9aa0aa;
-  --accent: #6aa7ff;
   --pill: #242833;
   --btn: #2a2f3b;
   --btn2: #1e2230;
@@ -117,6 +116,9 @@ select {
   border-radius: 10px;
   padding: 8px 10px;
   font-size: 14px;
+}
+#message {
+  width: 100%;
 }
 .chk {
   flex-direction: row;

@@ -4,8 +4,7 @@
     <meta charset="utf-8" />
     <title>Keilani • Live Voice Chat</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <link rel="stylesheet" href="/styles.css?v=17" />
-    <!-- Prevent stale caching while we iterate -->
+    <link rel="stylesheet" href="/styles.css?v=18" />
     <meta http-equiv="Cache-Control" content="no-store, must-revalidate" />
   </head>
   <body>
@@ -26,13 +25,12 @@
           <button id="start" class="btn">▶ Start chat</button>
           <button id="stop" class="btn btn-secondary" disabled>■ Stop</button>
           <button id="ptt" class="btn btn-tertiary">🎤 Hold to talk</button>
-        </div>
-
-        <div class="row">
           <label class="chk">
             <input id="auto" type="checkbox" /> Auto talk
           </label>
+        </div>
 
+        <div class="row">
           <label>
             Mode
             <select id="mode">
@@ -88,6 +86,17 @@
 
       <section class="panel">
         <h2>Conversation</h2>
+
+        <!-- Optional text send (fixes sendBtn null and handy for testing) -->
+        <div class="row">
+          <input
+            id="message"
+            class="grow"
+            placeholder="Type a message (Ctrl/Cmd+Enter to send)"
+          />
+          <button id="send" class="btn">Send</button>
+        </div>
+
         <div class="textcols">
           <div class="col">
             <h3>Transcript (you)</h3>
@@ -105,7 +114,6 @@
       </section>
     </main>
 
-    <!-- Load after DOM to avoid null element lookups -->
-    <script src="/keilaniStream.js?v=17" defer></script>
+    <script src="/keilaniStream.js?v=18" defer></script>
   </body>
 </html>
