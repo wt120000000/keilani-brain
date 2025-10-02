@@ -5,7 +5,7 @@
     <title>Keilani • Live Voice Chat</title>
     <meta name="viewport" content="width=device-width, initial-scale=1" />
     <meta http-equiv="Cache-Control" content="no-store, must-revalidate" />
-    <link rel="stylesheet" href="/styles.css?v=19" />
+    <link rel="stylesheet" href="/styles.css?v=20" />
   </head>
   <body>
     <header class="topbar">
@@ -18,10 +18,10 @@
     </header>
 
     <main class="wrap">
-      <section class="panel">
+      <section class="panel" id="controls-panel">
         <h2>Controls</h2>
 
-        <div class="row">
+        <div class="row" id="controls-row-main">
           <button id="start" class="btn">▶ Start chat</button>
           <button id="stop" class="btn btn-secondary" disabled>■ Stop</button>
           <button id="ptt" class="btn btn-tertiary">🎤 Hold to talk</button>
@@ -30,7 +30,7 @@
           </label>
         </div>
 
-        <div class="row">
+        <div class="row" id="controls-row-mode">
           <label>
             Mode
             <select id="mode">
@@ -53,8 +53,8 @@
           </label>
         </div>
 
-        <div class="row">
-          <!-- These two selects are important: make sure they exist so micSel/spkSel are never null -->
+        <!-- The devices row will be created by JS if missing -->
+        <div class="row" id="controls-row-devices">
           <label class="grow">
             Microphone
             <select id="mic"></select>
@@ -66,7 +66,7 @@
           </label>
         </div>
 
-        <div class="row">
+        <div class="row" id="controls-row-vad">
           <label class="grow">
             VAD sensitivity
             <input id="vad" type="range" min="0" max="100" value="35" />
@@ -114,6 +114,7 @@
       </section>
     </main>
 
-    <script src="/keilaniStream.js?v=19" defer></script>
+    <!-- IMPORTANT: cache-busting filename -->
+    <script src="/keilaniStream.v20.js" defer></script>
   </body>
 </html>
