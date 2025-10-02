@@ -1,24 +1,94 @@
 [build]
-  publish = "public"
-  functions = "netlify/functions"
+  publish        = "public"
+  functions      = "netlify/functions"
   edge_functions = "netlify/edge-functions"
 
-# … your existing redirects/edges/headers …
+[functions]
+  node_bundler = "esbuild"
 
-# Serve JS with correct MIME, anywhere
+# ---------- App API routes ----------
+# Plain JSON chat
+[[redirects]]
+  from = "/api/chat"
+  to   = "/.netlify/functions/chat"
+  status = 200
+
+# Stream chat (Edge in prod, Functions fallback kept)
+[[redirects]]
+  from = "/api/chat-stream"
+  to   = "/.netlify/functions/stream-chat"
+  status = 200
+
+[[edge_functions]]
+  function = "chat-stream"
+  path = "/api/chat-stream"
+
+# Health helpers
+[[redirects]]
+  from = "/api/health"
+  to   = "/.netlify/functions/health"
+  status = 200
+
+# ---------- Static headers ----------
+# No-store for HTML
+[[headers]]
+  for = "/*.html"
+  [headers.values]
+    Cache-Control = "no-store, must-revalidate"
+
+# CSS
+[[headers]]
+  for = "/styles.css"
+  [headers.values]
+    Content-Type  = "text/css; charset=UTF-8"
+    Cache-Control = "public, max-age=0, must-revalidate"
+
+# JS anywhere
 [[headers]]
   for = "/*.js"
   [headers.values]
-    Content-Type = "application/javascript; charset=UTF-8"
+    Content-Type  = "application/javascript; charset=UTF-8"
     Cache-Control = "public, max-age=0, must-revalidate"
 
 [[headers]]
   for = "/js/*.js"
   [headers.values]
-    Content-Type = "application/javascript; charset=UTF-8"
+    Content-Type  = "application/javascript; charset=UTF-8"
     Cache-Control = "public, max-age=0, must-revalidate"
 
-# Redirect old root URL to new /js/ location (catches legacy references)
+# ---------- CSP (fixed) ----------
+# Note: removed invalid host pattern "https://api.*"
+# Allow data: for inline audio previews; allow blob: for media + fetch streams
+[[headers]]
+  for = "/*"
+  [headers.values]
+    Content-Security-Policy = """
+      default-src 'self';
+      script-src 'self' https://cdn.jsdelivr.net;
+      style-src  'self' 'unsafe-inline';
+      img-src    'self' data:;
+      font-src   'self' data:;
+      connect-src 'self' https://api.keilani.ai https://api.openai.com https://api.elevenlabs.io blob: data:;
+      media-src  'self' blob: data:;
+      worker-src 'self' blob:;
+      frame-ancestors 'self';
+      base-uri 'self';
+      form-action 'self'
+    """
+    Access-Control-Allow-Origin = "*"
+    Permissions-Policy = "camera=(self), microphone=(self), geolocation=()"
+    X-Frame-Options = "SAMEORIGIN"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+
+# SSE: don’t transform
+[[headers]]
+  for = "/api/chat-stream"
+  [headers.values]
+    Cache-Control = "no-cache, no-transform"
+    Connection    = "keep-alive"
+
+# Legacy script path safety net (in case an old link is cached)
 [[redirects]]
   from = "/keilaniStream.v20.js"
   to   = "/js/keilaniStream.v20.js"
