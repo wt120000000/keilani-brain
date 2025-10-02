@@ -1,7 +1,5 @@
 // netlify/functions/chat.js
-// Plain JSON chat endpoint that injects user memories from our Netlify function.
-
-const fetch = require("node-fetch");
+// Plain JSON chat endpoint that injects user memories via our Netlify functions.
 
 const HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -51,32 +49,40 @@ function buildSystemPrompt(memories) {
   return lines.join("\n");
 }
 
+async function fetchJson(url, opts) {
+  const r = await fetch(url, opts);
+  const text = await r.text();
+  try {
+    return { ok: r.ok, status: r.status, json: JSON.parse(text) };
+  } catch {
+    return { ok: r.ok, status: r.status, json: null, text };
+  }
+}
+
 async function fetchMemories(origin, { userId, query, limit = 8, allowRecentFallback = false }) {
   let results = [];
   try {
-    const r = await fetch(`${origin}/.netlify/functions/memory-search`, {
+    const { json } = await fetchJson(`${origin}/.netlify/functions/memory-search`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({ userId, query, limit }),
     });
-    const j = await r.json().catch(() => ({}));
-    if (j?.ok && Array.isArray(j.results)) results = j.results;
+    if (json?.ok && Array.isArray(json.results)) results = json.results;
   } catch (e) {
-    console.warn("memory-search failed:", e?.message || e);
+    console.warn("memory-search error:", e?.message || e);
   }
 
   if (allowRecentFallback && results.length === 0) {
     try {
-      const r = await fetch(`${origin}/.netlify/functions/memory-search`, {
+      const { json } = await fetchJson(`${origin}/.netlify/functions/memory-search`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        // empty query => your memory-search treats this as "latest"
+        // empty query => your memory-search treats as "latest"
         body: JSON.stringify({ userId, query: "", limit }),
       });
-      const j = await r.json().catch(() => ({}));
-      if (j?.ok && Array.isArray(j.results)) results = j.results;
+      if (json?.ok && Array.isArray(json.results)) results = json.results;
     } catch (e) {
-      console.warn("memory-search fallback failed:", e?.message || e);
+      console.warn("memory-search fallback error:", e?.message || e);
     }
   }
 
@@ -127,7 +133,6 @@ exports.handler = async (event) => {
 
   const origin = getOrigin(event);
 
-  // Pull memories (with recent fallback for recall-type questions)
   const allowRecentFallback = isRecallQuery(message);
   const memories = userId
     ? await fetchMemories(origin, { userId, query: message, allowRecentFallback, limit: 8 })
@@ -138,8 +143,9 @@ exports.handler = async (event) => {
   try {
     const reply = await callOpenAI(system, message);
     return ok({
+      version: "chat-mem-v2",
       reply,
-      // echo a compact view so you can verify memory injection from the client/PowerShell
+      memCount: memories.length,
       memoriesUsed: memories.map((m) => ({
         id: m.id,
         summary: m.summary,
@@ -149,6 +155,6 @@ exports.handler = async (event) => {
       })),
     });
   } catch (e) {
-    return bad({ error: "upstream_error", detail: String(e.message || e) });
+    return bad({ version: "chat-mem-v2", error: "upstream_error", detail: String(e.message || e) });
   }
 };
