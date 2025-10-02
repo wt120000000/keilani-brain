@@ -1,165 +1,128 @@
 :root {
-  --bg: #0e1217;
-  --card: #121827;
-  --muted: #93a1b18c;
-  --txt: #e7edf5;
-  --accent: #3b82f6;
-  --accent-2: #22c55e;
-  --line: #1f2937;
+  color-scheme: dark;
+  --fg: #e8eef7;
+  --muted: #9fb2c8;
+  --bg: #0e1520;
+  --panel: #0f1b2d;
+  --border: #22324a;
+  --pri: #4da3ff;
+  --btn: #16253a;
+  --green: #13d3a2;
 }
 * {
   box-sizing: border-box;
 }
-html,
-body {
-  height: 100%;
-}
 body {
   margin: 0;
-  font:
-    14px/1.5 ui-sans-serif,
-    system-ui,
-    -apple-system,
-    Segoe UI,
-    Roboto;
-  color: var(--txt);
   background: var(--bg);
+  color: var(--fg);
+  font:
+    15px/1.4 system-ui,
+    Segoe UI,
+    Roboto,
+    Arial;
 }
 .topbar {
   display: flex;
-  align-items: center;
   justify-content: space-between;
-  padding: 10px 16px;
-  border-bottom: 1px solid var(--line);
-  background: #0b1016;
+  align-items: center;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  background: linear-gradient(180deg, #0f1724, #0b1220);
 }
 .brand {
   font-weight: 700;
 }
-.pillrow {
-  display: flex;
-  gap: 8px;
+.status-pill span {
+  margin-left: 10px;
 }
-.pill {
-  padding: 2px 8px;
-  border: 1px solid var(--line);
-  border-radius: 999px;
-  color: #aab4c4;
+.muted {
+  color: var(--muted);
 }
-.container {
+.wrap {
   max-width: 1100px;
-  margin: 24px auto;
-  padding: 0 16px;
-  display: grid;
-  gap: 16px;
-}
-.card {
-  background: var(--card);
-  border: 1px solid var(--line);
-  border-radius: 12px;
-  padding: 14px;
+  margin: 18px auto;
+  padding: 0 14px;
 }
 .controls .row {
   display: flex;
-  gap: 12px;
-  flex-wrap: wrap;
-}
-.middle {
+  gap: 10px;
   align-items: center;
+  margin: 10px 0;
 }
-.field {
-  display: flex;
-  flex-direction: column;
-  gap: 6px;
-  min-width: 180px;
+.lbl {
+  opacity: 0.9;
 }
-.field.grow {
+.input {
+  background: #0c1728;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  color: var(--fg);
+  padding: 8px 10px;
+}
+.input.grow {
   flex: 1;
 }
-.field > input,
-.field > select {
-  background: #0d1421;
-  border: 1px solid var(--line);
-  color: var(--txt);
-  padding: 8px 10px;
+select {
+  background: #0c1728;
+  border: 1px solid var(--border);
+  color: var(--fg);
+  padding: 8px;
   border-radius: 8px;
-  min-height: 38px;
 }
-.hint {
-  color: var(--muted);
-  font-size: 12px;
+.btn {
+  background: var(--btn);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 12px;
+  color: var(--fg);
+  cursor: pointer;
+}
+.btn.primary {
+  background: #143456;
+  border-color: #2b77ff;
 }
 .chk {
   display: flex;
   align-items: center;
-  gap: 8px;
-  user-select: none;
+  gap: 6px;
 }
-.btn {
-  background: #162132;
-  color: var(--txt);
-  border: 1px solid var(--line);
-  padding: 8px 12px;
-  border-radius: 10px;
-  cursor: pointer;
-}
-.btn.primary {
-  background: var(--accent);
-  border-color: transparent;
-}
-.btn:disabled {
-  opacity: 0.6;
-  cursor: not-allowed;
-}
-
 .io {
   display: grid;
   grid-template-columns: 1fr 1fr;
   gap: 16px;
+  margin-top: 14px;
 }
 .pane {
-  display: flex;
-  flex-direction: column;
-  gap: 8px;
-}
-.pane-title {
-  color: #a8b0c0;
-  font-weight: 600;
-}
-.pane-body {
-  min-height: 140px;
-  background: #0d1421;
-  border: 1px solid var(--line);
-  border-radius: 8px;
+  background: var(--panel);
+  border: 1px solid var(--border);
+  border-radius: 12px;
   padding: 12px;
-  white-space: pre-wrap;
-  overflow: auto;
 }
-.mono {
-  font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+.box {
+  min-height: 160px;
+  background: #0b1726;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 10px;
+  white-space: pre-wrap;
+}
+.send-row {
+  display: flex;
+  gap: 10px;
+  margin-top: 12px;
 }
 audio {
   width: 100%;
+  margin-top: 8px;
 }
-
-.textsend {
-  display: flex;
-  gap: 10px;
-}
-.textsend input {
-  flex: 1;
-  background: #0d1421;
-  border: 1px solid var(--line);
-  color: var(--txt);
-  padding: 10px 12px;
-  border-radius: 8px;
-}
-
 .hud {
-  margin: 0;
-  background: #0b1016;
-  border: 1px solid var(--line);
-  padding: 10px;
-  border-radius: 8px;
-  color: #98a6bd;
+  position: fixed;
+  right: 10px;
+  bottom: 10px;
+  background: #0b1726;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 8px 10px;
+  color: var(--muted);
 }

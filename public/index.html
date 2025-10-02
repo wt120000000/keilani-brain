@@ -2,118 +2,98 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
     <title>Keilani • Voice Chat</title>
-    <link rel="stylesheet" href="/styles.css?v=13" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link href="/styles.css?v=14" rel="stylesheet" />
   </head>
   <body>
     <header class="topbar">
       <div class="brand">Keilani • Voice Chat</div>
-      <div class="pillrow">
-        <span id="state" class="pill">idle</span>
-        <span id="lat" class="pill">–</span>
-        <span id="status" class="pill">ok</span>
+      <div class="status-pill">
+        <span id="hudState" aria-live="polite">idle</span>
+        <span id="hudLatency" title="latency" class="muted"></span>
+        <span id="hudLast" class="muted"></span>
       </div>
     </header>
 
-    <main class="container">
-      <section class="controls card">
-        <div class="row gap">
-          <button id="start" class="btn primary">▶ Start chat</button>
-          <button id="stop" class="btn">⏸ Stop</button>
-          <button id="ptt" class="btn">🎙 Hold to talk</button>
+    <main class="wrap">
+      <section class="controls">
+        <div class="row">
+          <button id="startBtn" class="btn primary">▶ Start chat</button>
+          <button id="stopBtn" class="btn">‖ Stop</button>
+          <button id="pttBtn" class="btn">🎙 Hold to talk</button>
 
-          <label class="chk">
-            <input id="autoTalk" type="checkbox" />
-            <span>Auto talk</span>
-          </label>
+          <label class="chk"
+            ><input id="autoChk" type="checkbox" /> Auto talk</label
+          >
         </div>
 
-        <div class="row gap">
-          <div class="field">
-            <label for="tts">TTS</label>
-            <select id="tts">
-              <option>ElevenLabs</option>
-              <option>Browser</option>
-            </select>
-          </div>
+        <div class="row">
+          <label class="lbl">TTS</label>
+          <select id="ttsSel">
+            <option>ElevenLabs</option>
+            <option>browser</option>
+          </select>
 
-          <div class="field grow">
-            <label for="voiceId">ElevenLabs voiceId (optional)</label>
-            <input id="voiceId" placeholder="21m00Tcm4TlvDq8ikWAM" />
-          </div>
+          <input
+            id="voiceId"
+            class="input"
+            placeholder="ElevenLabs voiceId (optional)"
+          />
+
+          <div class="spacer"></div>
+
+          <label class="lbl">VAD</label>
+          <input id="vadEl" type="range" min="0" max="100" value="35" />
+          <span class="muted">more ← sensitive → less</span>
+
+          <label class="lbl">Silence (ms)</label>
+          <input
+            id="silenceEl"
+            type="number"
+            min="200"
+            max="4000"
+            value="700"
+          />
         </div>
 
-        <div class="row gap">
-          <div class="field">
-            <label for="microphone">Microphone</label>
-            <select id="microphone">
-              <option value="default">Microphone</option>
-            </select>
-          </div>
+        <div class="row">
+          <label class="lbl">Microphone</label>
+          <select id="micSel"></select>
 
-          <div class="field">
-            <label for="output">Output device</label>
-            <select id="output">
-              <option value="default">default</option>
-            </select>
-          </div>
-        </div>
-
-        <div class="row gap middle">
-          <div class="field grow">
-            <label for="vad">VAD</label>
-            <input
-              id="vad"
-              type="range"
-              min="0"
-              max="100"
-              step="1"
-              value="38"
-            />
-            <div class="hint">more ← sensitive → less</div>
-          </div>
-
-          <div class="field">
-            <label for="silence">Silence (ms)</label>
-            <input
-              id="silence"
-              type="number"
-              min="200"
-              max="4000"
-              step="50"
-              value="500"
-            />
-          </div>
+          <label class="lbl">Output device</label>
+          <select id="outSel"></select>
         </div>
       </section>
 
-      <section class="io card">
+      <section class="io">
         <div class="pane">
-          <div class="pane-title">Transcript</div>
-          <div id="transcript" class="pane-body mono"></div>
+          <h3>Transcript</h3>
+          <div id="transcript" class="box" aria-live="polite"></div>
           <audio id="lastAudio" controls preload="none"></audio>
         </div>
 
         <div class="pane">
-          <div class="pane-title">Reply</div>
-          <div id="reply" class="pane-body"></div>
+          <h3>Reply</h3>
+          <div id="reply" class="box" aria-live="polite"></div>
+          <div class="send-row">
+            <input
+              id="message"
+              class="input grow"
+              placeholder="Type and ⌘/Ctrl+Enter to send…"
+            />
+            <button id="send" class="btn">Send</button>
+          </div>
         </div>
       </section>
 
-      <section class="textsend card">
-        <input id="message" placeholder="Type and ⌘/Ctrl+Enter to send…" />
-        <button id="send" class="btn">Send</button>
-      </section>
-
-      <section class="card">
-        <details>
-          <summary>HUD</summary>
-          <pre id="hud" class="hud"></pre>
-        </details>
-      </section>
+      <div id="hud" class="hud">
+        <div>micRMS: <span id="hudMic">0.000</span></div>
+        <div>outRMS: <span id="hudOut">0.000</span></div>
+      </div>
     </main>
-    <link rel="stylesheet" href="/styles.css?v=13" />
-    <script src="/keilaniStream.js?v=13" defer></script>
+
+    <!-- keep defer so DOM is ready -->
+    <script src="/keilaniStream.js?v=14" defer></script>
   </body>
 </html>
