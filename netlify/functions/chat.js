@@ -1,5 +1,5 @@
 // netlify/functions/chat.js
-// Plain JSON chat endpoint that injects user memories via our Netlify functions.
+// Chat endpoint that injects user memories (semantic search + guaranteed recent fallback)
 
 const HEADERS = {
   "Access-Control-Allow-Origin": "*",
@@ -17,19 +17,6 @@ function getOrigin(event) {
   if (host) return `${proto}://${host}`;
   if (process.env.URL) return process.env.URL;
   return "https://api.keilani.ai";
-}
-
-function isRecallQuery(text = "") {
-  const t = text.toLowerCase();
-  return (
-    t.includes("what did i say") ||
-    t.includes("do you remember") ||
-    t.includes("what do you remember") ||
-    t.includes("remember what i said") ||
-    t.includes("earlier") ||
-    t.includes("last time") ||
-    t.includes("previously")
-  );
 }
 
 function buildSystemPrompt(memories) {
@@ -59,34 +46,39 @@ async function fetchJson(url, opts) {
   }
 }
 
-async function fetchMemories(origin, { userId, query, limit = 8, allowRecentFallback = false }) {
+// Always try semantic search; if zero, fetch recent N (fallback)
+async function getMemoriesWithFallback(origin, { userId, semanticQuery, limit = 8 }) {
   let results = [];
+  let mode = "semantic";
+
+  // 1) semantic (query = user message)
   try {
     const { json } = await fetchJson(`${origin}/.netlify/functions/memory-search`, {
       method: "POST",
       headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId, query, limit }),
+      body: JSON.stringify({ userId, query: semanticQuery, limit }),
     });
     if (json?.ok && Array.isArray(json.results)) results = json.results;
   } catch (e) {
-    console.warn("memory-search error:", e?.message || e);
+    console.warn("memory-search semantic error:", e?.message || e);
   }
 
-  if (allowRecentFallback && results.length === 0) {
+  // 2) guaranteed fallback to latest if nothing found
+  if (!results.length) {
+    mode = "recent_fallback";
     try {
       const { json } = await fetchJson(`${origin}/.netlify/functions/memory-search`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        // empty query => your memory-search treats as "latest"
-        body: JSON.stringify({ userId, query: "", limit }),
+        body: JSON.stringify({ userId, query: "", limit }), // empty => latest
       });
       if (json?.ok && Array.isArray(json.results)) results = json.results;
     } catch (e) {
-      console.warn("memory-search fallback error:", e?.message || e);
+      console.warn("memory-search recent fallback error:", e?.message || e);
     }
   }
 
-  return results;
+  return { results, mode };
 }
 
 async function callOpenAI(systemPrompt, userMsg) {
@@ -129,23 +121,23 @@ exports.handler = async (event) => {
   const message = payload.message || "";
   const userId  = payload.userId || null;
 
-  if (!message) return bad({ error: "missing_message" });
+  if (!message) return bad({ version: "chat-mem-v3", error: "missing_message" });
 
   const origin = getOrigin(event);
 
-  const allowRecentFallback = isRecallQuery(message);
-  const memories = userId
-    ? await fetchMemories(origin, { userId, query: message, allowRecentFallback, limit: 8 })
-    : [];
+  // Pull memories (semantic then recent)
+  const { results: memories, mode: memMode } = userId
+    ? await getMemoriesWithFallback(origin, { userId, semanticQuery: message, limit: 8 })
+    : { results: [], mode: "no_user" };
 
   const system = buildSystemPrompt(memories);
 
   try {
     const reply = await callOpenAI(system, message);
     return ok({
-      version: "chat-mem-v2",
-      reply,
+      version: "chat-mem-v3",
       memCount: memories.length,
+      memMode,
       memoriesUsed: memories.map((m) => ({
         id: m.id,
         summary: m.summary,
@@ -153,8 +145,9 @@ exports.handler = async (event) => {
         tags: m.tags,
         importance: m.importance,
       })),
+      reply,
     });
   } catch (e) {
-    return bad({ version: "chat-mem-v2", error: "upstream_error", detail: String(e.message || e) });
+    return bad({ version: "chat-mem-v3", error: "upstream_error", detail: String(e.message || e) });
   }
 };
