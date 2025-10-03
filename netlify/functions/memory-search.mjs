@@ -1,4 +1,9 @@
-import { createClient } from '@supabase/supabase-js';
+let createClient;
+try {
+  ({ createClient } = await import('@supabase/supabase-js'));
+} catch (e) {
+  console.error('[search] failed to import supabase-js', e);
+}
 
 const json = (status, payload = {}) => ({
   statusCode: status,
@@ -12,9 +17,13 @@ const json = (status, payload = {}) => ({
 });
 
 export async function handler(event) {
-  if (event.httpMethod === 'OPTIONS') return json(200, {});
-
   try {
+    if (event.httpMethod === 'OPTIONS') return json(200, {});
+
+    if (!createClient) {
+      return json(500, { error: 'module_import_failed', detail: 'supabase-js not available' });
+    }
+
     const supabaseUrl =
       process.env.SUPABASE_URL || process.env.NEXT_PUBLIC_SUPABASE_URL;
     const supabaseKey =
@@ -24,11 +33,8 @@ export async function handler(event) {
       const missing = [];
       if (!supabaseUrl) missing.push('SUPABASE_URL');
       if (!supabaseKey) missing.push('SUPABASE_SERVICE_KEY|SUPABASE_SERVICE_ROLE');
-      return json(500, {
-        error: 'server_not_configured',
-        detail: 'Required env vars missing on Netlify',
-        missing,
-      });
+      console.error('[search] missing env', missing);
+      return json(500, { error: 'server_not_configured', missing });
     }
 
     const body = event.body ? JSON.parse(event.body) : {};
@@ -46,7 +52,6 @@ export async function handler(event) {
 
     const supabase = createClient(supabaseUrl, supabaseKey);
 
-    // Text search path (safe on any Postgres, no extensions required)
     let q = supabase
       .from('memories')
       .select('id, summary, tags, importance, created_at')
@@ -57,17 +62,15 @@ export async function handler(event) {
     if (query) q = q.ilike('summary', `%${query}%`);
 
     const { data, error } = await q;
-    if (error) return json(500, { error: 'db_error', detail: error.message });
+    if (error) {
+      console.error('[search] db_error', error);
+      return json(500, { error: 'db_error', detail: error.message });
+    }
 
-    return json(200, {
-      ok: true,
-      mode: 'text',
-      count: data.length,
-      results: data,
-    });
+    return json(200, { ok: true, mode: 'text', count: data.length, results: data });
   } catch (err) {
+    console.error('[search] exception', err);
     return json(500, { error: 'exception', detail: String(err) });
   }
 }
-
 export default handler;
