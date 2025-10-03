@@ -1,6 +1,6 @@
 // netlify/functions/chat.js
 // Plain JSON chat endpoint with memory-awareness.
-// Version: chat-mem-v3 + "explicit memory ack in first sentence"
+// Version: chat-mem-v3.1 (two-pass memory fetch + explicit memory ack)
 
 const OPENAI_URL = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
 const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
@@ -42,11 +42,13 @@ exports.handler = async (event) => {
       return res(400, { error: "missing_fields", need: ["message"] });
     }
 
-    // ---- Memory lookup via sibling function ----
+    // ---- Memory lookup (two-pass) ----
     let memoriesUsed = [];
-    let memDiag = { memCount: 0, memMode: "none" };
+    let memDiag = { version: "chat-mem-v3.1", memCount: 0, memMode: "none" };
+
+    // Pass 1: query-based search
     try {
-      const memResp = await fetch(`${BASE_ORIGIN}/.netlify/functions/memory-search`, {
+      const memResp1 = await fetch(`${BASE_ORIGIN}/.netlify/functions/memory-search`, {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
@@ -55,14 +57,37 @@ exports.handler = async (event) => {
           limit: 8,
         }),
       });
-      const memJson = await memResp.json().catch(() => ({}));
-      if (memResp.ok && memJson?.ok) {
-        memoriesUsed = Array.isArray(memJson.results) ? memJson.results : [];
+      const memJson1 = await memResp1.json().catch(() => ({}));
+      if (memResp1.ok && memJson1?.ok) {
+        memoriesUsed = Array.isArray(memJson1.results) ? memJson1.results : [];
         memDiag.memCount = memoriesUsed.length || 0;
-        memDiag.memMode = memJson.mode || "unknown";
+        memDiag.memMode = memJson1.mode || "unknown";
       }
     } catch (e) {
       memDiag.memError = String(e?.message || e);
+    }
+
+    // Pass 2: if no hits, recent fallback
+    if ((!memoriesUsed || memoriesUsed.length === 0) && userId) {
+      try {
+        const memResp2 = await fetch(`${BASE_ORIGIN}/.netlify/functions/memory-search`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            userId,
+            recent: true,
+            limitRecent: 5,
+          }),
+        });
+        const memJson2 = await memResp2.json().catch(() => ({}));
+        if (memResp2.ok && memJson2?.ok && Array.isArray(memJson2.results)) {
+          memoriesUsed = memJson2.results;
+          memDiag.memCount = memoriesUsed.length || 0;
+          memDiag.memMode = memJson2.mode || "recent_fallback";
+        }
+      } catch (e) {
+        memDiag.memError2 = String(e?.message || e);
+      }
     }
 
     // ---- Build system prompt ----
@@ -100,7 +125,6 @@ exports.handler = async (event) => {
         error: "openai_error",
         status: oa.status,
         detail: j?.error || j,
-        version: "chat-mem-v3",
         ...memDiag,
         memoriesUsed,
       });
@@ -109,9 +133,8 @@ exports.handler = async (event) => {
     const reply = j?.choices?.[0]?.message?.content?.trim?.() || "";
 
     return res(200, {
-      version: "chat-mem-v3",
-      reply,
       ...memDiag,
+      reply,
       memoriesUsed: memoriesUsed.map(m => ({
         id: m.id,
         summary: m.summary,
@@ -153,7 +176,7 @@ function buildSystemPrompt(memories) {
       lines.push(`- ${m.summary}${tags}${imp}`);
     }
   } else {
-    lines.push("No prior memories matched this query.");
+    lines.push("No prior memories matched this query. If the user asks about their preferences, invite them to share so you can remember.");
   }
 
   lines.push("Be concise and helpful. When acknowledging a memory, keep it natural and brief.");
