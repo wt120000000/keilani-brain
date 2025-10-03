@@ -1,153 +1,161 @@
 // netlify/functions/chat.js
-// Chat endpoint that injects user memories (semantic search + guaranteed recent fallback)
+// Plain JSON chat endpoint with memory-awareness.
+// Version: chat-mem-v3 + "explicit memory ack in first sentence"
 
-const HEADERS = {
+const OPENAI_URL = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
+const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+
+const BASE_ORIGIN = process.env.PUBLIC_BASE_URL || "https://api.keilani.ai"; // sibling Netlify functions
+
+// Basic CORS
+const corsHeaders = {
   "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
   "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With",
-  "Content-Type": "application/json; charset=utf-8",
+  "Access-Control-Allow-Methods": "POST, OPTIONS",
 };
 
-const ok  = (body) => ({ statusCode: 200, headers: HEADERS, body: JSON.stringify(body) });
-const bad = (body) => ({ statusCode: 200, headers: HEADERS, body: JSON.stringify(body) });
+exports.handler = async (event) => {
+  try {
+    if (event.httpMethod === "OPTIONS") {
+      return { statusCode: 200, headers: corsHeaders, body: "" };
+    }
+    if (event.httpMethod !== "POST") {
+      return res(405, { error: "method_not_allowed" });
+    }
+    if (!OPENAI_API_KEY) {
+      return res(500, { error: "server_not_configured", detail: "OPENAI_API_KEY missing" });
+    }
 
-function getOrigin(event) {
-  const proto = (event.headers["x-forwarded-proto"] || "https").split(",")[0].trim();
-  const host  = (event.headers["x-forwarded-host"]  || event.headers.host || "").split(",")[0].trim();
-  if (host) return `${proto}://${host}`;
-  if (process.env.URL) return process.env.URL;
-  return "https://api.keilani.ai";
+    let body;
+    try {
+      body = event.body ? JSON.parse(event.body) : {};
+    } catch {
+      return res(400, { error: "bad_json" });
+    }
+
+    const message = (body.message || "").trim();
+    const userId = (body.userId || body.user_id || "").trim(); // accept either casing
+    const history = Array.isArray(body.history) ? body.history : [];
+
+    if (!message) {
+      return res(400, { error: "missing_fields", need: ["message"] });
+    }
+
+    // ---- Memory lookup via sibling function ----
+    let memoriesUsed = [];
+    let memDiag = { memCount: 0, memMode: "none" };
+    try {
+      const memResp = await fetch(`${BASE_ORIGIN}/.netlify/functions/memory-search`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          userId: userId || undefined,
+          query: message,
+          limit: 8,
+        }),
+      });
+      const memJson = await memResp.json().catch(() => ({}));
+      if (memResp.ok && memJson?.ok) {
+        memoriesUsed = Array.isArray(memJson.results) ? memJson.results : [];
+        memDiag.memCount = memoriesUsed.length || 0;
+        memDiag.memMode = memJson.mode || "unknown";
+      }
+    } catch (e) {
+      memDiag.memError = String(e?.message || e);
+    }
+
+    // ---- Build system prompt ----
+    const systemPrompt = buildSystemPrompt(memoriesUsed);
+
+    // ---- Build messages ----
+    const msgs = [{ role: "system", content: systemPrompt }];
+
+    if (history.length) {
+      for (const h of history.slice(-8)) {
+        if (!h || typeof h !== "object") continue;
+        const r = h.role === "assistant" ? "assistant" : "user";
+        const c = typeof h.content === "string" ? h.content : "";
+        if (c) msgs.push({ role: r, content: c });
+      }
+    }
+
+    msgs.push({ role: "user", content: message });
+
+    // ---- Call OpenAI ----
+    const oa = await fetch(`${OPENAI_URL}/chat/completions`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
+      body: JSON.stringify({
+        model: OPENAI_MODEL,
+        messages: msgs,
+        temperature: process.env.OPENAI_INCLUDE_TEMPERATURE ? Number(process.env.OPENAI_TEMPERATURE || 0.7) : undefined,
+        max_tokens: process.env.OPENAI_MAX_OUTPUT_TOKENS ? Number(process.env.OPENAI_MAX_OUTPUT_TOKENS) : undefined,
+      }),
+    });
+
+    const j = await oa.json().catch(() => ({}));
+    if (!oa.ok) {
+      return res(500, {
+        error: "openai_error",
+        status: oa.status,
+        detail: j?.error || j,
+        version: "chat-mem-v3",
+        ...memDiag,
+        memoriesUsed,
+      });
+    }
+
+    const reply = j?.choices?.[0]?.message?.content?.trim?.() || "";
+
+    return res(200, {
+      version: "chat-mem-v3",
+      reply,
+      ...memDiag,
+      memoriesUsed: memoriesUsed.map(m => ({
+        id: m.id,
+        summary: m.summary,
+        created_at: m.created_at,
+        importance: m.importance,
+        tags: m.tags || [],
+      })),
+    });
+  } catch (err) {
+    return res(500, { error: "server_error", detail: String(err?.message || err) });
+  }
+};
+
+// ---------- helpers ----------
+
+function res(statusCode, obj) {
+  return {
+    statusCode,
+    headers: {
+      "Content-Type": "application/json",
+      ...corsHeaders,
+    },
+    body: JSON.stringify(obj),
+  };
 }
 
 function buildSystemPrompt(memories) {
   const lines = [];
   lines.push("You are Keilani, a friendly AI voice companion.");
-  if (memories?.length) {
+  lines.push(
+    "If any user memories are present, you MUST acknowledge at least one relevant memory explicitly in your first sentence, unless acknowledging it would clearly be inappropriate."
+  );
+
+  if (Array.isArray(memories) && memories.length) {
     lines.push("Known user memories (most recent first):");
     for (const m of memories) {
       const tags = Array.isArray(m.tags) && m.tags.length ? ` [tags: ${m.tags.join(", ")}]` : "";
-      const imp  = Number.isFinite(m.importance) ? ` (importance ${m.importance})` : "";
+      const imp = Number.isFinite(m.importance) ? ` (importance ${m.importance})` : "";
       lines.push(`- ${m.summary}${tags}${imp}`);
     }
   } else {
     lines.push("No prior memories matched this query.");
   }
-  lines.push("Be concise and helpful. If a memory is relevant, weave it naturally into your response.");
+
+  lines.push("Be concise and helpful. When acknowledging a memory, keep it natural and brief.");
   return lines.join("\n");
 }
-
-async function fetchJson(url, opts) {
-  const r = await fetch(url, opts);
-  const text = await r.text();
-  try {
-    return { ok: r.ok, status: r.status, json: JSON.parse(text) };
-  } catch {
-    return { ok: r.ok, status: r.status, json: null, text };
-  }
-}
-
-// Always try semantic search; if zero, fetch recent N (fallback)
-async function getMemoriesWithFallback(origin, { userId, semanticQuery, limit = 8 }) {
-  let results = [];
-  let mode = "semantic";
-
-  // 1) semantic (query = user message)
-  try {
-    const { json } = await fetchJson(`${origin}/.netlify/functions/memory-search`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ userId, query: semanticQuery, limit }),
-    });
-    if (json?.ok && Array.isArray(json.results)) results = json.results;
-  } catch (e) {
-    console.warn("memory-search semantic error:", e?.message || e);
-  }
-
-  // 2) guaranteed fallback to latest if nothing found
-  if (!results.length) {
-    mode = "recent_fallback";
-    try {
-      const { json } = await fetchJson(`${origin}/.netlify/functions/memory-search`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ userId, query: "", limit }), // empty => latest
-      });
-      if (json?.ok && Array.isArray(json.results)) results = json.results;
-    } catch (e) {
-      console.warn("memory-search recent fallback error:", e?.message || e);
-    }
-  }
-
-  return { results, mode };
-}
-
-async function callOpenAI(systemPrompt, userMsg) {
-  const model  = process.env.OPENAI_MODEL || "gpt-4o-mini";
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) throw new Error("OPENAI_API_KEY not set");
-
-  const r = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: {
-      "Content-Type": "application/json",
-      "Authorization": "Bearer " + apiKey,
-    },
-    body: JSON.stringify({
-      model,
-      temperature: Number(process.env.OPENAI_TEMPERATURE ?? 0.4),
-      max_tokens: Number(process.env.OPENAI_MAX_OUTPUT_TOKENS ?? 300),
-      messages: [
-        { role: "system", content: systemPrompt },
-        { role: "user", content: userMsg },
-      ],
-    }),
-  });
-
-  if (!r.ok) {
-    const txt = await r.text().catch(() => "");
-    throw new Error(`OpenAI ${r.status}: ${txt}`);
-  }
-  const j = await r.json();
-  return j?.choices?.[0]?.message?.content ?? "";
-}
-
-exports.handler = async (event) => {
-  if (event.httpMethod === "OPTIONS") return ok({ ok: true });
-  if (event.httpMethod !== "POST") return bad({ error: "method_not_allowed" });
-
-  let payload = {};
-  try { payload = JSON.parse(event.body || "{}"); } catch {}
-
-  const message = payload.message || "";
-  const userId  = payload.userId || null;
-
-  if (!message) return bad({ version: "chat-mem-v3", error: "missing_message" });
-
-  const origin = getOrigin(event);
-
-  // Pull memories (semantic then recent)
-  const { results: memories, mode: memMode } = userId
-    ? await getMemoriesWithFallback(origin, { userId, semanticQuery: message, limit: 8 })
-    : { results: [], mode: "no_user" };
-
-  const system = buildSystemPrompt(memories);
-
-  try {
-    const reply = await callOpenAI(system, message);
-    return ok({
-      version: "chat-mem-v3",
-      memCount: memories.length,
-      memMode,
-      memoriesUsed: memories.map((m) => ({
-        id: m.id,
-        summary: m.summary,
-        created_at: m.created_at,
-        tags: m.tags,
-        importance: m.importance,
-      })),
-      reply,
-    });
-  } catch (e) {
-    return bad({ version: "chat-mem-v3", error: "upstream_error", detail: String(e.message || e) });
-  }
-};
