@@ -1,93 +1,133 @@
 // netlify/functions/memory-upsert.mjs
-// Upsert a single "memory" row for a user.
-// Body JSON: { user_id: uuid, summary: string, importance?: number, tags?: string[] }
+import { createClient } from '@supabase/supabase-js';
 
-import { createClient } from "@supabase/supabase-js";
+const supabaseUrl = process.env.SUPABASE_URL;
+const supabaseKey =
+  process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE;
 
-/* ---------- helpers ---------- */
-const ALLOW_ORIGIN = "*";
-const commonHeaders = {
-  "Access-Control-Allow-Origin": ALLOW_ORIGIN,
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization",
-  "Content-Type": "application/json; charset=utf-8",
-};
-
-function ok(body) {
-  return { statusCode: 200, headers: commonHeaders, body: JSON.stringify(body) };
-}
-function bad(body) {
-  return { statusCode: 200, headers: commonHeaders, body: JSON.stringify(body) };
-}
-
-function getSupabase() {
-  const supabaseUrl = process.env.SUPABASE_URL;
-  const supabaseKey =
-    process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE;
-
-  if (!supabaseUrl || !supabaseKey) {
-    throw {
-      code: "server_not_configured",
-      message: "Required env vars missing on Netlify",
-      missing: [
-        ...(supabaseUrl ? [] : ["SUPABASE_URL"]),
-        ...(supabaseKey ? [] : ["SUPABASE_SERVICE_KEY or SUPABASE_SERVICE_ROLE"]),
-      ],
-    };
-  }
-  return createClient(supabaseUrl, supabaseKey, {
-    auth: { persistSession: false },
+function resJson(status, body) {
+  return new Response(JSON.stringify(body), {
+    status,
+    headers: {
+      'Content-Type': 'application/json',
+      'Access-Control-Allow-Origin': '*',
+      'Access-Control-Allow-Methods': 'POST, OPTIONS',
+      'Access-Control-Allow-Headers': 'Content-Type, Authorization',
+    },
   });
 }
 
-/* ---------- function ---------- */
-export async function handler(event) {
-  if (event.httpMethod === "OPTIONS") return ok({ ok: true });
-
-  if (event.httpMethod !== "POST") {
-    return bad({ error: "method_not_allowed", detail: "Use POST" });
+export const handler = async (event) => {
+  // CORS preflight
+  if (event.httpMethod === 'OPTIONS') {
+    return resJson(200, { ok: true });
   }
 
-  let payload;
-  try {
-    payload = JSON.parse(event.body || "{}");
-  } catch {
-    return bad({ error: "invalid_json" });
-  }
-
-  const userId = payload.user_id || payload.userId;
-  const summary = payload.summary || payload.text; // allow legacy "text"
-  const importance = Number.isFinite(payload.importance)
-    ? payload.importance
-    : null;
-  const tags = Array.isArray(payload.tags) ? payload.tags : null;
-
-  if (!userId || !summary) {
-    return bad({
-      error: "missing_fields",
-      need: ["userId", "summary"],
-      got: Object.keys(payload || {}),
+  if (!supabaseUrl || !supabaseKey) {
+    return resJson(500, {
+      error: 'server_not_configured',
+      detail: 'Required env vars missing on Netlify',
+      missing: ['SUPABASE_URL', 'SUPABASE_SERVICE_KEY or SUPABASE_SERVICE_ROLE'].filter(
+        (k) => !process.env[k]
+      ),
     });
   }
 
-  try {
-    const supabase = getSupabase();
+  if (event.httpMethod !== 'POST') {
+    return resJson(405, { error: 'method_not_allowed' });
+  }
 
+  let body;
+  try {
+    body = JSON.parse(event.body || '{}');
+  } catch {
+    return resJson(400, { error: 'bad_json' });
+  }
+
+  const userId = body.user_id || body.userId;
+  const summary = body.summary || body.text;
+  const importance = body.importance ?? null;
+  const tags = Array.isArray(body.tags) ? body.tags : [];
+
+  if (!userId || !summary) {
+    return resJson(200, {
+      error: 'missing_fields',
+      need: ['userId', 'text'],
+      got: Object.keys(body),
+    });
+  }
+
+  const supabase = createClient(supabaseUrl, supabaseKey, {
+    auth: { persistSession: false },
+  });
+
+  try {
+    // 1) insert the row first (fast write)
     const { data, error } = await supabase
-      .from("memories")
+      .from('memories')
       .insert([{ user_id: userId, summary, importance, tags }])
-      .select("id, created_at")
+      .select('id, created_at')
       .single();
 
     if (error) {
-      return bad({ error: "db_error", detail: error.message });
+      return resJson(500, { error: 'db_insert_failed', detail: error.message });
     }
 
-    return ok({ ok: true, id: data.id, created_at: data.created_at });
-  } catch (e) {
-    if (e?.code === "server_not_configured") {
-      return bad({ error: e.code, detail: e.message, missing: e.missing });
+    const insertedId = data.id;
+
+    // 2) compute embedding (server-side) and update
+    try {
+      const embedding =
+        Array.isArray(body.embedding) && body.embedding.length
+          ? body.embedding
+          : await embedText(summary);
+
+      if (Array.isArray(embedding) && embedding.length > 0) {
+        const { error: upErr } = await supabase
+          .from('memories')
+          .update({ embedding })
+          .eq('id', insertedId);
+
+        if (upErr) {
+          // not fatal – row exists without embedding; a background job could fill it later
+          console.warn('[mem-upsert] embedding update failed:', upErr.message);
+        }
+      }
+    } catch (e) {
+      console.warn('[mem-upsert] embedText failed:', e?.message || e);
+      // non-fatal
     }
-    return bad({ error: "server_error", detail: String(e?.message || e) });
+
+    return resJson(200, { ok: true, id: insertedId, created_at: data.created_at });
+  } catch (e) {
+    return resJson(500, { error: 'server_error', detail: String(e) });
   }
+};
+
+// ---- helpers ----
+
+async function embedText(input) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error('OPENAI_API_KEY missing');
+  const payload = {
+    model: 'text-embedding-3-small',
+    input,
+  };
+  const r = await fetch('https://api.openai.com/v1/embeddings', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${apiKey}`,
+    },
+    body: JSON.stringify(payload),
+  });
+  if (!r.ok) {
+    const t = await r.text();
+    throw new Error(`OpenAI embeddings failed: ${r.status} ${t}`);
+  }
+  const j = await r.json();
+  const vec = j?.data?.[0]?.embedding || [];
+  return vec;
 }
+
+export default { handler };
