@@ -1,184 +1,169 @@
 // netlify/functions/chat.js
-// Plain JSON chat endpoint with memory-awareness.
-// Version: chat-mem-v3.1 (two-pass memory fetch + explicit memory ack)
+// Chat with memory fetch (v3.2). CommonJS for maximum Netlify compatibility.
 
-const OPENAI_URL = process.env.OPENAI_BASE_URL || "https://api.openai.com/v1";
-const OPENAI_MODEL = process.env.OPENAI_MODEL || "gpt-4o-mini";
-const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const ok = (body, extraHeaders = {}) => ({
+  statusCode: 200,
+  headers: {
+    "Content-Type": "application/json",
+    "Access-Control-Allow-Origin": "*",
+    "Access-Control-Allow-Methods": "POST, OPTIONS",
+    "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With",
+    ...extraHeaders,
+  },
+  body: JSON.stringify(body),
+});
 
-const BASE_ORIGIN = process.env.PUBLIC_BASE_URL || "https://api.keilani.ai"; // sibling Netlify functions
+const bad = (code, body) => ({
+  statusCode: code,
+  headers: {
+    "Content-Type": "application/json",
+    "Access-Control-Allow-Origin": "*",
+  },
+  body: JSON.stringify(body),
+});
 
-// Basic CORS
-const corsHeaders = {
-  "Access-Control-Allow-Origin": "*",
-  "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With",
-  "Access-Control-Allow-Methods": "POST, OPTIONS",
-};
+function baseUrl() {
+  // In prod on Netlify, URL is your custom domain; fallback to deploy URL or localhost for dev.
+  return (
+    process.env.URL ||
+    process.env.DEPLOY_URL ||
+    process.env.DEPLOY_PRIME_URL ||
+    "http://localhost:8888"
+  );
+}
+
+async function fetchMemories({ userId, query, limit = 5 }) {
+  try {
+    const r = await fetch(`${baseUrl()}/.netlify/functions/memory-search`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ userId, query, limit }),
+    });
+    const j = await r.json().catch(() => ({}));
+    if (!r.ok || !j || j.error) {
+      return { results: [], mode: "error", error: j?.error || `mem_search_${r.status}` };
+    }
+    return { results: j.results || [], mode: j.mode || "unknown" };
+  } catch (e) {
+    return { results: [], mode: "error", error: String(e && e.message || e) };
+  }
+}
+
+function summarizeMemories(mems, cap = 5) {
+  if (!Array.isArray(mems) || mems.length === 0) return "";
+  const top = mems.slice(0, cap);
+  const lines = top.map((m, i) => {
+    const t = (m.tags && m.tags.length) ? ` [tags: ${m.tags.slice(0,3).join(", ")}]` : "";
+    return `• ${m.summary}${t}`;
+  });
+  return lines.join("\n");
+}
+
+function recallQueryFromMessage(message) {
+  // super light heuristic: if user asks "what did I say / what do you know"
+  const m = (message || "").toLowerCase();
+  if (
+    m.includes("what did i say") ||
+    m.includes("what do you know") ||
+    m.includes("remember") ||
+    m.includes("recall")
+  ) {
+    return ""; // force recent_fallback path for broad recall
+  }
+  // Otherwise try to use the user’s message as the semantic-ish query (text ilike in our fn)
+  return message || "";
+}
+
+async function callOpenAI({ system, user, model, temperature, maxTokens }) {
+  const apiKey = process.env.OPENAI_API_KEY;
+  if (!apiKey) throw new Error("OPENAI_API_KEY missing");
+
+  const body = {
+    model: model || process.env.OPENAI_MODEL || "gpt-4o-mini",
+    temperature:
+      process.env.OPENAI_INCLUDE_TEMPERATURE === "1"
+        ? Number(process.env.OPENAI_TEMPERATURE || 0.3)
+        : (typeof temperature === "number" ? temperature : 0.3),
+    max_tokens: Number(process.env.OPENAI_MAX_OUTPUT_TOKENS || maxTokens || 300),
+    messages: [
+      { role: "system", content: system },
+      { role: "user", content: user },
+    ],
+  };
+
+  const rsp = await fetch("https://api.openai.com/v1/chat/completions", {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
+    },
+    body: JSON.stringify(body),
+  });
+
+  const json = await rsp.json();
+  if (!rsp.ok) {
+    const msg = json?.error?.message || `openai_${rsp.status}`;
+    throw new Error(msg);
+  }
+  const text = json?.choices?.[0]?.message?.content?.trim() || "";
+  return text;
+}
 
 exports.handler = async (event) => {
   try {
-    if (event.httpMethod === "OPTIONS") {
-      return { statusCode: 200, headers: corsHeaders, body: "" };
-    }
-    if (event.httpMethod !== "POST") {
-      return res(405, { error: "method_not_allowed" });
-    }
-    if (!OPENAI_API_KEY) {
-      return res(500, { error: "server_not_configured", detail: "OPENAI_API_KEY missing" });
-    }
+    if (event.httpMethod === "OPTIONS") return ok({ ok: true });
+    if (event.httpMethod !== "POST") return bad(405, { error: "method_not_allowed" });
 
-    let body;
+    let payload;
     try {
-      body = event.body ? JSON.parse(event.body) : {};
+      payload = JSON.parse(event.body || "{}");
     } catch {
-      return res(400, { error: "bad_json" });
+      return ok({ error: "bad_json" });
     }
 
-    const message = (body.message || "").trim();
-    const userId = (body.userId || body.user_id || "").trim(); // accept either casing
-    const history = Array.isArray(body.history) ? body.history : [];
+    const message = (payload.message || "").toString();
+    const userId = payload.userId || payload.user_id || "";
+    if (!message) return ok({ error: "missing_message" });
 
-    if (!message) {
-      return res(400, { error: "missing_fields", need: ["message"] });
-    }
-
-    // ---- Memory lookup (two-pass) ----
+    // Memory lookup (semantic-ish text search or recent fallback)
     let memoriesUsed = [];
-    let memDiag = { version: "chat-mem-v3.1", memCount: 0, memMode: "none" };
+    let memMode = "unknown";
 
-    // Pass 1: query-based search
-    try {
-      const memResp1 = await fetch(`${BASE_ORIGIN}/.netlify/functions/memory-search`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          userId: userId || undefined,
-          query: message,
-          limit: 8,
-        }),
-      });
-      const memJson1 = await memResp1.json().catch(() => ({}));
-      if (memResp1.ok && memJson1?.ok) {
-        memoriesUsed = Array.isArray(memJson1.results) ? memJson1.results : [];
-        memDiag.memCount = memoriesUsed.length || 0;
-        memDiag.memMode = memJson1.mode || "unknown";
-      }
-    } catch (e) {
-      memDiag.memError = String(e?.message || e);
+    if (userId) {
+      const query = recallQueryFromMessage(message);
+      const { results, mode } = await fetchMemories({ userId, query, limit: 5 });
+      memoriesUsed = results || [];
+      memMode = mode || "unknown";
     }
 
-    // Pass 2: if no hits, recent fallback
-    if ((!memoriesUsed || memoriesUsed.length === 0) && userId) {
-      try {
-        const memResp2 = await fetch(`${BASE_ORIGIN}/.netlify/functions/memory-search`, {
-          method: "POST",
-          headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            userId,
-            recent: true,
-            limitRecent: 5,
-          }),
-        });
-        const memJson2 = await memResp2.json().catch(() => ({}));
-        if (memResp2.ok && memJson2?.ok && Array.isArray(memJson2.results)) {
-          memoriesUsed = memJson2.results;
-          memDiag.memCount = memoriesUsed.length || 0;
-          memDiag.memMode = memJson2.mode || "recent_fallback";
-        }
-      } catch (e) {
-        memDiag.memError2 = String(e?.message || e);
-      }
-    }
+    const memDigest = summarizeMemories(memoriesUsed, 5);
 
-    // ---- Build system prompt ----
-    const systemPrompt = buildSystemPrompt(memoriesUsed);
+    const systemPrompt = `
+You are Keilani: warm, concise, helpful, and adaptive. Keep replies clear and human.
+If user memories are provided, incorporate them naturally without over-stating certainty.
 
-    // ---- Build messages ----
-    const msgs = [{ role: "system", content: systemPrompt }];
+USER MEMORIES (if any):
+${memDigest || "(none)"} 
 
-    if (history.length) {
-      for (const h of history.slice(-8)) {
-        if (!h || typeof h !== "object") continue;
-        const r = h.role === "assistant" ? "assistant" : "user";
-        const c = typeof h.content === "string" ? h.content : "";
-        if (c) msgs.push({ role: r, content: c });
-      }
-    }
+Guidelines:
+- If a memory seems relevant, acknowledge it briefly (e.g., "I remember you like synthwave").
+- Do not invent personal facts.
+- If no relevant memories, proceed normally.
+`;
 
-    msgs.push({ role: "user", content: message });
-
-    // ---- Call OpenAI ----
-    const oa = await fetch(`${OPENAI_URL}/chat/completions`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json", Authorization: `Bearer ${OPENAI_API_KEY}` },
-      body: JSON.stringify({
-        model: OPENAI_MODEL,
-        messages: msgs,
-        temperature: process.env.OPENAI_INCLUDE_TEMPERATURE ? Number(process.env.OPENAI_TEMPERATURE || 0.7) : undefined,
-        max_tokens: process.env.OPENAI_MAX_OUTPUT_TOKENS ? Number(process.env.OPENAI_MAX_OUTPUT_TOKENS) : undefined,
-      }),
+    const reply = await callOpenAI({
+      system: systemPrompt,
+      user: message,
     });
 
-    const j = await oa.json().catch(() => ({}));
-    if (!oa.ok) {
-      return res(500, {
-        error: "openai_error",
-        status: oa.status,
-        detail: j?.error || j,
-        ...memDiag,
-        memoriesUsed,
-      });
-    }
-
-    const reply = j?.choices?.[0]?.message?.content?.trim?.() || "";
-
-    return res(200, {
-      ...memDiag,
+    return ok({
+      version: "chat-mem-v3.2",
       reply,
-      memoriesUsed: memoriesUsed.map(m => ({
-        id: m.id,
-        summary: m.summary,
-        created_at: m.created_at,
-        importance: m.importance,
-        tags: m.tags || [],
-      })),
+      memCount: memoriesUsed.length,
+      memMode,
+      memoriesUsed,
     });
-  } catch (err) {
-    return res(500, { error: "server_error", detail: String(err?.message || err) });
+  } catch (e) {
+    return ok({ error: "server_error", detail: String(e && e.message || e) });
   }
 };
-
-// ---------- helpers ----------
-
-function res(statusCode, obj) {
-  return {
-    statusCode,
-    headers: {
-      "Content-Type": "application/json",
-      ...corsHeaders,
-    },
-    body: JSON.stringify(obj),
-  };
-}
-
-function buildSystemPrompt(memories) {
-  const lines = [];
-  lines.push("You are Keilani, a friendly AI voice companion.");
-  lines.push(
-    "If any user memories are present, you MUST acknowledge at least one relevant memory explicitly in your first sentence, unless acknowledging it would clearly be inappropriate."
-  );
-
-  if (Array.isArray(memories) && memories.length) {
-    lines.push("Known user memories (most recent first):");
-    for (const m of memories) {
-      const tags = Array.isArray(m.tags) && m.tags.length ? ` [tags: ${m.tags.join(", ")}]` : "";
-      const imp = Number.isFinite(m.importance) ? ` (importance ${m.importance})` : "";
-      lines.push(`- ${m.summary}${tags}${imp}`);
-    }
-  } else {
-    lines.push("No prior memories matched this query. If the user asks about their preferences, invite them to share so you can remember.");
-  }
-
-  lines.push("Be concise and helpful. When acknowledging a memory, keep it natural and brief.");
-  return lines.join("\n");
-}
