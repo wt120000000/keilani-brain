@@ -1,7 +1,7 @@
 // netlify/functions/chat.js
 // CJS Netlify Function — memory-aware chat (v3.4)
 
-const fetch = global.fetch || require("node-fetch");
+const fetch = globalThis.fetch;
 
 const NODE = process.version;
 const {
