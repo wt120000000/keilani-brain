@@ -3,7 +3,7 @@
 
 const fetch = global.fetch || require("node-fetch");
 
-// ----- Config helpers --------------------------------------------------------
+// ----- Config ---------------------------------------------------
 const NODE = process.version;
 const {
   OPENAI_API_KEY,
@@ -31,7 +31,6 @@ function fnUrl(event, name) {
   return `${proto}://${host}/.netlify/functions/${name}`;
 }
 
-// Minimal JSON response helper
 function json(status, body, extraHeaders = {}) {
   return {
     statusCode: status,
@@ -46,7 +45,7 @@ function json(status, body, extraHeaders = {}) {
   };
 }
 
-// ----- Memory search + (optional) autosave -----------------------------------
+// ----- Memory helpers -------------------------------------------
 async function searchMemories(event, userId, query, limit = 8) {
   const url = fnUrl(event, "memory-search");
   const res = await fetch(url, {
@@ -75,69 +74,49 @@ async function upsertMemory(event, payload) {
   return res.json();
 }
 
-// Extract a “remember that …” statement (very simple heuristic)
+// Extract a “remember that …” fact
 function extractExplicitMemory(message) {
-  // examples:
-  // "remember that my favorite game is Hades."
-  // "Remember, I'm vegetarian."
-  const m =
-    message.match(/\bremember(?:\s+that)?\s+(.*?)(?:\.*\s*)$/i);
+  const m = message.match(/\bremember(?:\s+that)?\s+(.*?)(?:\.*\s*)$/i);
   if (!m) return null;
-
   let summary = m[1].trim();
-  // Avoid saving empty or obviously non-fact text
   if (!summary || summary.length < 3) return null;
-
-  // Clean trailing quotes/period spam
   summary = summary.replace(/["“”]+/g, "").replace(/\s*\.+$/, "").trim();
   return summary;
 }
 
-// ----- Prompt construction ----------------------------------------------------
+// ----- Prompt ----------------------------------------------------
 function buildSystemPrompt(userFacts) {
   const factsBlock =
     userFacts && userFacts.length
-      ? `Known facts about this user (from long-term memory):\n${userFacts
-          .map((f, i) => `- ${f.summary}`)
-          .join("\n")}\n\n`
+      ? `Known facts about this user (from long-term memory):\n${userFacts.map(f => `- ${f.summary}`).join("\n")}\n\n`
       : "";
 
   return [
     "You are Keilani — warm, playful, quick, and adaptive.",
     "Priorities:",
     "1) Be concise but engaging. 2) Use the user's known preferences when helpful.",
-    "3) If you reference a known fact, weave it naturally (don't sound robotic).",
+    "3) If you reference a known fact, weave it naturally.",
     "",
     factsBlock,
     "If user asks for recommendations, bias toward their known preferences.",
   ].join("\n");
 }
 
-// ----- OpenAI call ------------------------------------------------------------
+// ----- OpenAI ----------------------------------------------------
 async function callOpenAI(messages) {
   if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY missing");
   const url = "https://api.openai.com/v1/chat/completions";
 
-  const body = {
-    model: OPENAI_MODEL,
-    messages,
-  };
-
-  if (asBool(OPENAI_INCLUDE_TEMPERATURE) && OPENAI_TEMPERATURE) {
-    body.temperature = Number(OPENAI_TEMPERATURE);
-  }
+  const body = { model: OPENAI_MODEL, messages };
+  if (asBool(OPENAI_INCLUDE_TEMPERATURE) && OPENAI_TEMPERATURE) body.temperature = Number(OPENAI_TEMPERATURE);
   if (OPENAI_MAX_OUTPUT_TOKENS) {
-    // new param name on some models; fallback to max_tokens
     body.max_output_tokens = Number(OPENAI_MAX_OUTPUT_TOKENS);
     body.max_tokens = Number(OPENAI_MAX_OUTPUT_TOKENS);
   }
 
   const res = await fetch(url, {
     method: "POST",
-    headers: {
-      Authorization: `Bearer ${OPENAI_API_KEY}`,
-      "Content-Type": "application/json",
-    },
+    headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
     body: JSON.stringify(body),
   });
   if (!res.ok) {
@@ -145,31 +124,21 @@ async function callOpenAI(messages) {
     throw new Error(`OpenAI error: ${res.status} ${text}`);
   }
   const data = await res.json();
-  const reply = data.choices?.[0]?.message?.content?.trim() || "";
-  return reply;
+  return data.choices?.[0]?.message?.content?.trim() || "";
 }
 
-// ----- Handler ---------------------------------------------------------------
+// ----- Handler ---------------------------------------------------
 exports.handler = async (event) => {
   try {
-    if (event.httpMethod === "OPTIONS") {
-      return json(200, { ok: true });
-    }
-    if (event.httpMethod !== "POST") {
-      return json(405, { error: "Method Not Allowed" });
-    }
+    if (event.httpMethod === "OPTIONS") return json(200, { ok: true });
+    if (event.httpMethod !== "POST") return json(405, { error: "Method Not Allowed" });
 
     const body = JSON.parse(event.body || "{}");
     const { message, userId } = body;
+    if (!message || !userId) return json(400, { error: "Missing message or userId" });
 
-    if (!message || !userId) {
-      return json(400, { error: "Missing message or userId" });
-    }
-
-    // 1) Look up memories related to the message
-    let memCount = 0;
-    let memMode = "unknown";
-    let memoriesUsed = [];
+    // 1) Fetch memories
+    let memCount = 0, memMode = "unknown", memoriesUsed = [];
     try {
       const mem = await searchMemories(event, userId, message, 8);
       memCount = Number(mem.count || 0);
@@ -182,24 +151,22 @@ exports.handler = async (event) => {
         tags: r.tags || [],
       }));
     } catch (e) {
+      memMode = "error";
       log("warn", "memory-search error:", e.message);
     }
 
-    // 2) Build the prompt with memory facts
-    const system = buildSystemPrompt(memoriesUsed);
-    const userMsg = message;
-
+    // 2) Build prompt with known facts
     const messages = [
-      { role: "system", content: system },
-      { role: "user", content: userMsg },
+      { role: "system", content: buildSystemPrompt(memoriesUsed) },
+      { role: "user", content: message },
     ];
 
-    // 3) If explicit autosave phrase and MEM_AUTO is on, try to save
-    let memAutoStatus = asBool(MEM_AUTO) ? "on" : "off";
+    // 3) Explicit “remember …” autosave (optional)
+    let memAuto = asBool(MEM_AUTO) ? "on" : "off";
     let memExtracted = null;
     let memSaved = null;
 
-    if (memAutoStatus === "on") {
+    if (memAuto === "on") {
       const extracted = extractExplicitMemory(message);
       if (extracted) {
         memExtracted = extracted;
@@ -211,11 +178,9 @@ exports.handler = async (event) => {
             tags: ["autosave"],
           });
           memSaved = { ok: true, id: saved.id, created_at: saved.created_at };
-          // Also add a quick assistant “ack” hint to the prompt so model can acknowledge naturally
           messages.unshift({
             role: "system",
-            content:
-              "User just shared a new personal fact; it has been saved to long-term memory. If appropriate, acknowledge briefly and move on.",
+            content: "User shared a new personal fact; it has been saved. Acknowledge briefly and continue.",
           });
         } catch (e) {
           memSaved = { ok: false, error: e.message };
@@ -224,27 +189,23 @@ exports.handler = async (event) => {
       }
     }
 
-    // 4) Call OpenAI
+    // 4) Get the reply
     const reply = await callOpenAI(messages);
 
-    // 5) Return telemetry + reply
+    // 5) Return with telemetry
     return json(200, {
       version: "chat-mem-v3.4",
       reply,
       memCount,
       memMode,
       memoriesUsed,
-      memAuto: memAutoStatus,
+      memAuto,
       memExtracted,
       memSaved,
       node: NODE,
     });
   } catch (err) {
     log("error", "chat fatal:", err);
-    return json(500, {
-      error: "chat_failed",
-      detail: err.message || String(err),
-      version: "chat-mem-v3.4",
-    });
+    return json(500, { error: "chat_failed", detail: err.message || String(err), version: "chat-mem-v3.4" });
   }
 };
