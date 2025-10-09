@@ -1,4 +1,3 @@
-// netlify/edge-functions/chat-stream.mjs
 export default async (request) => {
   const url = new URL(request.url);
   url.pathname = "/.netlify/functions/chat";
@@ -10,6 +9,4 @@ export default async (request) => {
   });
 };
 
-export const config = {
-  path: "/api/chat",
-};
+export const config = { path: "/api/chat" };
