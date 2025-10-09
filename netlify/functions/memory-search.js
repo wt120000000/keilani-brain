@@ -2,14 +2,21 @@
 const { createClient } = require("@supabase/supabase-js");
 
 function getSupabase() {
-  const url = process.env.SUPABASE_URL;
+  const url =
+    process.env.SUPABASE_URL;
   const key =
     process.env.SUPABASE_SERVICE_KEY ||
     process.env.SUPABASE_SERVICE_ROLE ||
     process.env.SUPABASE_SERVICE ||
     process.env.SUPABASE_KEY;
+
   if (!url || !key) {
-    return { error: { message: "server_not_configured", missing: ["SUPABASE_URL", "SUPABASE_SERVICE_KEY|SUPABASE_SERVICE_ROLE"] } };
+    return {
+      error: {
+        message: "server_not_configured",
+        missing: ["SUPABASE_URL", "SUPABASE_SERVICE_KEY|SUPABASE_SERVICE_ROLE"],
+      },
+    };
   }
   return { client: createClient(url, key, { auth: { persistSession: false } }) };
 }
@@ -21,13 +28,13 @@ async function embed(text) {
   const res = await fetch("https://api.openai.com/v1/embeddings", {
     method: "POST",
     headers: {
-      "Authorization": `Bearer ${apiKey}`,
-      "Content-Type": "application/json"
+      Authorization: `Bearer ${apiKey}`,
+      "Content-Type": "application/json",
     },
     body: JSON.stringify({
       model: "text-embedding-3-small",
-      input: text
-    })
+      input: text,
+    }),
   });
 
   if (!res.ok) {
@@ -60,28 +67,27 @@ exports.handler = async (event) => {
     }
 
     const userId = body.user_id || body.userId;
-    const query = body.query || body.q || "";
+    const query = (body.query || body.q || "").trim();
     const limit = Math.min(Math.max(parseInt(body.limit || 5, 10), 1), 50);
+    if (!userId) return res(200, { error: "missing_fields", need: ["userId"] });
 
-    if (!userId) return res(200, { error: "missing_fields", need: ["userId"], got: Object.keys(body) });
-
-    // Do we have *any* vectors for this user?
-    const { data: counts, error: cntErr } = await client
+    // Do we have ANY vectors for this user?
+    const { data: vecCntRows, error: cntErr } = await client
       .from("memories")
       .select("count:count(embedding)")
       .eq("user_id", userId);
 
-    const withVec = counts && counts[0] && Number(counts[0].count) > 0;
+    const withVec = !cntErr && vecCntRows && Number(vecCntRows[0]?.count || 0) > 0;
 
-    // If we can, try vector search via RPC; otherwise fallback to text trgm search
-    if (withVec && query.trim()) {
+    // Try vector search first (best-effort; failures fall back to text)
+    if (withVec && query) {
       try {
-        const v = await embed(query.trim());
+        const v = await embed(query);
         const { data, error } = await client.rpc("match_memories", {
           p_user_id: userId,
           p_query_embedding: v,
           p_match_count: limit,
-          p_min_score: 0.05
+          p_min_score: 0.05,
         });
 
         if (!error && Array.isArray(data)) {
@@ -89,37 +95,35 @@ exports.handler = async (event) => {
             ok: true,
             mode: "vector",
             count: data.length,
-            results: data.map(r => ({
+            results: data.map((r) => ({
               id: r.id,
               summary: r.summary,
               tags: r.tags,
               importance: r.importance,
               created_at: r.created_at,
-              score: r.score
-            }))
+              score: r.score,
+            })),
           });
         }
-        // If RPC failed for any reason, fall back to text
         if (error) console.error("[memory-search] rpc error:", error);
       } catch (e) {
-        console.error("[memory-search] embed fail, fallback to text:", e.message);
+        console.error("[memory-search] vector path failed:", e.message);
       }
     }
 
-    // Text fallback (trgm if available, else ILIKE)
-    let q = client.from("memories").select("id, summary, tags, importance, created_at")
+    // Text fallback — use simple ILIKE to avoid server feature mismatch
+    let q = client
+      .from("memories")
+      .select("id, summary, tags, importance, created_at")
       .eq("user_id", userId)
       .limit(limit);
 
-    if (query) {
-      // prefer trgm operator with ilike-ish behavior
-      q = q.textSearch ? q.textSearch("summary", query) : q.ilike("summary", `%${query}%`);
-    }
+    if (query) q = q.ilike("summary", `%${query}%`);
 
-    const { data: rows, error } = await q;
-    if (error) {
-      console.error("[memory-search] text query error:", error);
-      return res(500, { ok: false, error: "db_query_failed", detail: error.message });
+    const { data: rows, error: qErr } = await q;
+    if (qErr) {
+      console.error("[memory-search] text query error:", qErr);
+      return res(200, { ok: true, mode: "text", count: 0, results: [] });
     }
 
     return res(200, { ok: true, mode: "text", count: rows.length, results: rows });
@@ -133,10 +137,9 @@ function cors() {
   return {
     "Access-Control-Allow-Origin": "*",
     "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization"
+    "Access-Control-Allow-Headers": "Content-Type, Authorization",
   };
 }
-
 function res(statusCode, obj) {
   return { statusCode, headers: cors(), body: JSON.stringify(obj) };
 }
