@@ -1,145 +1,184 @@
-// CommonJS
+// CommonJS version (works with your current deploy output)
 const { createClient } = require("@supabase/supabase-js");
 
-function getSupabase() {
-  const url =
-    process.env.SUPABASE_URL;
-  const key =
-    process.env.SUPABASE_SERVICE_KEY ||
-    process.env.SUPABASE_SERVICE_ROLE ||
-    process.env.SUPABASE_SERVICE ||
-    process.env.SUPABASE_KEY;
+const OPENAI_API_KEY = process.env.OPENAI_API_KEY;
+const SUPABASE_URL   = process.env.SUPABASE_URL;
+const SUPABASE_KEY   = process.env.SUPABASE_SERVICE_KEY || process.env.SUPABASE_SERVICE_ROLE;
 
-  if (!url || !key) {
-    return {
-      error: {
-        message: "server_not_configured",
-        missing: ["SUPABASE_URL", "SUPABASE_SERVICE_KEY|SUPABASE_SERVICE_ROLE"],
-      },
-    };
-  }
-  return { client: createClient(url, key, { auth: { persistSession: false } }) };
-}
+const MODEL_EMBED = process.env.OPENAI_EMBED_MODEL || "text-embedding-3-small"; // 1536 dims
+const MIN_SIM     = parseFloat(process.env.MEM_MIN_SIM || "0.70");              // 0.70 default
+const HARD_LIMIT  = parseInt(process.env.MEM_SEARCH_LIMIT || "5", 10);
 
-async function embed(text) {
-  const apiKey = process.env.OPENAI_API_KEY;
-  if (!apiKey) throw new Error("missing OPENAI_API_KEY");
+const supabase = createClient(SUPABASE_URL, SUPABASE_KEY, {
+  auth: { persistSession: false }
+});
 
-  const res = await fetch("https://api.openai.com/v1/embeddings", {
+async function embedText(text) {
+  // OpenAI responses format: data[0].embedding (1536 floats)
+  const rsp = await fetch("https://api.openai.com/v1/embeddings", {
     method: "POST",
     headers: {
-      Authorization: `Bearer ${apiKey}`,
-      "Content-Type": "application/json",
+      "Authorization": `Bearer ${OPENAI_API_KEY}`,
+      "Content-Type": "application/json"
     },
     body: JSON.stringify({
-      model: "text-embedding-3-small",
       input: text,
-    }),
+      model: MODEL_EMBED
+    })
   });
 
-  if (!res.ok) {
-    const body = await res.text().catch(() => "");
-    throw new Error(`openai_embed_failed: ${res.status} ${body}`);
+  if (!rsp.ok) {
+    const t = await rsp.text();
+    throw new Error(`embed error: ${rsp.status} ${t}`);
   }
-  const json = await res.json();
-  const vec = json?.data?.[0]?.embedding;
-  if (!Array.isArray(vec)) throw new Error("openai_embed_no_vector");
-  return vec;
+
+  const json = await rsp.json();
+  return json.data[0].embedding;
 }
 
 exports.handler = async (event) => {
+  // CORS preflight
+  if (event.httpMethod === "OPTIONS") {
+    return {
+      statusCode: 200,
+      headers: {
+        "Access-Control-Allow-Origin": "*",
+        "Access-Control-Allow-Methods": "POST, OPTIONS",
+        "Access-Control-Allow-Headers": "Content-Type, Authorization"
+      },
+      body: ""
+    };
+  }
+
   try {
-    if (event.httpMethod === "OPTIONS") {
-      return { statusCode: 200, headers: cors(), body: "" };
-    }
-    if (event.httpMethod !== "POST") {
-      return res(405, { error: "method_not_allowed" });
-    }
+    const body = JSON.parse(event.body || "{}");
+    const user_id = body.user_id;
+    const query   = (body.query || "").trim();
+    const limit   = Math.min(parseInt(body.limit || HARD_LIMIT, 10), 25);
 
-    const { client, error: cfgErr } = getSupabase();
-    if (cfgErr) return res(500, cfgErr);
-
-    let body;
-    try {
-      body = JSON.parse(event.body || "{}");
-    } catch {
-      return res(400, { error: "invalid_json" });
+    if (!user_id || !query) {
+      return json(400, { ok: false, error: "missing user_id or query" });
     }
 
-    const userId = body.user_id || body.userId;
-    const query = (body.query || body.q || "").trim();
-    const limit = Math.min(Math.max(parseInt(body.limit || 5, 10), 1), 50);
-    if (!userId) return res(200, { error: "missing_fields", need: ["userId"] });
+    // Check if this user has any embeddings stored
+    const { data: counts, error: cntErr } = await supabase
+      .rpc("exec_sql", {
+        sql: `
+          select count(*) as rows, count(embedding) as rows_with_vec
+          from public.memories
+          where user_id = $1
+        `,
+        params: [user_id]
+      });
 
-    // Do we have ANY vectors for this user?
-    const { data: vecCntRows, error: cntErr } = await client
-      .from("memories")
-      .select("count:count(embedding)")
-      .eq("user_id", userId);
+    // Fallback when exec_sql helper isn’t present:
+    let rows_with_vec = 0;
+    if (!cntErr && Array.isArray(counts) && counts.length) {
+      rows_with_vec = Number(counts[0].rows_with_vec || 0);
+    } else {
+      const { data: quick, error: qErr } = await supabase
+        .from("memories")
+        .select("id")
+        .eq("user_id", user_id)
+        .not("embedding", "is", null)
+        .limit(1);
+      if (qErr) throw qErr;
+      rows_with_vec = (quick && quick.length) ? 1 : 0;
+    }
 
-    const withVec = !cntErr && vecCntRows && Number(vecCntRows[0]?.count || 0) > 0;
+    const wantVector = rows_with_vec > 0; // ← force vector path if any vectors exist
 
-    // Try vector search first (best-effort; failures fall back to text)
-    if (withVec && query) {
-      try {
-        const v = await embed(query);
-        const { data, error } = await client.rpc("match_memories", {
-          p_user_id: userId,
-          p_query_embedding: v,
-          p_match_count: limit,
-          p_min_score: 0.05,
+    if (wantVector) {
+      // 1) Embed the query
+      const qVec = await embedText(query);
+
+      // 2) Use SQL function if present, otherwise inline SQL
+      // Attempt match_memories() first:
+      const { data: vecMatches, error: vecErr } = await supabase.rpc("match_memories", {
+        p_user_id: user_id,
+        p_query_embedding: qVec,
+        p_match_count: limit,
+        p_min_cosine: MIN_SIM
+      });
+
+      if (!vecErr && Array.isArray(vecMatches)) {
+        return json(200, {
+          ok: true,
+          mode: "vector",
+          count: vecMatches.length,
+          results: vecMatches.map(r => ({
+            id: r.id,
+            summary: r.summary,
+            tags: r.tags,
+            importance: r.importance,
+            created_at: r.created_at,
+            score: r.similarity
+          }))
         });
-
-        if (!error && Array.isArray(data)) {
-          return res(200, {
-            ok: true,
-            mode: "vector",
-            count: data.length,
-            results: data.map((r) => ({
-              id: r.id,
-              summary: r.summary,
-              tags: r.tags,
-              importance: r.importance,
-              created_at: r.created_at,
-              score: r.score,
-            })),
-          });
-        }
-        if (error) console.error("[memory-search] rpc error:", error);
-      } catch (e) {
-        console.error("[memory-search] vector path failed:", e.message);
       }
+
+      // Fallback: inline SQL (works even without the helper function)
+      const { data: inline, error: inlineErr } = await supabase.rpc("exec_sql", {
+        sql: `
+          select id, summary, tags, importance, created_at,
+                 1 - (embedding <=> $2::vector) as similarity
+          from public.memories
+          where user_id = $1
+            and embedding is not null
+          order by embedding <=> $2::vector
+          limit $3
+        `,
+        params: [user_id, qVec, limit]
+      });
+
+      if (inlineErr) throw inlineErr;
+
+      return json(200, {
+        ok: true,
+        mode: "vector",
+        count: inline.length,
+        results: inline.map(r => ({
+          id: r.id,
+          summary: r.summary,
+          tags: r.tags,
+          importance: r.importance,
+          created_at: r.created_at,
+          score: r.similarity
+        }))
+      });
     }
 
-    // Text fallback — use simple ILIKE to avoid server feature mismatch
-    let q = client
+    // ---- TEXT FALLBACK (no vectors for this user) ----
+    const { data, error } = await supabase
       .from("memories")
       .select("id, summary, tags, importance, created_at")
-      .eq("user_id", userId)
+      .eq("user_id", user_id)
+      .ilike("summary", `%${query}%`)
+      .order("created_at", { ascending: false })
       .limit(limit);
 
-    if (query) q = q.ilike("summary", `%${query}%`);
+    if (error) throw error;
 
-    const { data: rows, error: qErr } = await q;
-    if (qErr) {
-      console.error("[memory-search] text query error:", qErr);
-      return res(200, { ok: true, mode: "text", count: 0, results: [] });
-    }
-
-    return res(200, { ok: true, mode: "text", count: rows.length, results: rows });
-  } catch (e) {
-    console.error("[memory-search] fatal:", e);
-    return res(500, { error: "unexpected", detail: String(e.message || e) });
+    return json(200, {
+      ok: true,
+      mode: "text",
+      count: data.length,
+      results: data
+    });
+  } catch (err) {
+    return json(200, { ok: false, error: String(err?.message || err) });
   }
 };
 
-function cors() {
+function json(statusCode, obj) {
   return {
-    "Access-Control-Allow-Origin": "*",
-    "Access-Control-Allow-Methods": "POST, OPTIONS",
-    "Access-Control-Allow-Headers": "Content-Type, Authorization",
+    statusCode,
+    headers: {
+      "Access-Control-Allow-Origin": "*",
+      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Headers": "Content-Type, Authorization",
+      "Content-Type": "application/json"
+    },
+    body: JSON.stringify(obj)
   };
-}
-function res(statusCode, obj) {
-  return { statusCode, headers: cors(), body: JSON.stringify(obj) };
 }
