@@ -19,7 +19,6 @@ const asBool = (v) => (typeof v === "string" ? v === "1" || v.toLowerCase() === 
 const log = (level, ...args) => {
   const order = ["error", "warn", "info", "debug", "trace"];
   if (order.indexOf(level) <= order.indexOf((LOG_LEVEL || "info").toLowerCase())) {
-     
     console[level](...args);
   }
 };
@@ -74,7 +73,6 @@ async function upsertMemory(event, payload) {
   return res.json();
 }
 
-// Extract a “remember that …” fact
 function extractExplicitMemory(message) {
   const m = message.match(/\bremember(?:\s+that)?\s+(.*?)(?:\.*\s*)$/i);
   if (!m) return null;
