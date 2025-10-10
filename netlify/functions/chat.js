@@ -1,155 +1,212 @@
 // netlify/functions/chat.js
-// CJS Netlify Function — memory-aware chat (v3.4)
+"use strict";
 
-const fetch = globalThis.fetch;
+/**
+ * Chat (v3.4)
+ * - Uses OpenAI Chat Completions
+ * - Maps OPENAI_MAX_OUTPUT_TOKENS -> max_tokens (fixes "Unrecognized request argument: max_output_tokens")
+ * - No 'node-fetch' import (Node 20+ has global fetch)
+ * - Pulls memories from your own Netlify functions (memory-search / memory-upsert) with graceful fallbacks
+ */
 
-const NODE = process.version;
-const {
-  OPENAI_API_KEY,
-  OPENAI_MODEL = "gpt-4o-mini",
-  OPENAI_TEMPERATURE,
-  OPENAI_INCLUDE_TEMPERATURE,
-  OPENAI_MAX_OUTPUT_TOKENS,
-  MEM_AUTO,
-  LOG_LEVEL = "info",
-} = process.env;
+const OpenAI = require("openai");
 
-const asBool = (v) => (typeof v === "string" ? v === "1" || v.toLowerCase() === "true" : !!v);
-const log = (level, ...args) => {
-  const order = ["error", "warn", "info", "debug", "trace"];
-  if (order.indexOf(level) <= order.indexOf((LOG_LEVEL || "info").toLowerCase())) console[level](...args);
-};
+// ---------- config helpers ----------
+const VERSION = "chat-mem-v3.4";
 
-function fnUrl(event, name) {
-  const host = event.headers["x-forwarded-host"] || event.headers.host;
-  const proto = event.headers["x-forwarded-proto"] || "https";
-  return `${proto}://${host}/.netlify/functions/${name}`;
+function num(val, fallback) {
+  const n = Number(val);
+  return Number.isFinite(n) ? n : fallback;
 }
 
-function json(status, body, extra = {}) {
+function baseUrl() {
+  // Prefer the unique deploy URL during one-off tests; fall back to main URL or your custom domain.
+  const u = process.env.DEPLOY_URL || process.env.URL || "https://api.keilani.ai";
+  return u.replace(/\/+$/, "");
+}
+
+function json(status, obj) {
   return {
     statusCode: status,
     headers: {
+      "Content-Type": "application/json; charset=utf-8",
       "Access-Control-Allow-Origin": "*",
-      "Access-Control-Allow-Methods": "POST, OPTIONS",
+      "Access-Control-Allow-Methods": "OPTIONS, POST",
       "Access-Control-Allow-Headers": "Content-Type, Authorization, X-Requested-With",
-      "Content-Type": "application/json",
-      ...extra,
     },
-    body: JSON.stringify(body),
+    body: JSON.stringify(obj),
   };
 }
 
-async function searchMemories(event, userId, query, limit = 8) {
-  const res = await fetch(fnUrl(event, "memory-search"), {
+// ---------- memory utilities ----------
+async function searchMemories({ userId, query, limit = 5 }) {
+  const url =
+    process.env.MEMORY_SEARCH_URL ||
+    `${baseUrl()}/.netlify/functions/memory-search`;
+
+  const res = await fetch(url, {
     method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify({ user_id: userId, query, limit }),
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      user_id: userId,
+      query,
+      limit,
+    }),
   });
-  if (!res.ok) throw new Error(`memory-search failed: ${res.status} ${await res.text().catch(()=>"")}`);
-  return res.json();
-}
 
-async function upsertMemory(event, payload) {
-  const res = await fetch(fnUrl(event, "memory-upsert"), {
-    method: "POST",
-    headers: {"Content-Type": "application/json"},
-    body: JSON.stringify(payload),
-  });
-  if (!res.ok) throw new Error(`memory-upsert failed: ${res.status} ${await res.text().catch(()=>"")}`);
-  return res.json();
-}
-
-function extractExplicitMemory(message) {
-  const m = message.match(/\bremember(?:\s+that)?\s+(.*?)(?:\.*\s*)$/i);
-  if (!m) return null;
-  let summary = m[1].trim();
-  if (!summary || summary.length < 3) return null;
-  summary = summary.replace(/["“”]+/g, "").replace(/\s*\.+$/, "").trim();
-  return summary;
-}
-
-function buildSystemPrompt(userFacts) {
-  const facts = userFacts?.length
-    ? `Known facts about this user:\n${userFacts.map(f => `- ${f.summary}`).join("\n")}\n\n`
-    : "";
-  return [
-    "You are Keilani — warm, playful, quick, adaptive.",
-    "Priorities: 1) Be concise and engaging. 2) Use the user's known preferences.",
-    "3) If referencing a fact, weave it naturally.",
-    "",
-    facts,
-    "If they ask for recs, bias toward their known tastes.",
-  ].join("\n");
-}
-
-async function callOpenAI(messages) {
-  if (!OPENAI_API_KEY) throw new Error("OPENAI_API_KEY missing");
-  const body = { model: OPENAI_MODEL, messages };
-  if (asBool(OPENAI_INCLUDE_TEMPERATURE) && OPENAI_TEMPERATURE) body.temperature = Number(OPENAI_TEMPERATURE);
-  if (OPENAI_MAX_OUTPUT_TOKENS) {
-    body.max_output_tokens = Number(OPENAI_MAX_OUTPUT_TOKENS);
-    body.max_tokens = Number(OPENAI_MAX_OUTPUT_TOKENS);
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`memory-search failed: ${res.status} ${detail}`);
   }
-  const r = await fetch("https://api.openai.com/v1/chat/completions", {
-    method: "POST",
-    headers: { Authorization: `Bearer ${OPENAI_API_KEY}`, "Content-Type": "application/json" },
-    body: JSON.stringify(body),
-  });
-  if (!r.ok) throw new Error(`OpenAI error: ${r.status} ${await r.text().catch(()=>"")}`);
-  const data = await r.json();
-  return data.choices?.[0]?.message?.content?.trim() || "";
+
+  return res.json();
 }
 
+async function upsertMemory({ userId, summary, importance = 1, tags = [] }) {
+  const url =
+    process.env.MEMORY_UPSERT_URL ||
+    `${baseUrl()}/.netlify/functions/memory-upsert`;
+
+  const res = await fetch(url, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      user_id: userId,
+      summary,
+      importance,
+      tags,
+    }),
+  });
+
+  if (!res.ok) {
+    const detail = await res.text().catch(() => "");
+    throw new Error(`memory-upsert failed: ${res.status} ${detail}`);
+  }
+
+  return res.json();
+}
+
+// very lightweight extractor for "Remember that ..." style messages
+function extractExplicitMemory(message) {
+  const m = message.trim();
+  // e.g., "Remember that my favorite game is Hades."
+  const startsRemember =
+    /^remember(\s+that)?\b/i.test(m) || /^save\s+this\b/i.test(m);
+
+  if (!startsRemember) return null;
+
+  // strip "remember (that)" prefix & trailing punctuation
+  const cleaned = m
+    .replace(/^remember(\s+that)?\s*/i, "")
+    .replace(/^save\s+this[:,]?\s*/i, "")
+    .replace(/[.!?]\s*$/i, "")
+    .trim();
+
+  // basic guard
+  if (!cleaned || cleaned.length < 3) return null;
+
+  // naive tags: pick a few nouns/keywords (super simple)
+  const tags = [];
+  if (/music|song|synthwave|artist/i.test(cleaned)) tags.push("music");
+  if (/game|hades|gaming|steam|ps5|xbox/i.test(cleaned)) tags.push("games");
+
+  return { summary: cleaned, importance: 1, tags };
+}
+
+// ---------- main handler ----------
 exports.handler = async (event) => {
+  if (event.httpMethod === "OPTIONS") {
+    return json(200, { ok: true });
+  }
+  if (event.httpMethod !== "POST") {
+    return json(405, { error: "method_not_allowed", version: VERSION });
+  }
+
   try {
-    if (event.httpMethod === "OPTIONS") return json(200, { ok: true });
-    if (event.httpMethod !== "POST") return json(405, { error: "Method Not Allowed" });
+    const body = JSON.parse(event.body || "{}");
+    const message = (body.message || "").toString();
+    const userId = (body.userId || "").toString();
 
-    const { message, userId } = JSON.parse(event.body || "{}");
-    if (!message || !userId) return json(400, { error: "Missing message or userId" });
-
-    // Pull memories
-    let memCount = 0, memMode = "unknown", memoriesUsed = [];
-    try {
-      const mem = await searchMemories(event, userId, message, 8);
-      memCount = Number(mem.count || 0);
-      memMode = mem.mode || "unknown";
-      memoriesUsed = (mem.results || []).map(r => ({
-        id: r.id, summary: r.summary, created_at: r.created_at, importance: r.importance, tags: r.tags || [],
-      }));
-    } catch (e) {
-      memMode = "error";
-      log("warn", "memory-search error:", e.message);
+    if (!message) {
+      return json(400, { error: "missing_message", version: VERSION });
+    }
+    if (!userId) {
+      return json(400, { error: "missing_userId", version: VERSION });
     }
 
+    const memAuto = process.env.MEM_AUTO ? "on" : "off";
+
+    // 1) try to recall memories to ground the chat
+    let memCount = 0;
+    let memMode = "none";
+    let memoriesUsed = [];
+    let memoryContext = "";
+
+    try {
+      const mem = await searchMemories({
+        userId,
+        query: message,
+        limit: num(process.env.MEMORY_RECALL_LIMIT, 5),
+      });
+      memCount = num(mem.count, 0);
+      memMode = mem.mode || "unknown";
+      memoriesUsed = Array.isArray(mem.results) ? mem.results : [];
+      const lines = memoriesUsed.map((r) => `- ${r.summary}`);
+      if (lines.length) {
+        memoryContext = `Known memories about the user:\n${lines.join("\n")}`;
+      }
+    } catch (e) {
+      memMode = "error";
+    }
+
+    // 2) build OpenAI messages (ground with memoryContext if present)
+    const systemParts = [
+      "You are Keilani's assistant. Be concise and clear.",
+      memoryContext ? `\n${memoryContext}` : "",
+      "\nIf relevant, weave helpful prior info naturally (don't over-assert).",
+    ].filter(Boolean);
+
     const messages = [
-      { role: "system", content: buildSystemPrompt(memoriesUsed) },
+      { role: "system", content: systemParts.join("\n") },
       { role: "user", content: message },
     ];
 
-    // Optional explicit autosave
-    const memAuto = asBool(MEM_AUTO) ? "on" : "off";
-    let memExtracted = null, memSaved = null;
+    // 3) OpenAI call (Chat Completions) — map OPENAI_MAX_OUTPUT_TOKENS -> max_tokens
+    const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
+    const resp = await openai.chat.completions.create({
+      model: process.env.OPENAI_MODEL || "gpt-4o-mini",
+      max_tokens: num(process.env.OPENAI_MAX_OUTPUT_TOKENS, 512),
+      temperature: num(process.env.OPENAI_TEMPERATURE, 0.2),
+      messages,
+    });
+
+    const reply =
+      resp?.choices?.[0]?.message?.content?.trim() ||
+      "Sorry, I couldn't generate a reply.";
+
+    // 4) optional explicit autosave
+    let memExtracted = null;
+    let memSaved = null;
     if (memAuto === "on") {
-      const extracted = extractExplicitMemory(message);
-      if (extracted) {
-        memExtracted = extracted;
+      const candidate = extractExplicitMemory(message);
+      if (candidate) {
+        memExtracted = candidate;
         try {
-          const saved = await upsertMemory(event, { user_id: userId, summary: extracted, importance: 1, tags: ["autosave"] });
-          memSaved = { ok: true, id: saved.id, created_at: saved.created_at };
-          messages.unshift({ role: "system", content: "User shared a new personal fact; it has been saved. Acknowledge briefly." });
-        } catch (e) {
-          memSaved = { ok: false, error: e.message };
-          log("warn", "memory-upsert error:", e.message);
+          const saved = await upsertMemory({
+            userId,
+            summary: candidate.summary,
+            importance: candidate.importance,
+            tags: candidate.tags,
+          });
+          memSaved = { ok: true, id: saved?.id || null };
+        } catch (err) {
+          memSaved = { ok: false, error: String(err.message || err) };
         }
       }
     }
 
-    const reply = await callOpenAI(messages);
-
     return json(200, {
-      version: "chat-mem-v3.4",
+      version: VERSION,
       reply,
       memCount,
       memMode,
@@ -157,10 +214,12 @@ exports.handler = async (event) => {
       memAuto,
       memExtracted,
       memSaved,
-      node: NODE,
     });
   } catch (err) {
-    log("error", "chat fatal:", err);
-    return json(500, { error: "chat_failed", detail: err.message || String(err), version: "chat-mem-v3.4" });
+    return json(200, {
+      error: "chat_failed",
+      detail: `OpenAI error: ${String(err.message || err)}`,
+      version: VERSION,
+    });
   }
 };
