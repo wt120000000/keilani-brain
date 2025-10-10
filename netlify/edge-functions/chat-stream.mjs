@@ -1,19 +1,14 @@
 // netlify/edge-functions/chat-stream.mjs
 /**
- * Simple edge proxy to the serverless streamer.
- * (No OpenAI SDK here, so we avoid token/SDK drift and bundling issues.)
- *
- * If you later stream directly from OpenAI at the edge, remember:
- *  - For Chat Completions: use `max_tokens` (NOT max_output_tokens)
- *  - For Responses API: `max_output_tokens` is correct
+ * Edge proxy for streamed chat.
+ * Forwards requests to the stream-chat function while preserving CORS and SSE behavior.
  */
 
 export default async (request, context) => {
-  // Forward the exact request to the serverless streaming function
-  const inUrl = new URL(request.url);
-  inUrl.pathname = "/.netlify/functions/stream-chat";
+  const target = new URL(request.url);
+  target.pathname = "/.netlify/functions/stream-chat";
 
-  return await fetch(inUrl.toString(), {
+  return fetch(target.toString(), {
     method: request.method,
     headers: request.headers,
     body: request.body,
