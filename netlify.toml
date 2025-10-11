@@ -1,6 +1,6 @@
 [build]
-  publish        = "public"
-  functions      = "netlify/functions"
+  publish = "public"
+  command = "npm run build"
   edge_functions = "netlify/edge-functions"
 
 [functions]
@@ -16,14 +16,9 @@
 # Stream chat (Edge in prod, Functions fallback kept)
 [[redirects]]
   from = "/api/chat-stream"
-  to   = "/.netlify/functions/stream-chat"
+  to   = "/.netlify/edge-functions/chat-stream"
   status = 200
 
-[[edge_functions]]
-  function = "chat-stream"
-  path = "/api/chat-stream"
-
-# Health helpers
 [[redirects]]
   from = "/api/health"
   to   = "/.netlify/functions/health"
