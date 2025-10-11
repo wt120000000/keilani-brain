@@ -82,6 +82,7 @@
   [headers.values]
     Cache-Control = "no-cache, no-transform"
     Connection    = "keep-alive"
+	Content-Type = "text/event-stream; charset=utf-8"
 
 # Legacy script path safety net (in case an old link is cached)
 [[redirects]]
