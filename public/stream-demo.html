@@ -2,7 +2,7 @@
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Keilani Stream Demo</title>
+    <title>Keilani Streaming Demo</title>
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <link rel="preconnect" href="https://cdn.jsdelivr.net" />
     <link rel="stylesheet" href="/styles.css" />
@@ -96,8 +96,7 @@
     <h3>Output</h3>
     <div id="out" class="log" aria-live="polite"></div>
 
-    <!-- External scripts only (no inline JS to satisfy CSP) -->
-    <script src="/js/keilaniStream.v21.js" defer></script>
+    <!-- Keep only the demo script to avoid ESM export error -->
     <script src="/js/stream-demo.v1.js" defer></script>
   </body>
 </html>
