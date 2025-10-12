@@ -13,17 +13,17 @@
   to   = "/.netlify/functions/chat"
   status = 200
 
-# Stream chat (Edge in prod, Functions fallback kept)
-[[redirects]]
-  from = "/api/chat-stream"
-  to   = "/.netlify/edge-functions/chat-stream"
-  status = 200
-  force = true
-
+# Health
 [[redirects]]
   from = "/api/health"
   to   = "/.netlify/functions/health"
   status = 200
+
+# ---------- Edge Functions ----------
+# Stream chat on the Edge (first-class mapping, no redirect)
+[[edge_functions]]
+  path     = "/api/chat-stream"
+  function = "chat-stream"
 
 # ---------- Static headers ----------
 # No-store for HTML
@@ -77,13 +77,13 @@
     X-Content-Type-Options = "nosniff"
     Referrer-Policy = "strict-origin-when-cross-origin"
 
-# SSE: don’t transform
+# SSE: don’t transform; keep-alive
 [[headers]]
   for = "/api/chat-stream"
   [headers.values]
     Cache-Control = "no-cache, no-transform"
     Connection    = "keep-alive"
-	Content-Type = "text/event-stream; charset=utf-8"
+    Content-Type  = "text/event-stream; charset=utf-8"
 
 # Legacy script path safety net (in case an old link is cached)
 [[redirects]]
