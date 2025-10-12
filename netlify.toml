@@ -16,7 +16,7 @@
 # Stream chat (Edge in prod, Functions fallback kept)
 [[redirects]]
   from = "/api/chat-stream"
-  to   = "/.netlify/edge-functions/stream-chat"
+  to   = "/.netlify/edge-functions/chat-stream"
   status = 200
   force = true
 
