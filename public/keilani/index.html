@@ -1,0 +1,34 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <title>Keilani — Live Chat</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <link rel="stylesheet" href="/styles.css" />
+  </head>
+  <body
+    style="
+      background: #0b0b0b;
+      color: #eee;
+      font: 16px system-ui;
+      margin: 0;
+      padding: 24px;
+    "
+  >
+    <h1 style="margin: 0 0 8px">Keilani</h1>
+    <p style="margin: 0 0 16px; opacity: 0.8">Say hi! Streaming over Edge.</p>
+
+    <div id="keilani-widget"></div>
+
+    <script src="/sdk/latest.js"></script>
+    <script>
+      // Ensure POST to /api/chat-stream (GET will 405, that’s expected)
+      Keilani.createWidget({
+        mount: "#keilani-widget",
+        agent: "keilani",
+        apiBase: location.origin,
+        theme: { brand: "#00ffcc" },
+      });
+    </script>
+  </body>
+</html>

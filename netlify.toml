@@ -1,54 +1,40 @@
-# ===== Netlify Build (Monorepo / Next.js) =====
+# ===== Static site build (current repo layout) =====
 [build]
-  # Build the Next.js app that lives in apps/web
-  base    = "apps/web"
-  command = "pnpm build"
-  publish = ".next"
-  edge_functions = "../../netlify/edge-functions"   # edge code lives at repo_root/netlify/edge-functions
+  publish = "public"
+  command = "npm run build"
+  edge_functions = "netlify/edge-functions"
 
-[[plugins]]
-  package = "@netlify/plugin-nextjs"
-
-# ===== Server Functions (bundling settings) =====
 [functions]
   node_bundler = "esbuild"
-  included_files = ["packages/server/**"]
-  external_node_modules = ["openai", "stripe", "@supabase/supabase-js"]
 
-# ---------- App API routes (Netlify Functions) ----------
-# Plain JSON chat (function name: "chat")
+# ---------- App API routes ----------
 [[redirects]]
   from = "/api/chat"
   to   = "/.netlify/functions/chat"
   status = 200
 
-# Health (function name: "health")
 [[redirects]]
   from = "/api/health"
   to   = "/.netlify/functions/health"
   status = 200
 
 # ---------- Edge Functions ----------
-# Stream chat on the Edge (file name: chat-stream.ts/js in netlify/edge-functions)
 [[edge_functions]]
   path     = "/api/chat-stream"
   function = "chat-stream"
 
 # ---------- Static headers ----------
-# No-store for HTML
 [[headers]]
   for = "/*.html"
   [headers.values]
     Cache-Control = "no-store, must-revalidate"
 
-# CSS
 [[headers]]
   for = "/styles.css"
   [headers.values]
     Content-Type  = "text/css; charset=UTF-8"
     Cache-Control = "public, max-age=0, must-revalidate"
 
-# JS anywhere
 [[headers]]
   for = "/*.js"
   [headers.values]
@@ -61,7 +47,7 @@
     Content-Type  = "application/javascript; charset=UTF-8"
     Cache-Control = "public, max-age=0, must-revalidate"
 
-# ---------- CSP (tight but dev-friendly) ----------
+# ---------- CSP ----------
 [[headers]]
   for = "/*"
   [headers.values]
@@ -84,7 +70,7 @@
     X-Content-Type-Options = "nosniff"
     Referrer-Policy = "strict-origin-when-cross-origin"
 
-# SSE: don’t transform; keep-alive
+# SSE: don’t transform
 [[headers]]
   for = "/api/chat-stream"
   [headers.values]
