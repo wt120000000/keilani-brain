@@ -1,170 +1,103 @@
-<!doctype html>
+﻿<!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Keilani Chat Stream Demo</title>
-    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>Keilani Stream Demo</title>
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <link rel="preconnect" href="https://cdn.jsdelivr.net" />
+    <link rel="stylesheet" href="/styles.css" />
     <style>
       :root {
         color-scheme: dark;
       }
       body {
-        margin: 2rem auto;
-        max-width: 820px;
-        font:
-          16px/1.5 system-ui,
+        font-family:
+          system-ui,
           -apple-system,
           Segoe UI,
           Roboto,
           sans-serif;
-        color: #eaeaea;
-        background: #0b0b0c;
-      }
-      h1 {
-        font-weight: 700;
-        font-size: 1.35rem;
-        margin: 0 0 1rem;
-      }
-      .card {
-        background: #121214;
-        border: 1px solid #222;
-        border-radius: 12px;
-        padding: 1rem;
-      }
-      label {
-        display: block;
-        font-size: 0.95rem;
-        color: #b6b6b6;
-        margin-top: 0.5rem;
-      }
-      input,
-      textarea {
-        width: 100%;
-        border: 1px solid #2a2a2a;
-        background: #151518;
-        color: #fff;
-        border-radius: 10px;
-        padding: 0.75rem;
-        font: inherit;
-      }
-      textarea {
-        min-height: 150px;
-      }
-      button {
-        background: #6b7bff;
-        color: #fff;
-        border: none;
-        border-radius: 10px;
-        padding: 0.7rem 1rem;
-        font: 600 15px system-ui;
-        cursor: pointer;
-      }
-      button[disabled] {
-        opacity: 0.6;
-        cursor: not-allowed;
+        margin: 2rem;
       }
       .row {
         display: flex;
         gap: 0.75rem;
         align-items: center;
+        flex-wrap: wrap;
       }
-      .row > * {
+      label {
+        font-weight: 600;
+      }
+      input[type="text"] {
         flex: 1;
+        min-width: 280px;
+        padding: 0.6rem 0.7rem;
+        border-radius: 0.6rem;
+        border: 1px solid #333;
+        background: #0b0b0b;
+        color: #fff;
       }
-      .mono {
-        font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      button {
+        padding: 0.6rem 0.9rem;
+        border-radius: 0.6rem;
+        border: 1px solid #333;
+        background: #121212;
+        color: #fff;
+        cursor: pointer;
+      }
+      button[disabled] {
+        opacity: 0.65;
+        cursor: not-allowed;
+      }
+      .log {
         white-space: pre-wrap;
-        word-wrap: break-word;
-      }
-      .out {
-        background: #0e0f12;
-        border: 1px solid #222;
-        border-radius: 10px;
         padding: 1rem;
-        min-height: 140px;
+        border: 1px solid #222;
+        border-radius: 0.8rem;
+        background: #0a0a0a;
+        min-height: 180px;
       }
       .small {
-        color: #9aa0a6;
-        font-size: 0.85rem;
+        opacity: 0.7;
+        font-size: 0.9rem;
+      }
+      .ok {
+        color: #7ff58b;
+      }
+      .err {
+        color: #ff8b8b;
+      }
+      .muted {
+        color: #aaa;
       }
     </style>
   </head>
   <body>
-    <h1>Keilani Chat Streaming (SSE) Demo</h1>
+    <h1>Keilani Streaming Demo</h1>
 
-    <div class="card">
+    <form id="chatForm" class="col" autocomplete="off">
       <div class="row">
-        <label>
-          Message
-          <input id="msg" value="Tell me about synthwave." />
-        </label>
-        <label>
-          User ID
-          <input id="uid" value="123e4567-e89b-12d3-a456-426614174000" />
-        </label>
+        <label for="message">Message</label>
+        <input
+          id="message"
+          name="message"
+          type="text"
+          placeholder="Tell me about synthwave."
+        />
+        <button id="btnStream" type="submit">Stream</button>
+        <button id="btnStop" type="button">Stop</button>
       </div>
-
-      <div style="display: flex; gap: 0.5rem; margin: 0.75rem 0 1rem">
-        <button id="send">Stream</button>
-        <button id="stop" disabled>Stop</button>
-        <div id="status" class="small" style="margin-left: auto">idle</div>
+      <div class="row small muted">
+        Endpoint: <code>/api/chat-stream</code> (SSE over POST, parsed via fetch
+        streaming)
       </div>
+    </form>
 
-      <div class="out mono" id="out"></div>
-    </div>
+    <h3>Output</h3>
+    <div id="out" class="log" aria-live="polite"></div>
 
-    <p class="small" style="margin-top: 1rem">
-      This page uses <code>/api/chat-stream</code> with Server-Sent Events. It
-      parses OpenAI-style streaming deltas and prints the content tokens as they
-      arrive.
-    </p>
-
-    <script type="module">
-      import { streamChat } from "/js/keilaniStream.v21.js";
-
-      const $ = (sel) => document.querySelector(sel);
-      const msg = $("#msg");
-      const uid = $("#uid");
-      const out = $("#out");
-      const send = $("#send");
-      const stop = $("#stop");
-      const status = $("#status");
-
-      let ctrl;
-
-      function setState(running) {
-        send.disabled = running;
-        stop.disabled = !running;
-        status.textContent = running ? "streaming…" : "idle";
-      }
-
-      send.addEventListener("click", async () => {
-        setState(true);
-        out.textContent = "";
-        ctrl = new AbortController();
-
-        try {
-          await streamChat({
-            message: msg.value,
-            userId: uid.value,
-            onToken: (t) => {
-              out.textContent += t;
-            },
-            signal: ctrl.signal,
-          });
-        } catch (err) {
-          out.textContent += `\n\n[error] ${err?.message || err}`;
-          console.error(err);
-        } finally {
-          setState(false);
-        }
-      });
-
-      stop.addEventListener("click", () => {
-        if (ctrl) ctrl.abort();
-        setState(false);
-        out.textContent += "\n\n[stopped]";
-      });
-    </script>
+    <!-- External scripts only (no inline JS to satisfy CSP) -->
+    <script src="/js/keilaniStream.v21.js" defer></script>
+    <script src="/js/stream-demo.v1.js" defer></script>
   </body>
 </html>
