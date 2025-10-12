@@ -5,6 +5,19 @@
     <title>Keilani — Live Chat</title>
     <meta name="viewport" content="width=device-width,initial-scale=1" />
     <link rel="stylesheet" href="/styles.css" />
+    <meta
+      http-equiv="Content-Security-Policy"
+      content="default-src 'self';
+                 script-src 'self' 'sha256-nsCG0irRry5vd8wK6q22/66J3uGH+kt19uJ21XLccwk=';
+                 style-src 'self' 'unsafe-inline';
+                 img-src 'self' data:;
+                 connect-src 'self' https://api.keilani.ai https://api.openai.com blob:;
+                 media-src 'self' blob:;
+                 worker-src 'self' blob:;
+                 frame-ancestors 'self';
+                 base-uri 'self';
+                 form-action 'self';"
+    />
   </head>
   <body
     style="
@@ -22,11 +35,10 @@
 
     <script src="/sdk/latest.js"></script>
     <script>
-      // Ensure POST to /api/chat-stream (GET will 405, that’s expected)
       Keilani.createWidget({
         mount: "#keilani-widget",
         agent: "keilani",
-        apiBase: location.origin,
+        apiBase: "", // absolute, auto-resolves to root
         theme: { brand: "#00ffcc" },
       });
     </script>
