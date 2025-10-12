@@ -1,26 +1,35 @@
+# ===== Netlify Build (Monorepo / Next.js) =====
 [build]
-  publish = "public"
-  command = "npm run build"
-  edge_functions = "netlify/edge-functions"
+  # Build the Next.js app that lives in apps/web
+  base    = "apps/web"
+  command = "pnpm build"
+  publish = ".next"
+  edge_functions = "../../netlify/edge-functions"   # edge code lives at repo_root/netlify/edge-functions
 
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
+
+# ===== Server Functions (bundling settings) =====
 [functions]
   node_bundler = "esbuild"
+  included_files = ["packages/server/**"]
+  external_node_modules = ["openai", "stripe", "@supabase/supabase-js"]
 
-# ---------- App API routes ----------
-# Plain JSON chat
+# ---------- App API routes (Netlify Functions) ----------
+# Plain JSON chat (function name: "chat")
 [[redirects]]
   from = "/api/chat"
   to   = "/.netlify/functions/chat"
   status = 200
 
-# Health
+# Health (function name: "health")
 [[redirects]]
   from = "/api/health"
   to   = "/.netlify/functions/health"
   status = 200
 
 # ---------- Edge Functions ----------
-# Stream chat on the Edge (first-class mapping, no redirect)
+# Stream chat on the Edge (file name: chat-stream.ts/js in netlify/edge-functions)
 [[edge_functions]]
   path     = "/api/chat-stream"
   function = "chat-stream"
@@ -52,9 +61,7 @@
     Content-Type  = "application/javascript; charset=UTF-8"
     Cache-Control = "public, max-age=0, must-revalidate"
 
-# ---------- CSP (fixed) ----------
-# Note: removed invalid host pattern "https://api.*"
-# Allow data: for inline audio previews; allow blob: for media + fetch streams
+# ---------- CSP (tight but dev-friendly) ----------
 [[headers]]
   for = "/*"
   [headers.values]
@@ -64,7 +71,7 @@
       style-src  'self' 'unsafe-inline';
       img-src    'self' data:;
       font-src   'self' data:;
-      connect-src 'self' https://api.keilani.ai https://api.openai.com https://api.elevenlabs.io blob: data:;
+      connect-src 'self' https://api.keilani.ai https://api.openai.com https://api.elevenlabs.io https://*.supabase.co https://*.stripe.com blob: data:;
       media-src  'self' blob: data:;
       worker-src 'self' blob:;
       frame-ancestors 'self';
@@ -85,7 +92,7 @@
     Connection    = "keep-alive"
     Content-Type  = "text/event-stream; charset=utf-8"
 
-# Legacy script path safety net (in case an old link is cached)
+# Legacy script path safety net
 [[redirects]]
   from = "/keilaniStream.v20.js"
   to   = "/js/keilaniStream.v20.js"
