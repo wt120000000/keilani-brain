@@ -1,46 +1,21 @@
+@'
 <!doctype html>
 <html lang="en">
   <head>
     <meta charset="utf-8" />
-    <title>Keilani — Live Chat</title>
-    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>Keilani</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <link rel="preload" href="/styles.css" as="style" />
     <link rel="stylesheet" href="/styles.css" />
-    <meta
-      http-equiv="Content-Security-Policy"
-      content="default-src 'self';
-                 script-src 'self' 'sha256-nsCG0irRry5vd8wK6q22/66J3uGH+kt19uJ21XLccwk=';
-                 style-src 'self' 'unsafe-inline';
-                 img-src 'self' data:;
-                 connect-src 'self' https://api.keilani.ai https://api.openai.com blob:;
-                 media-src 'self' blob:;
-                 worker-src 'self' blob:;
-                 frame-ancestors 'self';
-                 base-uri 'self';
-                 form-action 'self';"
-    />
   </head>
-  <body
-    style="
-      background: #0b0b0b;
-      color: #eee;
-      font: 16px system-ui;
-      margin: 0;
-      padding: 24px;
-    "
-  >
-    <h1 style="margin: 0 0 8px">Keilani</h1>
-    <p style="margin: 0 0 16px; opacity: 0.8">Say hi! Streaming over Edge.</p>
-
-    <div id="keilani-widget"></div>
-
-    <script src="/sdk/latest.js"></script>
-    <script>
-      Keilani.createWidget({
-        mount: "#keilani-widget",
-        agent: "keilani",
-        apiBase: "", // absolute, auto-resolves to root
-        theme: { brand: "#00ffcc" },
-      });
-    </script>
+  <body>
+    <main class="wrap">
+      <h1>Keilani</h1>
+      <p>Say hi! Streaming over Edge.</p>
+      <div id="widget"></div>
+    </main>
+    <script src="/sdk/latest.js" defer></script>
+    <script src="/boot.js" defer></script>
   </body>
 </html>
+'@ | Set-Content -Path public\keilani\index.html -Encoding utf8

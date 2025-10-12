@@ -1,12 +1,11 @@
-﻿<script>
-(function(){
+﻿(function(){
   function getUID(){
-    try {
+    try{
       const KEY = "keilani_uid";
       let v = localStorage.getItem(KEY);
-      if (!v) { v = "anon-" + (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2)); localStorage.setItem(KEY, v); }
+      if(!v){ v = "anon-" + (crypto.randomUUID ? crypto.randomUUID() : Math.random().toString(36).slice(2)); localStorage.setItem(KEY, v); }
       return v;
-    } catch { return "anon-" + Math.random().toString(36).slice(2); }
+    }catch{ return "anon-" + Math.random().toString(36).slice(2); }
   }
 
   function createWidget(opts){
@@ -20,33 +19,38 @@
 
     const out = root.querySelector("#kw_out");
     const input = root.querySelector("#kw_msg");
-    root.querySelector("#kw_send").onclick = send;
-    input.addEventListener("keydown", e => e.key==="Enter" && send());
+    const sendBtn = root.querySelector("#kw_send");
 
     async function send(){
-      const payload = { message: input.value, agent: opts.agent, userId: getUID() };
+      const payload = { message: input.value, agent: opts.agent || "keilani", userId: getUID() };
       const res = await fetch((opts.apiBase||"") + "/api/chat-stream", {
-        method:"POST", headers:{ "content-type":"application/json" }, body: JSON.stringify(payload)
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify(payload)
       });
-      if (!res.ok || !res.body) {
+      if(!res.ok || !res.body){
         let detail=""; try{ detail = await res.text(); }catch{}
         out.textContent = `(error ${res.status}${detail?`: ${detail}`:""})`;
         return;
       }
       out.textContent = "[stream]\n";
-      const reader = res.body.getReader(); const td = new TextDecoder();
-      while (true) {
-        const {done, value} = await reader.read(); if (done) break;
+      const reader = res.body.getReader();
+      const td = new TextDecoder();
+      while(true){
+        const {done, value} = await reader.read(); if(done) break;
         td.decode(value).split("\n\n").forEach(line=>{
-          if (line.startsWith("data: ")){
+          if(line.startsWith("data: ")){
             const obj = JSON.parse(line.slice(6));
-            if (obj.type==="delta") out.textContent += obj.content;
-            if (obj.type==="done")  out.textContent += "\n[done]";
+            if(obj.type==="delta") out.textContent += obj.content;
+            if(obj.type==="done")  out.textContent += "\n[done]";
           }
         });
       }
     }
+
+    sendBtn.onclick = send;
+    input.addEventListener("keydown", e => e.key==="Enter" && send());
   }
+
   window.Keilani = { createWidget };
 })();
-</script>
