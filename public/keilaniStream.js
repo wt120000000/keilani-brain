@@ -1,44 +1,32 @@
-/* keilaniStream.js v12
- * - Sleek HUD + speaking orb
- * - Fixes "Invalid URI" spam
- * - Persists prefs (auto, tts, voiceId, VAD, silence, device ids)
- * - Optional Supabase logging via Netlify function /api/log
- */
-
-const $ = id => document.getElementById(id);
+// public/keilaniStream.js
+// v23 — sends userId with chat requests
 
 /* ---------- DOM ---------- */
-const startBtn = $("start");
-const stopBtn  = $("stop");
-const pttBtn   = $("ptt");
-const autoChk  = $("auto");
+const $ = (id) => document.getElementById(id);
 
-const ttsSel   = $("ttsEngine");
-const voiceIdEl= $("voiceId");
-const vadEl    = $("vad");
-const silenceEl= $("silence");
+const startBtn     = $("start");
+const stopBtn      = $("stop");
+const pttBtn       = $("ptt");
+const sendBtn      = $("send");
 
-const micSel   = $("micSelect");
-const outSel   = $("outSelect");
-
-const msgEl    = $("message");
-const sendBtn  = $("send");
-
-const transcriptEl = $("transcript");
+const msgEl        = $("message");
 const replyEl      = $("reply");
+const transcriptEl = $("transcript");
 const lastAudioEl  = $("lastAudio");
 
-const hudState = $("hud-state");
-const hudLat   = $("hud-lat");
-const hudLast  = $("hud-last");
+const modeSel      = $("mode");          // "stream" | "plain"
+const ttsSel       = $("ttsEngine");     // "ElevenLabs" | "browser"
+const voiceIdEl    = $("voiceId");       // optional
 
-const orb = $("speakingOrb");
-const orbLabel = $("speakingLabel");
+const vadEl        = $("vad");           // 0..100 slider
+const silenceEl    = $("silence");       // ms
+const hudState     = $("state");
+const hudStatus    = $("status");
+const hudLat       = $("lat");
 
 /* ---------- State ---------- */
 const SM = { IDLE:"idle", LISTEN:"listening", REC:"recording", PROCESS:"processing", REPLY:"replying", SPEAK:"speaking" };
 let sm = SM.IDLE;
-let auto = false;
 
 let mediaStream = null;
 let mediaRecorder = null;
@@ -49,20 +37,19 @@ let micAnalyser = null;
 
 let outAnalyser = null;
 let outSource = null;
-let currentAudio = null;   // transient element for playback
+let currentAudio = null;
 let outIsPlaying = false;
 
 let listenLoopOn = false;
 let processingTurn = false;
 
-let selectedVoice = null; // browser TTS
+let selectedVoice = null;
 let speakStartedAt = 0;
 
 let streamCtl = null;
 let streamOn  = false;
 
-let sessionId = localStorage.getItem("k_session") || (Date.now().toString(36) + Math.random().toString(36).slice(2));
-localStorage.setItem("k_session", sessionId);
+let auto = false;
 
 /* ---------- Tunables ---------- */
 const REQUIRED_ONSET_FRAMES = 3;
@@ -70,9 +57,9 @@ const OUTPUT_MARGIN         = 0.008;
 const TTS_GRACE_MS          = 200;
 
 /* ---------- Helpers ---------- */
-const setState   = s => { sm=s; hudState.textContent = "state: " + s; updateOrb(); };
-const setStatus  = s => { hudLast.textContent = "last: " + s; };
-const setLatency = (first,total) => { hudLat.textContent = `• first ${first??"–"} ms • total ${total??"–"} ms`; };
+const setState   = (s) => { sm = s; hudState && (hudState.textContent = "state: " + s); };
+const setStatus  = (s) => { if (hudStatus) hudStatus.firstChild.nodeValue = s + " "; };
+const setLatency = (first, total) => { if (hudLat) hudLat.textContent = `${first!=null?`• first ${first} ms `:""}${total!=null?`• total ${total} ms`:""}`; };
 
 function ema(prev, next, alpha){ return prev == null ? next : alpha*next + (1-alpha)*prev; }
 
@@ -89,69 +76,44 @@ function blobToDataUrl(blob){
   return new Promise(res => { const fr = new FileReader(); fr.onloadend = ()=>res(fr.result); fr.readAsDataURL(blob); });
 }
 
-function updateOrb(){
-  orb.classList.remove("speaking","listening");
-  if (sm === SM.SPEAK) { orb.classList.add("speaking"); orbLabel.textContent = "speaking"; return; }
-  if (sm === SM.LISTEN || sm === SM.REC) { orb.classList.add("listening"); orbLabel.textContent = sm; return; }
-  orbLabel.textContent = "idle";
+function uuidv4(){
+  // RFC4122-ish, good enough for client identity
+  return ([1e7]+-1e3+-4e3+-8e3+-1e11).replace(/[018]/g,c=>(c ^ crypto.getRandomValues(new Uint8Array(1))[0] & 15 >> c/4).toString(16));
+}
+function getUserId(){
+  let id = localStorage.getItem("keilani_user_id");
+  if (!id){ id = uuidv4(); localStorage.setItem("keilani_user_id", id); }
+  return id;
 }
 
 /* ---------- Audio I/O ---------- */
-async function listDevices(){
-  const devs = await navigator.mediaDevices.enumerateDevices();
-  const mics = devs.filter(d=>d.kind==="audioinput");
-  const outs = devs.filter(d=>d.kind==="audiooutput");
-
-  const prevMic = localStorage.getItem("k_mic") || "";
-  const prevOut = localStorage.getItem("k_out") || "";
-
-  micSel.innerHTML = mics.map(d=>`<option value="${d.deviceId}">${d.label||"Microphone"}</option>`).join("");
-  outSel.innerHTML = outs.map(d=>`<option value="${d.deviceId}">${d.label||"System default"}</option>`).join("");
-
-  if (prevMic) micSel.value = prevMic;
-  if (prevOut) outSel.value = prevOut;
-}
-
 async function ensureMic(){
   if (mediaStream) return;
-
-  const constraints = {
-    audio:{
-      deviceId: micSel.value ? {exact:micSel.value} : undefined,
-      echoCancellation:true, noiseSuppression:true, autoGainControl:true
-    }
-  };
-  mediaStream = await navigator.mediaDevices.getUserMedia(constraints);
-
-  if (!audioCtx) audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+  mediaStream = await navigator.mediaDevices.getUserMedia({
+    audio: { echoCancellation:true, noiseSuppression:true, autoGainControl:true }
+  });
+  audioCtx = new (window.AudioContext || window.webkitAudioContext)();
   micSource = audioCtx.createMediaStreamSource(mediaStream);
   micAnalyser = audioCtx.createAnalyser();
   micAnalyser.fftSize = 2048;
   micSource.connect(micAnalyser);
-
-  // Rebuild output analyser once per page (safe on Safari: only one MediaElementSource per element)
-  if (!outAnalyser){
-    outAnalyser = audioCtx.createAnalyser();
-    outAnalyser.fftSize = 2048;
-  }
 }
 
 function wireOutputAnalyser(audioEl){
   if (!audioCtx) return;
-  try{
-    if (outSource){ try{ outSource.disconnect(); }catch{} outSource = null; }
+  try {
     outSource = audioCtx.createMediaElementSource(audioEl);
+    outAnalyser = audioCtx.createAnalyser();
+    outAnalyser.fftSize = 2048;
     outSource.connect(outAnalyser);
     outSource.connect(audioCtx.destination);
-  }catch{
-    // Safari throws if reused; ignore, analyser still holds last connection
-  }
+  } catch { /* Safari reuse guard */ }
 }
 
 function stopAudio(){
   if (currentAudio){
     try { currentAudio.pause(); } catch {}
-    try { currentAudio.removeAttribute("src"); } catch {}
+    currentAudio.src = "";
   }
   currentAudio = null;
   outIsPlaying = false;
@@ -159,66 +121,48 @@ function stopAudio(){
 
 /* ---------- TTS ---------- */
 async function speak(text){
-  if (!text) { if (auto) startListening(); else setState(SM.IDLE); return; }
+  if (!text) { setState(SM.IDLE); return; }
 
   setState(SM.SPEAK);
   speakStartedAt = performance.now();
 
-  // Browser fallback
-  if (ttsSel.value.toLowerCase() === "browser"){
-    if (!("speechSynthesis" in window)) { if (auto) startListening(); else setState(SM.IDLE); return; }
+  if (ttsSel && ttsSel.value === "browser"){
+    if (!("speechSynthesis" in window)) { setState(SM.IDLE); return; }
     const u = new SpeechSynthesisUtterance(text);
     if (selectedVoice) u.voice = selectedVoice;
-    u.onstart = () => { outIsPlaying = true; updateOrb(); };
-    u.onend   = () => { outIsPlaying = false; updateOrb(); if (auto) startListening(); else setState(SM.IDLE); };
+    u.onstart = () => { outIsPlaying = true; };
+    u.onend   = () => { outIsPlaying = false; setState(SM.IDLE); };
     window.speechSynthesis.cancel();
     window.speechSynthesis.speak(u);
     return;
   }
 
-  // ElevenLabs via Netlify function
   try {
-    const r = await fetch("/.netlify/functions/tts?debug=1", {
+    const r = await fetch("/.netlify/functions/tts", {
       method: "POST",
       headers: { "Content-Type":"application/json" },
-      body: JSON.stringify({ text, voiceId: (voiceIdEl.value || "").trim() || undefined })
+      body: JSON.stringify({ text, voiceId: (voiceIdEl?.value || "").trim() || undefined })
     });
-
     const data = await r.json().catch(()=> ({}));
-    // (Fix) Avoid console noise: only try to play if audio string present
     if (!r.ok || !data?.audio) {
-      console.warn("TTS fallback:", { http:r.status, errCode:data?.error || data?.detail?.detail?.status, data });
-      // gracefully fall back to browser voice so loop never stalls
-      if ("speechSynthesis" in window){
-        const u = new SpeechSynthesisUtterance(text);
-        u.onend = () => { if (auto) startListening(); else setState(SM.IDLE); };
-        window.speechSynthesis.speak(u);
-      } else {
-        if (auto) startListening(); else setState(SM.IDLE);
-      }
+      console.warn("TTS error:", data);
+      setState(SM.IDLE);
       return;
     }
-
     if (typeof data.audio === "string" && data.audio.startsWith("data:audio")){
       currentAudio = new Audio(data.audio);
-      // assign output device if supported
-      const outId = outSel.value;
-      if (currentAudio.setSinkId && outId) { try { await currentAudio.setSinkId(outId); } catch{} }
       wireOutputAnalyser(currentAudio);
-
-      currentAudio.addEventListener("playing", ()=>{ outIsPlaying = true; updateOrb(); });
-      currentAudio.addEventListener("pause",   ()=>{ outIsPlaying = false; updateOrb(); });
-      currentAudio.addEventListener("ended",   ()=>{ outIsPlaying = false; updateOrb(); if (auto) startListening(); else setState(SM.IDLE); });
-
-      try { await currentAudio.play(); } catch { outIsPlaying=false; updateOrb(); if (auto) startListening(); else setState(SM.IDLE); }
-      // Only set preview audio when we actually have a source
-      try { lastAudioEl.src = data.audio; } catch {}
+      currentAudio.addEventListener("playing", ()=>{ outIsPlaying=true; });
+      currentAudio.addEventListener("pause",   ()=>{ outIsPlaying=false; });
+      currentAudio.addEventListener("ended",   ()=>{ outIsPlaying=false; setState(SM.IDLE); });
+      try { await currentAudio.play(); } catch { outIsPlaying=false; setState(SM.IDLE); }
+      if (lastAudioEl) lastAudioEl.src = data.audio;
     } else {
-      if (auto) startListening(); else setState(SM.IDLE);
+      setState(SM.IDLE);
     }
   } catch (e) {
     console.warn("TTS exception:", e);
-    if (auto) startListening(); else setState(SM.IDLE);
+    setState(SM.IDLE);
   }
 }
 
@@ -226,7 +170,6 @@ async function speak(text){
 function startRecordingTurn(){
   if (!mediaStream) return;
 
-  // barge-in
   abortStream();
   stopAudio();
 
@@ -239,15 +182,17 @@ function startRecordingTurn(){
 
   mediaRecorder.onstop = async () => {
     const blob = new Blob(chunks, { type: mime || "application/octet-stream" });
-    if (!blob || blob.size < 5000) {
-      transcriptEl.textContent = "⚠️ Speak a bit longer.";
+    if (!blob || blob.size < 3000) {
+      transcriptEl && (transcriptEl.textContent = "⚠️ Speak a bit longer.");
       processingTurn = false;
-      if (auto) setState(SM.LISTEN); else setState(SM.IDLE);
+      setState(SM.LISTEN);
       return;
     }
 
     const dataUrl = await blobToDataUrl(blob);
-    try { lastAudioEl.src = dataUrl; } catch {}
+    if (typeof dataUrl === "string" && dataUrl.startsWith("data:audio") && lastAudioEl) {
+      lastAudioEl.src = dataUrl;
+    }
 
     try {
       const r = await fetch("/.netlify/functions/stt", {
@@ -257,24 +202,27 @@ function startRecordingTurn(){
       });
       const j = await r.json();
       if (!r.ok) {
-        transcriptEl.textContent = `⚠️ STT: ${j?.error || "error"}`;
+        transcriptEl && (transcriptEl.textContent = `⚠️ STT: ${j?.error || "error"}`);
         processingTurn = false;
-        if (auto) setState(SM.LISTEN); else setState(SM.IDLE);
+        setState(SM.LISTEN);
         return;
       }
-      transcriptEl.textContent = j.transcript || "";
-      replyEl.textContent = "";
+      transcriptEl && (transcriptEl.textContent = j.transcript || "");
+      replyEl && (replyEl.textContent = "");
       processingTurn = false;
 
-      if ((modeSelVal() || "stream").startsWith("stream")) {
-        chatStream(j.transcript || "");
+      const userId = getUserId();
+      const payload = { message: j.transcript || "", userId, history: [] };
+
+      if ((modeSel?.value || "").toLowerCase().startsWith("stream")) {
+        chatStream(payload);
       } else {
-        chatPlain(j.transcript || "");
+        chatPlain(payload);
       }
     } catch (e) {
-      transcriptEl.textContent = "⚠️ STT error: " + e.message;
+      transcriptEl && (transcriptEl.textContent = "⚠️ STT error: " + e.message);
       processingTurn = false;
-      if (auto) setState(SM.LISTEN); else setState(SM.IDLE);
+      setState(SM.LISTEN);
     }
   };
 
@@ -290,33 +238,30 @@ function stopRecordingTurn(){
   }
 }
 
-/* ---------- Chat backends ---------- */
-function modeSelVal(){ return "stream"; } // single mode (SSE) for this UI
+/* ---------- Streaming / Plain chat ---------- */
+function abortStream(){ if (streamCtl){ try{streamCtl.abort();}catch{} streamCtl=null; } streamOn=false; stopBtn && (stopBtn.disabled=true); }
 
-function abortStream(){ if (streamCtl){ streamCtl.abort(); streamCtl=null; } streamOn=false; stopBtn.disabled=true; }
-
-async function chatPlain(prompt){
+async function chatPlain(body){
   abortStream();
   stopAudio();
   setState(SM.REPLY); setStatus("thinking…"); setLatency(null,null);
   try{
-    const r = await fetch("/api/chat", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify({ message: prompt }) });
+    const r = await fetch("/api/chat", { method:"POST", headers:{ "Content-Type":"application/json" }, body: JSON.stringify(body) });
     const j = await r.json();
-    if (!r.ok){ replyEl.textContent = `⚠️ ${j.error || "chat error"}`; if (auto) startListening(); else setState(SM.IDLE); return; }
-    replyEl.textContent = j.reply || "";
-    logTurn(prompt, j.reply || "", {mode:"plain"});
+    if (!r.ok){ replyEl && (replyEl.textContent = `⚠️ ${j.error || "chat error"}`); setState(SM.IDLE); return; }
+    replyEl && (replyEl.textContent = j.reply || "");
     speak(j.reply || "");
   }catch(e){
-    replyEl.textContent = `⚠️ ${e.message}`;
-    if (auto) startListening(); else setState(SM.IDLE);
+    replyEl && (replyEl.textContent = `⚠️ ${e.message}`);
+    setState(SM.IDLE);
   }
 }
 
-async function chatStream(prompt){
+async function chatStream(body){
   abortStream();
   stopAudio();
   setState(SM.REPLY); setStatus("streaming…"); setLatency(null,null);
-  stopBtn.disabled=false;
+  stopBtn && (stopBtn.disabled=false);
 
   const t0 = performance.now();
   let tFirst = null;
@@ -328,7 +273,7 @@ async function chatStream(prompt){
     const resp = await fetch("/api/chat-stream", {
       method: "POST",
       headers: { "Content-Type":"application/json" },
-      body: JSON.stringify({ message: prompt, history: [] }),
+      body: JSON.stringify(body),
       signal: streamCtl.signal
     });
     if (!resp.ok || !resp.body) throw new Error(`stream ${resp.status}`);
@@ -353,22 +298,21 @@ async function chatStream(prompt){
         try{
           const j = JSON.parse(payload);
           const tok = j?.choices?.[0]?.delta?.content ?? j?.content ?? "";
-          if (tok){ full += tok; replyEl.textContent = full; }
+          if (tok){ full += tok; replyEl && (replyEl.textContent = full); }
         }catch{
-          full += payload; replyEl.textContent = full;
+          full += payload; replyEl && (replyEl.textContent = full);
         }
       }
     }
   }catch(e){
-    if (e.name !== "AbortError"){ replyEl.textContent = `⚠️ ${e.message}`; }
+    if (e.name !== "AbortError"){ replyEl && (replyEl.textContent = `⚠️ ${e.message}`); }
   }finally{
     const tTot = Math.round(performance.now() - t0);
     setLatency(tFirst ?? null, tTot);
-    streamOn=false; stopBtn.disabled=true; setStatus("ok");
+    streamOn=false; stopBtn && (stopBtn.disabled=true); setStatus("idle");
   }
 
-  if (full) { logTurn(prompt, full, {mode:"stream"}); speak(full); }
-  else if (auto) startListening();
+  if (full) speak(full);
 }
 
 /* ---------- VAD loop ---------- */
@@ -385,8 +329,8 @@ function startListening(){
   const tick = () => {
     if (!listenLoopOn) return;
 
-    const thr     = (Number(vadEl.value) || 35) / 3000;
-    const silence = Math.max(200, Math.min(4000, Number(silenceEl.value) || 700));
+    const thr     = (Number(vadEl?.value) || 35) / 3000;
+    const silence = Math.max(200, Math.min(4000, Number(silenceEl?.value) || 700));
 
     const micRms = rmsFromAnalyser(micAnalyser);
     const outRms = rmsFromAnalyser(outAnalyser);
@@ -434,56 +378,38 @@ function stopListening(){
   setState(SM.IDLE);
 }
 
-/* ---------- Logging (Supabase via Netlify Function) ---------- */
-async function logTurn(user, assistant, meta){
-  try {
-    await fetch("/api/log", {
-      method:"POST",
-      headers:{ "Content-Type":"application/json" },
-      body: JSON.stringify({ sessionId, user, assistant, meta, ts: Date.now() })
-    });
-  } catch(e){ /* non-fatal */ }
+/* ---------- UI wiring ---------- */
+if (sendBtn) {
+  sendBtn.addEventListener("click", () => {
+    const t = (msgEl?.value || "").trim();
+    if (!t) return;
+    replyEl && (replyEl.textContent = "");
+    transcriptEl && (transcriptEl.textContent = "–");
+    const body = { message: t, userId: getUserId(), history: [] };
+    if ((modeSel?.value || "").toLowerCase().startsWith("stream")) chatStream(body);
+    else chatPlain(body);
+    if (msgEl){ msgEl.value = ""; msgEl.focus(); }
+  });
 }
 
-/* ---------- UI wiring ---------- */
-sendBtn.addEventListener("click", () => {
-  const t = (msgEl.value || "").trim();
-  if (!t) return;
-  replyEl.textContent = "";
-  transcriptEl.textContent = "–";
-  chatStream(t);
-  msgEl.value = ""; msgEl.focus();
-});
-msgEl.addEventListener("keydown", (e) => { if (e.key === "Enter" && (e.ctrlKey || e.metaKey)) sendBtn.click(); });
+if (stopBtn) stopBtn.addEventListener("click", () => { abortStream(); stopAudio(); setLatency(null,null); setState(SM.IDLE); });
 
-startBtn.addEventListener("click", async () => {
-  await ensureMic();
-  if (audioCtx?.state === "suspended") { try{ await audioCtx.resume(); }catch{} }
-  startListening();
-  setStatus("listening…");
-});
-stopBtn.addEventListener("click", () => { abortStream(); stopAudio(); stopListening(); setLatency(null,null); setStatus("stopped"); });
+if (pttBtn){
+  pttBtn.addEventListener("mousedown",  () => startRecordingTurn());
+  pttBtn.addEventListener("touchstart", () => startRecordingTurn(), { passive:true });
+  pttBtn.addEventListener("mouseup",    () => stopRecordingTurn());
+  pttBtn.addEventListener("mouseleave", () => stopRecordingTurn());
+  pttBtn.addEventListener("touchend",   () => stopRecordingTurn());
+}
 
-pttBtn.addEventListener("mousedown",  () => startRecordingTurn());
-pttBtn.addEventListener("touchstart", () => startRecordingTurn(), { passive:true });
-pttBtn.addEventListener("mouseup",    () => stopRecordingTurn());
-pttBtn.addEventListener("mouseleave", () => stopRecordingTurn());
-pttBtn.addEventListener("touchend",   () => stopRecordingTurn());
+if (startBtn){
+  startBtn.addEventListener("click", async () => {
+    try { await ensureMic(); } catch {}
+    startListening();
+  });
+}
 
-autoChk.addEventListener("change", () => {
-  auto = autoChk.checked;
-  localStorage.setItem("k_auto", auto ? "1" : "0");
-  if (auto){ startBtn.click(); } else { stopListening(); }
-});
-micSel.addEventListener("change", ()=> { localStorage.setItem("k_mic", micSel.value); mediaStream=null; ensureMic(); });
-outSel.addEventListener("change", ()=> { localStorage.setItem("k_out", outSel.value); });
-
-ttsSel.addEventListener("change",  ()=> localStorage.setItem("k_tts", ttsSel.value));
-voiceIdEl.addEventListener("change", ()=> localStorage.setItem("k_voice", voiceIdEl.value.trim()));
-vadEl.addEventListener("change", ()=> localStorage.setItem("k_vad", String(vadEl.value)));
-silenceEl.addEventListener("change", ()=> localStorage.setItem("k_sil", String(silenceEl.value)));
-
-/* ---------- Browser voices ---------- */
+/* Browser voices */
 function loadVoices(){
   const arr = (window.speechSynthesis?.getVoices?.() || []).filter(v => v.lang?.startsWith?.("en"));
   selectedVoice = arr[0] || null;
@@ -491,18 +417,7 @@ function loadVoices(){
 if ("speechSynthesis" in window){ loadVoices(); window.speechSynthesis.onvoiceschanged = loadVoices; }
 
 /* ---------- Boot ---------- */
-(async function boot(){
-  // restore prefs
-  auto = localStorage.getItem("k_auto") === "1"; autoChk.checked = auto;
-  const e = localStorage.getItem("k_tts"); if (e) ttsSel.value = e;
-  const v = localStorage.getItem("k_voice"); if (v) voiceIdEl.value = v;
-  const vd = localStorage.getItem("k_vad"); if (vd) vadEl.value = vd;
-  const si = localStorage.getItem("k_sil"); if (si) silenceEl.value = si;
-
-  try {
-    await listDevices();
-    if (auto){ await ensureMic(); startListening(); }
-  } catch {}
-
-  setStatus("ready");
+(function boot(){
+  console.log("[keilani] client boot v23");
+  setStatus("idle");
 })();

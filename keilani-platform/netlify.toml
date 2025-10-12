@@ -1,0 +1,48 @@
+[build]
+  command = "pnpm -w build"
+  publish = "apps/web/.next"
+  edge_functions = "netlify/edge-functions"
+
+[[plugins]]
+  package = "@netlify/plugin-nextjs"
+
+[functions]
+  node_bundler = "esbuild"
+  included_files = ["packages/server/**"]
+  external_node_modules = ["openai", "stripe"]
+
+# ---------- API routes ----------
+[[redirects]]
+  from = "/api/chat"
+  to   = "/.netlify/functions/chat"
+  status = 200
+
+[[redirects]]
+  from = "/api/chat-stream"
+  to   = "/.netlify/edge-functions/chat-stream"
+  status = 200
+  force = true
+
+[[redirects]]
+  from = "/api/health"
+  to   = "/.netlify/functions/health"
+  status = 200
+
+# ---------- CSP ----------
+[[headers]]
+  for = "/*"
+  [headers.values]
+    Content-Security-Policy = "default-src 'self'; script-src 'self' https://cdn.jsdelivr.net; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:; connect-src 'self' https://api.keilani.ai https://*.supabase.co https://api.openai.com blob: data:; media-src 'self' blob: data:; worker-src 'self' blob:; frame-ancestors *; base-uri 'self'; form-action 'self';"
+    Access-Control-Allow-Origin = "*"
+    Permissions-Policy = "camera=(self), microphone=(self), geolocation=()"
+    X-Frame-Options = "SAMEORIGIN"
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "strict-origin-when-cross-origin"
+
+# SSE: don’t transform
+[[headers]]
+  for = "/api/chat-stream"
+  [headers.values]
+    Cache-Control = "no-cache, no-transform"
+    Connection    = "keep-alive"
+    Content-Type  = "text/event-stream; charset=utf-8"

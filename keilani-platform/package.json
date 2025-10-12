@@ -1,0 +1,20 @@
+{
+  "name": "keilani-platform",
+  "private": true,
+  "version": "1.0.0",
+  "packageManager": "pnpm@9.8.0",
+  "scripts": {
+    "build": "pnpm -r build",
+    "dev": "pnpm -r --parallel dev",
+    "lint": "echo \"(add eslint later)\"",
+    "typecheck": "tsc -b",
+    "deploy": "netlify deploy --build --prod"
+  },
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "devDependencies": {
+    "typescript": "^5.6.3"
+  }
+}

@@ -1,0 +1,15 @@
+{
+  "name": "@syntheticsyndicate/creator-sdk",
+  "version": "0.1.0",
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "files": [
+    "dist",
+    "public"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json && copy public\\latest.js dist\\latest.js",
+    "dev": "tsc -w -p tsconfig.json"
+  }
+}

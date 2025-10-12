@@ -1,0 +1,19 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>Widget Dev</title>
+  </head>
+  <body style="background: #0b0b0b; color: #eee; font: 14px system-ui">
+    <h3>Widget Dev</h3>
+    <div id="keilani-widget"></div>
+    <script src="/sdk/latest.js"></script>
+    <script>
+      Keilani.createWidget({
+        mount: "#keilani-widget",
+        agent: "keilani",
+        apiBase: location.origin,
+      });
+    </script>
+  </body>
+</html>

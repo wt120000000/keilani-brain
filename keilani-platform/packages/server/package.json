@@ -1,0 +1,13 @@
+{
+  "name": "@keilani/server",
+  "version": "1.0.0",
+  "type": "module",
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -w -p tsconfig.json"
+  },
+  "dependencies": {
+    "openai": "^4.56.0",
+    "stripe": "^16.5.0"
+  }
+}

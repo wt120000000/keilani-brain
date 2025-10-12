@@ -1,0 +1,8 @@
+{
+  "name": "@keilani/widget-dev",
+  "version": "0.1.0",
+  "private": true,
+  "scripts": {
+    "dev": "npx http-server -p 5174 ."
+  }
+}
