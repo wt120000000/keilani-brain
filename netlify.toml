@@ -22,6 +22,10 @@
 [[edge_functions]]
   path     = "/api/chat-stream"
   function = "chat-stream"
+  
+[[edge_functions]]
+  path = "/api/echo"
+  function = "echo"
 
 # ---------- Static headers ----------
 [[headers]]
