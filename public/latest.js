@@ -10,9 +10,9 @@
         '<pre id="kw_out" style="margin-top:12px;white-space:pre-wrap;min-height:80px"></pre>' +
       '</div>';
 
-    var out=document.querySelector("#kw_out"),
-        sendBtn=document.querySelector("#kw_send"),
-        input=document.querySelector("#kw_msg");
+    var out=root.querySelector("#kw_out"),
+        sendBtn=root.querySelector("#kw_send"),
+        input=root.querySelector("#kw_msg");
     var apiBase=opts.apiBase||location.origin;
 
     async function send(){
@@ -31,18 +31,18 @@
         if(done) break;
         buf += dec.decode(value, { stream:true });
 
-        // Process complete SSE frames split by blank line
+        // Process complete SSE frames split by a blank line
         let idx;
         while((idx = buf.indexOf("\n\n")) !== -1){
           const frame = buf.slice(0, idx).trim();
           buf = buf.slice(idx + 2);
           if(!frame.startsWith("data:")) continue;
 
-          const payload = frame.slice(5).trim();
-          if(payload === "[DONE]") continue;
+          const data = frame.slice(5).trim();
+          if(data === "[DONE]") continue;
 
           try{
-            const obj = JSON.parse(payload);
+            const obj = JSON.parse(data);
             if(obj.type === "delta"){ out.textContent += obj.content; gotAny = true; }
             if(obj.error){ out.textContent += "\n(error: "+obj.error+")"; }
             if(opts.onEvent) opts.onEvent(obj);
@@ -56,5 +56,6 @@
     sendBtn.onclick = send;
     input.addEventListener("keydown", function(e){ if(e.key==="Enter") send(); });
   }
+
   window.Keilani = { createWidget };
 })();
