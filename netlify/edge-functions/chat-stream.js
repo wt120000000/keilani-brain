@@ -81,7 +81,7 @@ export default async (request, context) => {
 
           // OpenAI SSE frames are separated by \n\n and each line starts with "data: "
           const parts = buffer.split("\n\n");
-          buffer = parts.pop()!; // last partial (or empty)
+          const rest = parts.pop(); buffer = (rest !== undefined ? rest : ""); // last partial (or empty)
 
           for (const part of parts) {
             const line = part.trim();
@@ -117,3 +117,4 @@ export default async (request, context) => {
 
   return new Response(body, { headers, status: 200 });
 };
+
