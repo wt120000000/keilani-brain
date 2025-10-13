@@ -1,0 +1,28 @@
+<!doctype html><meta charset="utf-8" /> <button id="b">Test</button>
+<pre id="o"></pre>
+<script>
+  b.onclick = async () => {
+    o.textContent = "";
+    const r = await fetch("/api/chat-stream", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        message: "Say hi quickly",
+        userId: "probe",
+        agent: "keilani",
+      }),
+    });
+    const rd = r.body.getReader(),
+      dec = new TextDecoder();
+    let buf = "";
+    while (1) {
+      const { done, value } = await rd.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let parts = buf.split("\n\n");
+      buf = parts.pop() || "";
+      parts.forEach((p) => (o.textContent += p + "\n\n"));
+    }
+    o.textContent += "\n[done]\n";
+  };
+</script>
