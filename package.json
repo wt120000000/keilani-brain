@@ -13,7 +13,7 @@
     "eslint": "^9.34.0",
     "globals": "^16.3.0",
     "husky": "^9.1.7",
-    "lint-staged": "^16.1.5",
+    "lint-staged": "^16.2.4",
     "netlify-cli": "^23.3.1",
     "prettier": "^3.6.2"
   },
