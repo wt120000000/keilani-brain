@@ -1,35 +1,116 @@
-export default async function handler(req: Request) {
-  if (req.method !== "POST") return json({ error: "method_not_allowed" }, 405);
+// netlify/edge-functions/chat-stream.ts
+// Deno/Edge-safe JSON-line SSE bridge
 
-  let body: any;
-  try { body = await req.json(); } catch { return json({ error: "invalid_json" }, 400); }
+export default async (req: Request) => {
+  if (req.method !== "POST") {
+    return new Response(JSON.stringify({ error: "method_not_allowed" }), {
+      status: 405,
+      headers: { "content-type": "application/json" }
+    });
+  }
 
-  const message = (body?.message ?? "").trim();
-  const agent = (body?.agent ?? "keilani").trim();
-  const userId = (body?.userId ?? "anon").toString();
+  // 1) read payload
+  let message = "";
+  let userId = "anon";
+  try {
+    const body = await req.json();
+    message = (body?.message ?? "").toString();
+    userId = (body?.userId ?? "anon").toString();
+  } catch {}
+  if (!message) {
+    return new Response(JSON.stringify({ error: "missing_fields", detail: "Provide { message, userId }" }), {
+      status: 400,
+      headers: { "content-type": "application/json" }
+    });
+  }
 
-  if (!message) return json({ error: "missing_message" }, 400);
-
+  // 2) open a SSE response
   const headers = new Headers({
     "content-type": "text/event-stream; charset=utf-8",
     "cache-control": "no-cache, no-transform",
-    connection: "keep-alive",
+    "connection": "keep-alive",
+    // allow Netlify/Edge to stream
+    "transfer-encoding": "chunked"
   });
-  const enc = new TextEncoder();
-  const sse = (o: unknown) => enc.encode(`data: ${JSON.stringify(o)}\n\n`);
-  const sleep = (ms: number) => new Promise(r => setTimeout(r, ms));
 
-  const stream = new ReadableStream({
-    async start(c) {
-      c.enqueue(sse({ type: "telemetry", userId, memCount: 0, memMode: "none", ts: Date.now() }));
-      const text = `Hey, I'm ${agent}. You said: ${message} `;
-      for (const ch of text) { c.enqueue(sse({ type:"delta", content: ch })); await sleep(10); }
-      c.enqueue(sse({ type: "done" })); c.close();
+  // 3) stream to client
+  const { readable, writable } = new TransformStream();
+  const writer = writable.getWriter();
+
+  const write = async (obj: unknown) => {
+    const line = `data: ${JSON.stringify(obj)}\n`;
+    await writer.write(new TextEncoder().encode(line + "\n"));
+  };
+
+  (async () => {
+    try {
+      // 4) call OpenAI as raw fetch (Edge-friendly)
+      const res = await fetch("https://api.openai.com/v1/chat/completions", {
+        method: "POST",
+        headers: {
+          "content-type": "application/json",
+          "authorization": `Bearer ${Deno.env.get("OPENAI_API_KEY") || ""}`
+        },
+        body: JSON.stringify({
+          model: Deno.env.get("OPENAI_MODEL_CHAT") || "gpt-4o-mini-2024-07-18",
+          stream: true,
+          messages: [
+            { role: "system", content: "You are Keilani, a friendly AI influencer. Keep replies concise and positive." },
+            { role: "user", content: message }
+          ],
+          // keep output very streamy
+          temperature: 0.7
+        })
+      });
+
+      if (!res.ok || !res.body) {
+        const text = await res.text().catch(() => "");
+        await write({ error: "upstream_openai_error", status: res.status, detail: text });
+        await write({ type: "done" });
+        await writer.close();
+        return;
+        }
+
+      // 5) parse OpenAI SSE and re-emit compact JSON lines
+      const dec = new TextDecoder();
+      const reader = res.body.getReader();
+      let buf = "";
+
+      // optional telemetry line so the client shows something immediately
+      await write({ type: "telemetry", memCount: 0, memMode: "none", timestamp: new Date().toISOString() });
+
+      while (true) {
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
+
+        let idx;
+        while ((idx = buf.indexOf("\n")) !== -1) {
+          const line = buf.slice(0, idx).trim();
+          buf = buf.slice(idx + 1);
+
+          if (!line.startsWith("data:")) continue;
+          const payload = line.slice(5).trim();
+          if (payload === "[DONE]") continue;
+
+          try {
+            const chunk = JSON.parse(payload);
+            const delta = chunk?.choices?.[0]?.delta?.content;
+            if (delta) await write({ type: "delta", content: delta });
+          } catch {
+            // ignore non-JSON lines
+          }
+        }
+      }
+
+      await write({ type: "done" });
+      await writer.close();
+    } catch (err) {
+      await write({ error: "edge_exception", detail: (err as Error)?.message || String(err) });
+      await write({ type: "done" });
+      await writer.close();
     }
-  });
+  })();
 
-  return new Response(stream, { headers, status: 200 });
-}
-
-const json = (obj: unknown, status = 200) =>
-  new Response(JSON.stringify(obj), { status, headers: { "content-type": "application/json; charset=utf-8" } });
+  return new Response(readable, { status: 200, headers });
+};
