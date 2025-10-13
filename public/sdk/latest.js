@@ -1,5 +1,4 @@
-﻿// /public/sdk/latest.js
-(function () {
+﻿(function () {
   function createWidget(opts) {
     var root = typeof opts.mount === "string" ? document.querySelector(opts.mount) : opts.mount;
     if (!root) throw new Error("mount not found");
@@ -21,12 +20,12 @@
     var apiBase = opts.apiBase || location.origin;
 
     async function sendMsg() {
-      var payload = { message: input.value, userId: "anon", agent: opts.agent || "keilani" };
+      const payload = { message: input.value, userId: "anon", agent: opts.agent || "keilani" };
 
       const res = await fetch(apiBase + "/api/chat-stream", {
         method: "POST",
         headers: { "content-type": "application/json" },
-        body: JSON.stringify(payload),
+        body: JSON.stringify(payload)
       });
 
       if (!res.ok || !res.body) {
@@ -35,51 +34,56 @@
       }
 
       out.textContent = "[stream]\n";
+
       const reader = res.body.getReader();
       const dec = new TextDecoder();
+      let buf = "";
+      let gotDelta = false;
 
-      let buffer = "";
       while (true) {
-        const r = await reader.read();
-        if (r.done) break;
-        buffer += dec.decode(r.value, { stream: true });
+        const { done, value } = await reader.read();
+        if (done) break;
+        buf += dec.decode(value, { stream: true });
 
-        let idx;
-        while ((idx = buffer.indexOf("\n\n")) !== -1) {
-          const packet = buffer.slice(0, idx);
-          buffer = buffer.slice(idx + 2);
+        // Process per-line; handle both "\n" and "\r\n"
+        let lineEnd;
+        while ((lineEnd = buf.search(/\r?\n/)) !== -1) {
+          const line = buf.slice(0, lineEnd);
+          buf = buf.slice(lineEnd + (buf[lineEnd] === "\r" && buf[lineEnd + 1] === "\n" ? 2 : 1));
 
-          // Process each line in the packet
-          for (const line of packet.split("\n")) {
-            if (!line.startsWith("data:")) continue;
+          if (!line.startsWith("data:")) continue;
+          const data = line.slice(5).trim();
+          if (!data || data === "[DONE]") continue;
 
-            const data = line.slice(5).trim(); // after "data:"
-            if (!data || data === "[DONE]") continue;
+          // Only parse JSON-looking payloads
+          const looksJSON = data[0] === "{" || data[0] === "[";
+          if (!looksJSON) continue;
 
-            // Only parse when it looks like JSON
-            if (data[0] === "{" || data[0] === "[") {
-              try {
-                const obj = JSON.parse(data);
-                if (obj.type === "delta" && obj.content) out.textContent += obj.content;
-                else if (obj.type === "telemetry") {
-                  // optional: show nothing; available via opts.onEvent
-                } else if (obj.type === "done") {
-                  out.textContent += "\n[done]";
-                } else if (obj.error) {
-                  out.textContent += "\n(error: " + obj.error + ")";
-                }
-                opts.onEvent && opts.onEvent(obj);
-              } catch {
-                // Not JSON after all — ignore quietly
-              }
+          try {
+            const evt = JSON.parse(data);
+            if (evt.type === "delta" && evt.content) {
+              out.textContent += evt.content;
+              gotDelta = true;
+            } else if (evt.type === "telemetry") {
+              // optional: surface telemetry
+              // out.textContent += `\n[telemetry: ${evt.memMode}/${evt.memCount}]`;
+            } else if (evt.type === "done") {
+              out.textContent += "\n[done]";
+            } else if (evt.error) {
+              out.textContent += `\n(error: ${evt.error})`;
             }
+            if (opts.onEvent) opts.onEvent(evt);
+          } catch {
+            // ignore non-JSON
           }
         }
       }
+
+      if (!gotDelta) out.textContent += "\n[no content received]";
     }
 
     send.onclick = sendMsg;
-    input.addEventListener("keydown", (e) => (e.key === "Enter" ? sendMsg() : 0));
+    input.addEventListener("keydown", (e) => e.key === "Enter" && sendMsg());
   }
 
   window.Keilani = { createWidget };
