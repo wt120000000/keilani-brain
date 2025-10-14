@@ -86,10 +86,8 @@
 [[headers]]
 for = "/sse-probe.html"
   [headers.values]
-  Content-Security-Policy = "default-src 'self'; \
-    script-src 'self' 'sha256-Z898zEN/yDajjvIONtyxSiXMCxbvXuX6+1M+yHyKMe8=' https://cdn.jsdelivr.net; \
-    style-src 'self' 'unsafe-inline'; \
-    connect-src 'self' https://api.keilani.ai https://api.openai.com"
+  Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://api.keilani.ai https://api.openai.com"
+
 
 # Legacy script path safety net
 [[redirects]]
