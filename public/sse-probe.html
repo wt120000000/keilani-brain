@@ -1,0 +1,39 @@
+<!doctype html>
+<meta charset="utf-8" />
+<title>SSE Probe</title>
+<pre id="out">[connecting…]</pre>
+<script>
+  (async () => {
+    const out = document.getElementById("out");
+    const append = (t) => {
+      out.textContent += t;
+    };
+
+    // Either GET + query:
+    const url =
+      "/api/chat-stream?message=hello%20from%20web&userId=web&agent=keilani";
+
+    // Or POST JSON (uncomment this block to try POST instead)
+    // const url = '/api/chat-stream';
+    // var init = {
+    //   method: 'POST',
+    //   headers: { 'content-type': 'application/json', 'accept': 'text/event-stream' },
+    //   body: JSON.stringify({ message: 'hello from web', userId: 'web', agent: 'keilani' })
+    // };
+
+    const res = await fetch(url /*, init*/);
+    if (!res.ok || !res.body) {
+      append(`\n[http error ${res.status}]`);
+      return;
+    }
+    const reader = res.body.getReader();
+    const decoder = new TextDecoder();
+    append("\n[stream]\n");
+    while (true) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      append(decoder.decode(value, { stream: true }));
+    }
+    append("\n[done]\n");
+  })();
+</script>
