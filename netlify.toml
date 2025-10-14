@@ -74,20 +74,16 @@
     X-Content-Type-Options = "nosniff"
     Referrer-Policy = "strict-origin-when-cross-origin"
 
-# SSE: don’t transform
 [[headers]]
-  for = "/api/chat-stream"
+for = "/api/chat-stream"
   [headers.values]
-    Cache-Control = "no-cache, no-transform"
-    Connection    = "keep-alive"
-    Content-Type  = "text/event-stream; charset=utf-8"
-	X-Accel-Buffering = "no"
+  Cache-Control = "no-cache, no-transform"
+  Content-Type  = "text/event-stream; charset=utf-8"
 	
 [[headers]]
 for = "/sse-probe.html"
   [headers.values]
   Content-Security-Policy = "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; connect-src 'self' https://api.keilani.ai https://api.openai.com"
-
 
 # Legacy script path safety net
 [[redirects]]

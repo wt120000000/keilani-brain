@@ -1,39 +1,84 @@
 <!doctype html>
 <meta charset="utf-8" />
 <title>SSE Probe</title>
+<style>
+  html,
+  body {
+    background: #0b0b0b;
+    color: #d8d8d8;
+    font:
+      14px ui-monospace,
+      SFMono-Regular,
+      Menlo,
+      Monaco,
+      Consolas,
+      "Liberation Mono",
+      "Courier New",
+      monospace;
+  }
+  pre {
+    white-space: pre-wrap;
+    word-break: break-word;
+  }
+  .row {
+    margin: 10px 0;
+  }
+  input,
+  button {
+    font: inherit;
+    padding: 6px 10px;
+    border-radius: 8px;
+    border: 1px solid #333;
+    background: #121212;
+    color: #eee;
+  }
+  button {
+    background: #00ffc6;
+    color: #001;
+    border: none;
+    font-weight: 700;
+  }
+</style>
+<div class="row">
+  <input id="msg" size="50" placeholder="message" value="hello from probe" />
+  <input id="uid" size="16" placeholder="userId" value="web" />
+  <input id="agent" size="16" placeholder="agent" value="keilani" />
+  <button id="go">Connect</button>
+</div>
 <pre id="out">[connecting…]</pre>
 <script>
-  (async () => {
-    const out = document.getElementById("out");
-    const append = (t) => {
-      out.textContent += t;
-    };
+  const out = document.getElementById("out");
+  const go = document.getElementById("go");
 
-    // Either GET + query:
-    const url =
-      "/api/chat-stream?message=hello%20from%20web&userId=web&agent=keilani";
+  function log(obj) {
+    out.textContent +=
+      "\n" + (typeof obj === "string" ? obj : JSON.stringify(obj));
+  }
 
-    // Or POST JSON (uncomment this block to try POST instead)
-    // const url = '/api/chat-stream';
-    // var init = {
-    //   method: 'POST',
-    //   headers: { 'content-type': 'application/json', 'accept': 'text/event-stream' },
-    //   body: JSON.stringify({ message: 'hello from web', userId: 'web', agent: 'keilani' })
-    // };
+  function connect() {
+    out.textContent = "[connecting…]";
+    const q = new URLSearchParams({
+      message: document.getElementById("msg").value,
+      userId: document.getElementById("uid").value,
+      agent: document.getElementById("agent").value,
+    });
+    // GET-based SSE so EventSource can attach
+    const url = `/api/chat-stream?${q.toString()}`;
+    const es = new EventSource(url, { withCredentials: false });
 
-    const res = await fetch(url /*, init*/);
-    if (!res.ok || !res.body) {
-      append(`\n[http error ${res.status}]`);
-      return;
-    }
-    const reader = res.body.getReader();
-    const decoder = new TextDecoder();
-    append("\n[stream]\n");
-    while (true) {
-      const { value, done } = await reader.read();
-      if (done) break;
-      append(decoder.decode(value, { stream: true }));
-    }
-    append("\n[done]\n");
-  })();
+    es.addEventListener("message", (ev) => {
+      try {
+        log(JSON.parse(ev.data));
+      } catch {
+        log(ev.data);
+      }
+    });
+
+    es.addEventListener("error", (err) => {
+      log("[eventsource error]");
+      es.close();
+    });
+  }
+
+  go.addEventListener("click", connect);
 </script>
