@@ -2,24 +2,18 @@
 const MODEL = Deno.env.get("OPENAI_MODEL_CHAT") || "gpt-4o-mini-2024-07-18";
 const API_KEY = Deno.env.get("OPENAI_API_KEY") || "";
 
-// SSE helper
-function sse(obj) {
-  return `data: ${JSON.stringify(obj)}\r\n\r\n`;
-}
+const PAD = (":\r\n").repeat(1024); // ~2KB SSE padding to defeat proxy buffering
 
-// Safely parse JSON body
-async function parseBody(req) {
+const sse = (obj) => `data: ${JSON.stringify(obj)}\r\n\r\n`;
+
+async function readJson(req) {
   try {
-    const clone = req.clone();
-    const txt = await clone.text();
-    if (!txt) return {};
-    try { return JSON.parse(txt); } catch { return {}; }
-  } catch {
-    return {};
-  }
+    const txt = await req.clone().text();
+    return txt ? JSON.parse(txt) : {};
+  } catch { return {}; }
 }
 
-export default async (request, _context) => {
+export default async (request) => {
   if (request.method !== "POST") {
     return new Response(JSON.stringify({ error: "method_not_allowed" }), {
       status: 405,
@@ -27,9 +21,8 @@ export default async (request, _context) => {
     });
   }
 
-  const payload = await parseBody(request);
+  const payload = await readJson(request);
   const { message, userId, agent = "keilani" } = payload || {};
-
   if (!message || !userId) {
     return new Response(
       JSON.stringify({ error: "missing_fields", detail: "Provide { message, userId }", received: payload }),
@@ -41,28 +34,34 @@ export default async (request, _context) => {
     "content-type": "text/event-stream; charset=utf-8",
     "cache-control": "no-cache, no-transform",
     "connection": "keep-alive",
-    "x-accel-buffering": "no" // disables buffering in some proxies
+    "x-accel-buffering": "no" // discourage proxy buffering
   });
 
-  // Handle missing API key
+  // No key? return a friendly stream so the UI still moves.
   if (!API_KEY) {
     const body = new ReadableStream({
-      start(controller) {
-        controller.enqueue(sse({ type: "telemetry", model: MODEL, ts: new Date().toISOString() }));
-        controller.enqueue(sse({ type: "delta", content: "⚠️ No OPENAI_API_KEY set.\n" }));
-        controller.enqueue(sse({ type: "done" }));
-        controller.close();
+      start(ctrl) {
+        ctrl.enqueue(PAD);
+        ctrl.enqueue(sse({ type: "telemetry", model: MODEL, ts: new Date().toISOString() }));
+        ctrl.enqueue(sse({ type: "delta", content: "⚠️ No OPENAI_API_KEY set.\n" }));
+        ctrl.enqueue(sse({ type: "done" }));
+        ctrl.close();
       }
     });
     return new Response(body, { headers });
   }
 
-  // Streaming logic
   const body = new ReadableStream({
-    async start(controller) {
-      // initial tick so browser starts rendering
-      controller.enqueue(sse({ type: "telemetry", model: MODEL, ts: new Date().toISOString() }));
-      controller.enqueue(sse({ type: "delta", content: "..." }));
+    async start(ctrl) {
+      // padding + immediate ticks so the browser starts rendering
+      ctrl.enqueue(PAD);
+      ctrl.enqueue(sse({ type: "telemetry", model: MODEL, ts: new Date().toISOString() }));
+      ctrl.enqueue(sse({ type: "delta", content: "..." }));
+
+      // heartbeat every second (helps some proxies/browsers keep streaming)
+      const hb = setInterval(() => {
+        try { ctrl.enqueue(sse({ type: "ping", ts: Date.now() })); } catch {}
+      }, 1000);
 
       const systemPrompt = `You are ${agent}, a helpful, upbeat AI influencer. Keep it concise.`;
 
@@ -84,10 +83,11 @@ export default async (request, _context) => {
         });
 
         if (!resp.ok || !resp.body) {
-          const errText = await resp.text().catch(() => "(no body)");
-          controller.enqueue(sse({ type: "delta", content: `❌ OpenAI error: ${resp.status} ${errText}\n` }));
-          controller.enqueue(sse({ type: "done" }));
-          controller.close();
+          const text = await resp.text().catch(() => "(no body)");
+          ctrl.enqueue(sse({ type: "delta", content: `❌ OpenAI error: ${resp.status} ${text}\n` }));
+          ctrl.enqueue(sse({ type: "done" }));
+          clearInterval(hb);
+          ctrl.close();
           return;
         }
 
@@ -109,30 +109,31 @@ export default async (request, _context) => {
             const data = part.slice(5).trim();
 
             if (data === "[DONE]") {
-              controller.enqueue(sse({ type: "done" }));
-              controller.close();
+              ctrl.enqueue(sse({ type: "done" }));
+              clearInterval(hb);
+              ctrl.close();
               return;
             }
 
             try {
               const json = JSON.parse(data);
               const delta = json?.choices?.[0]?.delta?.content;
-              if (delta) controller.enqueue(sse({ type: "delta", content: delta }));
-            } catch (_) {
-              // ignore non-JSON keepalive frames
-            }
+              if (delta) ctrl.enqueue(sse({ type: "delta", content: delta }));
+            } catch { /* ignore keepalives/non-JSON frames */ }
           }
 
-          // small forced flush for Firefox & Netlify edge
-          await new Promise((res) => setTimeout(res, 25));
+          // tiny yield to help Firefox flush
+          await new Promise(r => setTimeout(r, 25));
         }
 
-        controller.enqueue(sse({ type: "done" }));
-        controller.close();
+        ctrl.enqueue(sse({ type: "done" }));
+        clearInterval(hb);
+        ctrl.close();
       } catch (err) {
-        controller.enqueue(sse({ type: "delta", content: `Edge exception: ${String(err)}\n` }));
-        controller.enqueue(sse({ type: "done" }));
-        controller.close();
+        ctrl.enqueue(sse({ type: "delta", content: `Edge exception: ${String(err)}\n` }));
+        ctrl.enqueue(sse({ type: "done" }));
+        clearInterval(hb);
+        ctrl.close();
       }
     }
   });
