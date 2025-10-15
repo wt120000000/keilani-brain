@@ -9,7 +9,7 @@ export async function streamChat(opts) {
     onHeartbeat = () => {},
     onDone = () => {},
     signal,
-    getExtraHeaders,              // <-- async () => ({ Authorization: 'Bearer ...' })
+    getExtraHeaders,              // async () => ({ Authorization: 'Bearer ...' })
     HEARTBEAT_TIMEOUT_MS = 25000,
     RETRIES = 1,
   } = opts;
@@ -47,7 +47,7 @@ async function runOnce({
 
   if (!res.ok) {
     const text = await safeReadText(res);
-    throw new Error(`HTTP ${res.status} ${res.statusText} — ${text || 'no body'}`);
+    throw new Error(`HTTP ${res.status}  — ${text || 'Unauthorized'}`);
   }
   if (!res.body) throw new Error('Response body is not readable (no stream).');
 

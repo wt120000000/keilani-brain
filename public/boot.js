@@ -7,17 +7,30 @@ const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
 
 const supa = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
-async function getAuthHeader() {
+// Ensure we always have a valid Supabase session (anonymous is OK)
+async function ensureSession() {
   const { data } = await supa.auth.getSession();
-  const token = data?.session?.access_token;
+  if (data?.session) return data.session;
+
+  // Anonymous sign-in must be enabled in Supabase Auth settings (Providers → Anonymous)
+  const { data: anon, error } = await supa.auth.signInAnonymously();
+  if (error) {
+    console.error('Anonymous auth failed:', error);
+    throw new Error('Auth required');
+  }
+  return anon.session;
+}
+
+async function getAuthHeader() {
+  const session = (await supa.auth.getSession())?.data?.session || (await ensureSession());
+  const token = session?.access_token;
   return token ? { Authorization: `Bearer ${token}` } : {};
 }
 
 async function saveMessage({ role, content }) {
-  // requires RLS policies from 3a
-  const { data: sess } = await supa.auth.getSession();
-  const uid = sess?.session?.user?.id;
-  if (!uid) return; // not logged in — skip persistence
+  const session = (await supa.auth.getSession())?.data?.session || (await ensureSession());
+  const uid = session?.user?.id;
+  if (!uid) return;
 
   await fetch(`${SUPABASE_URL}/rest/v1/chat_messages`, {
     method: 'POST',
@@ -110,9 +123,8 @@ async function finalizeAssistantMessage() {
     const clean = DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
     currentAssistantTextEl.innerHTML = clean;
   } catch (_) {
-    // keep plain text on failure
+    // keep plain text if libs fail
   } finally {
-    // persist assistant message
     await saveMessage({ role: 'assistant', content: currentBuffer });
     currentAssistantTextEl = null;
     currentBuffer = "";
@@ -153,13 +165,15 @@ stopBtn.addEventListener('click', () => {
   if (currentAbort) currentAbort.abort();
 });
 
+// Ensure we have a session ASAP (pre-warm token)
+ensureSession().catch(console.error);
+
 form.addEventListener('submit', async (e) => {
   e.preventDefault();
   const message = (input.value || '').trim();
   if (!message) return;
 
   appendUser(message);
-  // persist user message
   await saveMessage({ role: 'user', content: message });
 
   input.value = '';

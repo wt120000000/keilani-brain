@@ -1,54 +1,60 @@
 ﻿// /netlify/edge-functions/chat-stream.js
-// Keilani Edge SSE with AuthZ + Rate Limit + OpenAI proxy
-// Runtime: Netlify Edge (Deno). Requires env:
-//  - OPENAI_API_KEY
-//  - SUPABASE_URL
-//  - SUPABASE_ANON_KEY  (or SUPABASE_SERVICE_KEY if you prefer)
-// Notes:
-//  - Entitlements in table keilani_entitlements (SQL already applied).
-//  - Rate limiting via RPC bump_rate_bucket (SQL already applied).
+// Keilani Edge SSE with Supabase Auth (incl. anonymous), free-tier fallback, rate limit, and OpenAI proxy.
+// Env required:
+//   OPENAI_API_KEY
+//   SUPABASE_URL
+//   SUPABASE_ANON_KEY   (or SUPABASE_SERVICE_KEY)
+//
+// DB prerequisites already applied by you:
+//   - keilani_entitlements (optional row per user; free-tier when missing)
+//   - rate_buckets + RPC bump_rate_bucket(p_user uuid)    -- defaults to rpm=10 when entitlement missing
 
 export default async function handler(request) {
   try {
-    // Basic method guard
     if (request.method !== "POST") {
       return new Response("Method Not Allowed", { status: 405 });
     }
 
-    // --- AuthN (require Supabase JWT) ---
     const auth = request.headers.get("authorization");
     if (!auth || !auth.toLowerCase().startsWith("bearer ")) {
       return new Response("Unauthorized", { status: 401 });
     }
 
     const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
-    const SUPABASE_ANON = Deno.env.get("SUPABASE_ANON_KEY") || Deno.env.get("SUPABASE_SERVICE_KEY");
-    if (!SUPABASE_URL || !SUPABASE_ANON) {
+    const SUPABASE_KEY =
+      Deno.env.get("SUPABASE_SERVICE_KEY") || Deno.env.get("SUPABASE_ANON_KEY");
+    if (!SUPABASE_URL || !SUPABASE_KEY) {
       return new Response("Server Misconfigured (Supabase env)", { status: 500 });
     }
 
-    // Verify token with Supabase Auth
+    // --- Verify Supabase JWT (works for anonymous & regular users)
     const userRes = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
-      headers: { Authorization: auth, apikey: SUPABASE_ANON },
+      headers: { Authorization: auth, apikey: SUPABASE_KEY },
     });
     if (!userRes.ok) return new Response("Unauthorized", { status: 401 });
-    const user = await userRes.json(); // { id, email, ... }
+    const user = await userRes.json(); // { id, email?, ... }
 
-    // --- Entitlements ---
+    // --- Entitlements: allow missing row → free tier
     const entRes = await fetch(
       `${SUPABASE_URL}/rest/v1/keilani_entitlements?select=tier,enabled,rpm,tpm&user_id=eq.${user.id}`,
-      { headers: { Authorization: `Bearer ${SUPABASE_ANON}`, apikey: SUPABASE_ANON } }
+      { headers: { Authorization: `Bearer ${SUPABASE_KEY}`, apikey: SUPABASE_KEY } }
     );
-    if (!entRes.ok) return new Response("Forbidden", { status: 403 });
-    const ent = (await entRes.json())?.[0];
-    if (!ent?.enabled) return new Response("Forbidden", { status: 403 });
 
-    // --- Rate limit (per minute) ---
+    let ent = null;
+    if (entRes.ok) {
+      ent = (await entRes.json())?.[0] || null;
+    }
+    if (!ent) {
+      ent = { tier: "free", enabled: true, rpm: 10, tpm: 2000 };
+    }
+    if (!ent.enabled) return new Response("Forbidden", { status: 403 });
+
+    // --- Per-user rate limit (uses RPM from DB function default when row missing)
     const rlRes = await fetch(`${SUPABASE_URL}/rest/v1/rpc/bump_rate_bucket`, {
       method: "POST",
       headers: {
-        Authorization: `Bearer ${SUPABASE_ANON}`,
-        apikey: SUPABASE_ANON,
+        Authorization: `Bearer ${SUPABASE_KEY}`,
+        apikey: SUPABASE_KEY,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({ p_user: user.id }),
@@ -59,26 +65,25 @@ export default async function handler(request) {
       return new Response("Rate limit exceeded. Try again soon.", { status: 429 });
     }
 
-    // --- Read request body ---
+    // --- Request payload
     const { message, userId, agent, model } = await request.json().catch(() => ({}));
     if (!message) return new Response("Bad Request (message required)", { status: 400 });
 
-    // --- OpenAI upstream stream (Responses API) ---
     const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
     if (!OPENAI_API_KEY) return new Response("Server Misconfigured (OPENAI_API_KEY)", { status: 500 });
 
+    // --- Upstream: OpenAI Responses stream
     const upstream = await fetch("https://api.openai.com/v1/responses", {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        Authorization: `Bearer ${OPENAI_API_KEY}`,
         "Content-Type": "application/json",
       },
       body: JSON.stringify({
         model: model || "gpt-4o-mini-2024-07-18",
         input: [
-          // lightweight system primer; expand later if needed
           { role: "system", content: "You are Keilani. Be warm, concise, and helpful." },
-          { role: "user", content: message }
+          { role: "user", content: message },
         ],
         stream: true,
       }),
@@ -89,18 +94,14 @@ export default async function handler(request) {
       return new Response(`Upstream error: ${upstream.status} ${t}`, { status: 502 });
     }
 
-    // --- Create SSE stream to client ---
+    // --- SSE to client
     const { readable, writable } = new TransformStream();
     const writer = writable.getWriter();
-    const encoder = new TextEncoder();
+    const enc = new TextEncoder();
 
-    // Helpers
     const writeEvent = async (event, data) => {
       const payload = typeof data === "string" ? data : JSON.stringify(data);
-      const s =
-        (event ? `event: ${event}\n` : "") +
-        `data: ${payload}\n\n`;
-      await writer.write(encoder.encode(s));
+      await writer.write(enc.encode((event ? `event: ${event}\n` : "") + `data: ${payload}\n\n`));
     };
 
     // Initial telemetry
@@ -109,55 +110,54 @@ export default async function handler(request) {
       model: model || "gpt-4o-mini-2024-07-18",
       agent: agent || "keilani",
       ts: new Date().toISOString(),
+      tier: ent.tier,
     });
 
-    // Heartbeat timer
-    const heartbeat = setInterval(() => {
+    // Heartbeat
+    const hb = setInterval(() => {
       writeEvent("heartbeat", { type: "heartbeat", ts: Date.now() }).catch(() => {});
-    }, 10000);
+    }, 10_000);
 
-    // Pipe upstream → downstream (normalize to our schema)
-    const upstreamReader = upstream.body.getReader();
-    const textDecoder = new TextDecoder();
-
+    // Pipe OpenAI → client, normalized to {type:'delta', content:'...'}
+    const r = upstream.body.getReader();
+    const dec = new TextDecoder();
     (async () => {
       try {
-        let buffer = "";
+        let buf = "";
         while (true) {
-          const { value, done } = await upstreamReader.read();
+          const { value, done } = await r.read();
           if (done) break;
-          buffer += textDecoder.decode(value, { stream: true });
+          buf += dec.decode(value, { stream: true });
 
-          // split SSE frames from OpenAI
           let idx;
-          while ((idx = buffer.indexOf("\n\n")) !== -1) {
-            const frame = buffer.slice(0, idx);
-            buffer = buffer.slice(idx + 2);
-
-            const lines = frame.split("\n");
-            for (const line of lines) {
+          while ((idx = buf.indexOf("\n\n")) !== -1) {
+            const frame = buf.slice(0, idx);
+            buf = buf.slice(idx + 2);
+            for (const line of frame.split("\n")) {
               if (!line.startsWith("data:")) continue;
               const data = line.slice(5).trim();
               if (!data || data === "[DONE]") continue;
-
               try {
                 const obj = JSON.parse(data);
-                // Responses API emits many types; we forward deltas only as {type:'delta', content:'...'}
-                const delta = obj?.delta?.content ?? obj?.output_text ?? obj?.choices?.[0]?.delta?.content;
+                const delta =
+                  obj?.delta?.content ??
+                  obj?.output_text ??
+                  obj?.choices?.[0]?.delta?.content ??
+                  "";
+
                 if (typeof delta === "string" && delta.length) {
                   await writeEvent("delta", { type: "delta", content: delta });
                 }
               } catch {
-                // ignore non-JSON lines quietly
+                // ignore quiet
               }
             }
           }
         }
-        clearInterval(heartbeat);
+        clearInterval(hb);
         await writeEvent("done", { type: "done" });
-      } catch (_e) {
-        clearInterval(heartbeat);
-        // Best-effort close
+      } catch {
+        clearInterval(hb);
         try { await writeEvent("done", { type: "done" }); } catch {}
       } finally {
         try { await writer.close(); } catch {}
