@@ -1,21 +1,4 @@
 // /public/js/keilaniStream.v24.js
-// v24: robust SSE with heartbeat timeout + limited auto-retry
-//
-// Supported server formats:
-//  A) event: telemetry|heartbeat|delta|done + data:...
-//  B) data starts with [telemetry]|[heartbeat]|[delta]|[done]
-//  C) JSON envelope: {"type":"telemetry|heartbeat|delta|done", ...}
-//  D) OpenAI-style delta: {"choices":[{"delta":{"content":"..."}}]}
-//
-// API:
-//   import { streamChat } from '/js/keilaniStream.v24.js'
-//   await streamChat({ message, userId, agent, signal,
-//                      onToken, onTelemetry, onHeartbeat, onDone })
-//
-// Behavior:
-// - Times out if no heartbeat within HEARTBEAT_TIMEOUT_MS
-// - One auto-retry (exponential backoff) on transient network failure
-
 export async function streamChat(opts) {
   const {
     message,
@@ -26,39 +9,37 @@ export async function streamChat(opts) {
     onHeartbeat = () => {},
     onDone = () => {},
     signal,
+    getExtraHeaders,              // <-- async () => ({ Authorization: 'Bearer ...' })
     HEARTBEAT_TIMEOUT_MS = 25000,
-    RETRIES = 1
+    RETRIES = 1,
   } = opts;
 
   let attempt = 0;
   while (true) {
     try {
+      const extraHeaders = getExtraHeaders ? await getExtraHeaders() : {};
       return await runOnce({
         message, userId, agent, onToken, onTelemetry, onHeartbeat, onDone,
-        signal, HEARTBEAT_TIMEOUT_MS
+        signal, HEARTBEAT_TIMEOUT_MS, extraHeaders
       });
     } catch (err) {
-      // Abort or no more retries → bubble up
       if (signal?.aborted) throw err;
       if (attempt >= RETRIES) throw err;
-
-      // Basic exponential backoff: 500ms, then 1s
-      const delay = 500 * Math.pow(2, attempt);
-      await sleep(delay);
-      attempt++;
+      await sleep(500 * Math.pow(2, attempt++));
     }
   }
 }
 
 async function runOnce({
-  message, userId, agent, onToken, onTelemetry, onHeartbeat, onDone, signal,
-  HEARTBEAT_TIMEOUT_MS
+  message, userId, agent, onToken, onTelemetry, onHeartbeat, onDone,
+  signal, HEARTBEAT_TIMEOUT_MS, extraHeaders
 }) {
   const res = await fetch('/api/chat-stream', {
     method: 'POST',
     headers: {
       'Accept': 'text/event-stream',
-      'Content-Type': 'application/json'
+      'Content-Type': 'application/json',
+      ...extraHeaders
     },
     body: JSON.stringify({ message, userId, agent }),
     signal
@@ -74,7 +55,6 @@ async function runOnce({
   const decoder = new TextDecoder('utf-8');
   let buf = '';
 
-  // Heartbeat watchdog
   let lastBeat = Date.now();
   const watchdog = setInterval(() => {
     if (Date.now() - lastBeat > HEARTBEAT_TIMEOUT_MS) {
@@ -106,7 +86,6 @@ async function runOnce({
   };
 
   const handle = (evt, data) => {
-    // Heartbeat bookkeeping (any activity counts)
     lastBeat = Date.now();
 
     // JSON envelope?
@@ -124,28 +103,21 @@ async function runOnce({
           }
           if (t === 'done') { onDone(); return; }
         }
-        // OpenAI-like (no .type)
         const delta2 = obj?.choices?.[0]?.delta?.content;
         if (typeof delta2 === 'string' && delta2.length) { onToken(delta2); return; }
-        return; // other JSON → ignore quietly
+        return;
       }
     } catch { /* not JSON */ }
 
-    // Bracket markers
     const m = pickBracketMarker(data);
     if (m === 'telemetry') { onTelemetry(data); return; }
     if (m === 'heartbeat') { onHeartbeat(data); return; }
     if (m === 'done')      { onDone(); return; }
-    if (m === 'delta') {
-      onToken(data.replace(/^\[delta\]\s*/i, ''));
-      return;
-    }
+    if (m === 'delta')     { onToken(data.replace(/^\[delta\]\s*/i, '')); return; }
 
-    // event:… fallback
     if (evt === 'telemetry') { onTelemetry(data); return; }
     if (evt === 'heartbeat') { onHeartbeat(data); return; }
     if (evt === 'done')      { onDone(); return; }
-    // default: treat as token
     if (data && data !== '[DONE]' && data !== '[done]') onToken(data);
   };
 

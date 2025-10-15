@@ -1,6 +1,36 @@
 ﻿// /public/boot.js
 import { streamChat } from '/js/keilaniStream.v24.js';
+import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm';
 
+const SUPABASE_URL = 'https://YOUR_PROJECT.supabase.co';
+const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
+
+const supa = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+
+async function getAuthHeader() {
+  const { data } = await supa.auth.getSession();
+  const token = data?.session?.access_token;
+  return token ? { Authorization: `Bearer ${token}` } : {};
+}
+
+async function saveMessage({ role, content }) {
+  // requires RLS policies from 3a
+  const { data: sess } = await supa.auth.getSession();
+  const uid = sess?.session?.user?.id;
+  if (!uid) return; // not logged in — skip persistence
+
+  await fetch(`${SUPABASE_URL}/rest/v1/chat_messages`, {
+    method: 'POST',
+    headers: {
+      apikey: SUPABASE_ANON_KEY,
+      'Content-Type': 'application/json',
+      ...(await getAuthHeader()),
+    },
+    body: JSON.stringify([{ user_id: uid, role, content }]),
+  }).catch(() => {});
+}
+
+// ----- UI scaffold -----
 const widget = document.getElementById('widget');
 widget.innerHTML = `
   <div id="chat" class="chat" aria-live="polite" aria-busy="false"></div>
@@ -20,11 +50,11 @@ const stopBtn = document.getElementById('stop');
 
 let currentAssistantTextEl = null;
 let currentAbort = null;
-let currentBuffer = "";       // full assistant text (for markdown re-render)
+let currentBuffer = "";
 let marked = null;
 let DOMPurify = null;
 
-// Lazy-load MD renderer + sanitizer on first use
+// Markdown libs (on-demand)
 async function ensureMarkdownLibs() {
   if (marked && DOMPurify) return;
   const [{ marked: mkd }, purifier] = await Promise.all([
@@ -67,7 +97,7 @@ function beginAssistant() {
 function appendAssistantDelta(delta) {
   if (!currentAssistantTextEl) beginAssistant();
   currentBuffer += delta;
-  currentAssistantTextEl.textContent += delta; // streaming uses textContent (safe)
+  currentAssistantTextEl.textContent += delta;
   scrollToBottom();
 }
 
@@ -78,10 +108,12 @@ async function finalizeAssistantMessage() {
     const raw = currentBuffer || currentAssistantTextEl.textContent || "";
     const html = marked.parse(raw, { mangle: false, headerIds: false });
     const clean = DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
-    currentAssistantTextEl.innerHTML = clean; // safe: sanitized HTML
+    currentAssistantTextEl.innerHTML = clean;
   } catch (_) {
-    // if libs fail for any reason, we keep plain text
+    // keep plain text on failure
   } finally {
+    // persist assistant message
+    await saveMessage({ role: 'assistant', content: currentBuffer });
     currentAssistantTextEl = null;
     currentBuffer = "";
   }
@@ -95,7 +127,7 @@ function setTyping(on) {
 function setFormEnabled(on) {
   form.querySelector('button[type="submit"]').disabled = !on;
   input.disabled = !on;
-  stopBtn.disabled = on; // stop is enabled only while streaming
+  stopBtn.disabled = on;
 }
 
 function scrollToBottom() {
@@ -103,7 +135,7 @@ function scrollToBottom() {
   if (atBottom) chat.scrollTop = chat.scrollHeight;
 }
 
-// UX: Enter to send, Shift+Enter for newline
+// Enter to send, Shift+Enter newline
 input.addEventListener('keydown', (e) => {
   if (e.key === 'Enter' && !e.shiftKey) {
     e.preventDefault();
@@ -111,7 +143,7 @@ input.addEventListener('keydown', (e) => {
   }
 });
 
-// Auto-grow textarea height
+// Auto-grow textarea
 input.addEventListener('input', () => {
   input.style.height = 'auto';
   input.style.height = Math.min(input.scrollHeight, 180) + 'px';
@@ -127,6 +159,9 @@ form.addEventListener('submit', async (e) => {
   if (!message) return;
 
   appendUser(message);
+  // persist user message
+  await saveMessage({ role: 'user', content: message });
+
   input.value = '';
   setTyping(true);
   setFormEnabled(false);
@@ -139,6 +174,7 @@ form.addEventListener('submit', async (e) => {
       userId: 'webapp',
       agent: 'keilani',
       signal: currentAbort.signal,
+      getExtraHeaders: getAuthHeader,
       onTelemetry: () => setTyping(true),
       onHeartbeat: () => setTyping(true),
       onToken: (delta) => appendAssistantDelta(delta),
@@ -148,13 +184,10 @@ form.addEventListener('submit', async (e) => {
       }
     });
   } catch (err) {
-    if (err?.message === 'Heartbeat timeout') {
-      beginAssistant();
-      appendAssistantDelta('\nConnection paused. Reopen chat or try again.');
-    } else {
-      beginAssistant();
-      appendAssistantDelta('\nSorry, my connection hiccuped. Please try again.');
-    }
+    beginAssistant();
+    appendAssistantDelta(err?.message === 'Heartbeat timeout'
+      ? '\nConnection paused. Reopen chat or try again.'
+      : '\nSorry, my connection hiccuped. Please try again.');
     console.error(err);
   } finally {
     setTyping(false);

@@ -1,171 +1,183 @@
-﻿// Diagnostic SSE relay for Netlify Edge
-// - Immediate telemetry frame
-// - 500ms heartbeats so clients see sustained streaming
-// - Optional OpenAI relay (chat.completions stream) when OPENAI_API_KEY is set
+﻿// /netlify/edge-functions/chat-stream.js
+// Keilani Edge SSE with AuthZ + Rate Limit + OpenAI proxy
+// Runtime: Netlify Edge (Deno). Requires env:
+//  - OPENAI_API_KEY
+//  - SUPABASE_URL
+//  - SUPABASE_ANON_KEY  (or SUPABASE_SERVICE_KEY if you prefer)
+// Notes:
+//  - Entitlements in table keilani_entitlements (SQL already applied).
+//  - Rate limiting via RPC bump_rate_bucket (SQL already applied).
 
-const MODEL   = Deno.env.get("OPENAI_MODEL_CHAT") || "gpt-4o-mini-2024-07-18";
-const API_KEY = Deno.env.get("OPENAI_API_KEY") || "";
+export default async function handler(request) {
+  try {
+    // Basic method guard
+    if (request.method !== "POST") {
+      return new Response("Method Not Allowed", { status: 405 });
+    }
 
-const te = new TextEncoder();
-const sse = (obj) => `data: ${JSON.stringify(obj)}\n\n`;
+    // --- AuthN (require Supabase JWT) ---
+    const auth = request.headers.get("authorization");
+    if (!auth || !auth.toLowerCase().startsWith("bearer ")) {
+      return new Response("Unauthorized", { status: 401 });
+    }
 
-function parsePayload(reqUrl, method, bodyText, contentType) {
-  const url = new URL(reqUrl);
-  // 1) Querystring (GET probe)
-  const qsMsg = url.searchParams.get("message");
-  const qsUserId = url.searchParams.get("userId");
-  const qsAgent = url.searchParams.get("agent") || "keilani";
-  if (qsMsg && qsUserId) return { message: qsMsg, userId: qsUserId, agent: qsAgent };
+    const SUPABASE_URL = Deno.env.get("SUPABASE_URL");
+    const SUPABASE_ANON = Deno.env.get("SUPABASE_ANON_KEY") || Deno.env.get("SUPABASE_SERVICE_KEY");
+    if (!SUPABASE_URL || !SUPABASE_ANON) {
+      return new Response("Server Misconfigured (Supabase env)", { status: 500 });
+    }
 
-  // 2) JSON body
-  if (method === "POST" && contentType?.includes("application/json")) {
-    try {
-      const json = JSON.parse(bodyText || "{}");
-      if (json?.message && json?.userId) {
-        return { message: json.message, userId: json.userId, agent: json.agent || "keilani" };
-      }
-    } catch {}
-  }
-
-  // 3) Form body
-  if (method === "POST" && contentType?.includes("application/x-www-form-urlencoded")) {
-    const p = new URLSearchParams(bodyText || "");
-    const message = p.get("message");
-    const userId  = p.get("userId");
-    const agent   = p.get("agent") || "keilani";
-    if (message && userId) return { message, userId, agent };
-  }
-
-  return null;
-}
-
-export default async (request, context) => {
-  // Only POST/GET
-  if (request.method !== "POST" && request.method !== "GET") {
-    return new Response(JSON.stringify({ error: "method_not_allowed" }), {
-      status: 405, headers: { "content-type": "application/json" }
+    // Verify token with Supabase Auth
+    const userRes = await fetch(`${SUPABASE_URL}/auth/v1/user`, {
+      headers: { Authorization: auth, apikey: SUPABASE_ANON },
     });
-  }
+    if (!userRes.ok) return new Response("Unauthorized", { status: 401 });
+    const user = await userRes.json(); // { id, email, ... }
 
-  // Read body once (Edge streams don't allow multiple reads)
-  let rawBody = "";
-  let contentType = request.headers.get("content-type") || "";
-  if (request.method === "POST") {
-    try { rawBody = await request.text(); } catch { rawBody = ""; }
-  }
+    // --- Entitlements ---
+    const entRes = await fetch(
+      `${SUPABASE_URL}/rest/v1/keilani_entitlements?select=tier,enabled,rpm,tpm&user_id=eq.${user.id}`,
+      { headers: { Authorization: `Bearer ${SUPABASE_ANON}`, apikey: SUPABASE_ANON } }
+    );
+    if (!entRes.ok) return new Response("Forbidden", { status: 403 });
+    const ent = (await entRes.json())?.[0];
+    if (!ent?.enabled) return new Response("Forbidden", { status: 403 });
 
-  const parsed = parsePayload(request.url, request.method, rawBody, contentType);
-  if (!parsed) {
-    return new Response(JSON.stringify({
-      error: "missing_fields",
-      detail: "Provide { message, userId } via JSON, form, or query",
-      received: { contentType, bodyPreview: rawBody?.slice?.(0, 256) ?? "" }
-    }), { status: 400, headers: { "content-type": "application/json" }});
-  }
-  const { message, userId, agent } = parsed;
+    // --- Rate limit (per minute) ---
+    const rlRes = await fetch(`${SUPABASE_URL}/rest/v1/rpc/bump_rate_bucket`, {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${SUPABASE_ANON}`,
+        apikey: SUPABASE_ANON,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({ p_user: user.id }),
+    });
+    if (!rlRes.ok) return new Response("Rate Limit Check Failed", { status: 429 });
+    const rl = await rlRes.json(); // [{ allowed, remaining }]
+    if (!rl?.[0]?.allowed) {
+      return new Response("Rate limit exceeded. Try again soon.", { status: 429 });
+    }
 
-  // SSE response headers
-  const headers = new Headers({
-    "content-type": "text/event-stream; charset=utf-8",
-    "cache-control": "no-cache, no-transform",
-    "connection": "keep-alive",
-    "keep-alive": "timeout=60",
-    "x-robots-tag": "noindex"
-  });
+    // --- Read request body ---
+    const { message, userId, agent, model } = await request.json().catch(() => ({}));
+    if (!message) return new Response("Bad Request (message required)", { status: 400 });
 
-  const body = new ReadableStream({
-    async start(controller) {
-      const push = (obj) => controller.enqueue(te.encode(sse(obj)));
+    // --- OpenAI upstream stream (Responses API) ---
+    const OPENAI_API_KEY = Deno.env.get("OPENAI_API_KEY");
+    if (!OPENAI_API_KEY) return new Response("Server Misconfigured (OPENAI_API_KEY)", { status: 500 });
 
-      // Immediate ack so clients stop “spinning”
-      push({ type: "telemetry", model: MODEL, agent, ts: new Date().toISOString() });
+    const upstream = await fetch("https://api.openai.com/v1/responses", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${OPENAI_API_KEY}`,
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        model: model || "gpt-4o-mini-2024-07-18",
+        input: [
+          // lightweight system primer; expand later if needed
+          { role: "system", content: "You are Keilani. Be warm, concise, and helpful." },
+          { role: "user", content: message }
+        ],
+        stream: true,
+      }),
+    });
 
-      // Heartbeat every 500ms while we do work (cleared on close)
-      const hb = setInterval(() => push({ type: "heartbeat", ts: Date.now() }), 500);
+    if (!upstream.ok || !upstream.body) {
+      const t = await safeText(upstream);
+      return new Response(`Upstream error: ${upstream.status} ${t}`, { status: 502 });
+    }
 
-      // If no key, just send a friendly demo message and close
-      if (!API_KEY) {
-        push({ type: "delta", content: `Hi ${userId}! (no OPENAI_API_KEY set) ` });
-        push({ type: "delta", content: `Echo: ${message}\n` });
-        clearInterval(hb);
-        push({ type: "done" });
-        controller.close();
-        return;
-      }
+    // --- Create SSE stream to client ---
+    const { readable, writable } = new TransformStream();
+    const writer = writable.getWriter();
+    const encoder = new TextEncoder();
 
+    // Helpers
+    const writeEvent = async (event, data) => {
+      const payload = typeof data === "string" ? data : JSON.stringify(data);
+      const s =
+        (event ? `event: ${event}\n` : "") +
+        `data: ${payload}\n\n`;
+      await writer.write(encoder.encode(s));
+    };
+
+    // Initial telemetry
+    await writeEvent("telemetry", {
+      type: "telemetry",
+      model: model || "gpt-4o-mini-2024-07-18",
+      agent: agent || "keilani",
+      ts: new Date().toISOString(),
+    });
+
+    // Heartbeat timer
+    const heartbeat = setInterval(() => {
+      writeEvent("heartbeat", { type: "heartbeat", ts: Date.now() }).catch(() => {});
+    }, 10000);
+
+    // Pipe upstream → downstream (normalize to our schema)
+    const upstreamReader = upstream.body.getReader();
+    const textDecoder = new TextDecoder();
+
+    (async () => {
       try {
-        // Kick off OpenAI stream (chat.completions)
-        const resp = await fetch("https://api.openai.com/v1/chat/completions", {
-          method: "POST",
-          headers: {
-            "authorization": `Bearer ${API_KEY}`,
-            "content-type": "application/json"
-          },
-          body: JSON.stringify({
-            model: MODEL,
-            stream: true,
-            messages: [
-              { role: "system", content: `You are ${agent}, a helpful, upbeat AI influencer. Keep it concise.` },
-              { role: "user",   content: message }
-            ]
-          })
-        });
-
-        if (!resp.ok || !resp.body) {
-          const txt = await resp.text().catch(()=>"");
-          push({ type: "delta", content: `OpenAI error: ${resp.status} ${txt}\n` });
-          clearInterval(hb);
-          push({ type: "done" });
-          controller.close();
-          return;
-        }
-
-        // Relay OpenAI SSE frames
-        const reader = resp.body.getReader();
-        const dec = new TextDecoder();
-        let buf = "";
+        let buffer = "";
         while (true) {
-          const { done, value } = await reader.read();
+          const { value, done } = await upstreamReader.read();
           if (done) break;
+          buffer += textDecoder.decode(value, { stream: true });
 
-          buf += dec.decode(value, { stream: true });
-          const parts = buf.split("\n\n");
-          buf = parts.pop() ?? "";
+          // split SSE frames from OpenAI
+          let idx;
+          while ((idx = buffer.indexOf("\n\n")) !== -1) {
+            const frame = buffer.slice(0, idx);
+            buffer = buffer.slice(idx + 2);
 
-          for (const part of parts) {
-            const line = part.trim();
-            if (!line.startsWith("data:")) continue;
-            const data = line.slice(5).trim();
+            const lines = frame.split("\n");
+            for (const line of lines) {
+              if (!line.startsWith("data:")) continue;
+              const data = line.slice(5).trim();
+              if (!data || data === "[DONE]") continue;
 
-            if (data === "[DONE]") {
-              clearInterval(hb);
-              push({ type: "done" });
-              controller.close();
-              return;
-            }
-
-            try {
-              const json = JSON.parse(data);
-              const delta = json?.choices?.[0]?.delta?.content;
-              if (delta) push({ type: "delta", content: delta });
-            } catch {
-              // ignore control lines
+              try {
+                const obj = JSON.parse(data);
+                // Responses API emits many types; we forward deltas only as {type:'delta', content:'...'}
+                const delta = obj?.delta?.content ?? obj?.output_text ?? obj?.choices?.[0]?.delta?.content;
+                if (typeof delta === "string" && delta.length) {
+                  await writeEvent("delta", { type: "delta", content: delta });
+                }
+              } catch {
+                // ignore non-JSON lines quietly
+              }
             }
           }
         }
-
-        // If the OpenAI stream ended silently, end ours gracefully
-        clearInterval(hb);
-        push({ type: "done" });
-        controller.close();
-      } catch (err) {
-        clearInterval(hb);
-        push({ type: "delta", content: `Edge exception: ${String(err)}\n` });
-        push({ type: "done" });
-        controller.close();
+        clearInterval(heartbeat);
+        await writeEvent("done", { type: "done" });
+      } catch (_e) {
+        clearInterval(heartbeat);
+        // Best-effort close
+        try { await writeEvent("done", { type: "done" }); } catch {}
+      } finally {
+        try { await writer.close(); } catch {}
       }
-    }
-  });
+    })();
 
-  return new Response(body, { status: 200, headers });
-};
+    return new Response(readable, {
+      status: 200,
+      headers: {
+        "Content-Type": "text/event-stream; charset=utf-8",
+        "Cache-Control": "no-cache, no-transform",
+        Connection: "keep-alive",
+        "X-Content-Type-Options": "nosniff",
+      },
+    });
+  } catch (err) {
+    return new Response(`Edge error: ${err?.message || String(err)}`, { status: 500 });
+  }
+}
+
+async function safeText(res) {
+  try { return await res.text(); } catch { return ""; }
+}
