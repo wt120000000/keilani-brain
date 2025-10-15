@@ -1,8 +1,7 @@
 ﻿// /public/boot.js
-import { streamChat } from '/js/keilaniStream.v23.js';
+import { streamChat } from '/js/keilaniStream.v24.js';
 
 const widget = document.getElementById('widget');
-
 widget.innerHTML = `
   <div id="chat" class="chat" aria-live="polite" aria-busy="false"></div>
   <form id="composer" class="composer" autocomplete="off">
@@ -19,8 +18,22 @@ const input = form.querySelector('textarea[name="message"]');
 const typing = document.getElementById('typing');
 const stopBtn = document.getElementById('stop');
 
-let currentAssistantBubble = null;
+let currentAssistantTextEl = null;
 let currentAbort = null;
+let currentBuffer = "";       // full assistant text (for markdown re-render)
+let marked = null;
+let DOMPurify = null;
+
+// Lazy-load MD renderer + sanitizer on first use
+async function ensureMarkdownLibs() {
+  if (marked && DOMPurify) return;
+  const [{ marked: mkd }, purifier] = await Promise.all([
+    import('https://cdn.jsdelivr.net/npm/marked@12.0.2/lib/marked.esm.js'),
+    import('https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.es.js')
+  ]);
+  marked = mkd;
+  DOMPurify = purifier.default;
+}
 
 function newBubble(role) {
   const wrap = document.createElement('div');
@@ -41,23 +54,37 @@ function newBubble(role) {
 
 function appendUser(text) {
   const t = newBubble('user');
-  t.textContent = text; // SAFE (no HTML injection)
+  t.textContent = text;
   scrollToBottom();
 }
 
 function beginAssistant() {
-  currentAssistantBubble = newBubble('assistant');
+  currentAssistantTextEl = newBubble('assistant');
+  currentBuffer = "";
   scrollToBottom();
 }
 
 function appendAssistantDelta(delta) {
-  if (!currentAssistantBubble) beginAssistant();
-  currentAssistantBubble.textContent += delta; // SAFE (no HTML injection)
+  if (!currentAssistantTextEl) beginAssistant();
+  currentBuffer += delta;
+  currentAssistantTextEl.textContent += delta; // streaming uses textContent (safe)
   scrollToBottom();
 }
 
-function endAssistant() {
-  currentAssistantBubble = null;
+async function finalizeAssistantMessage() {
+  if (!currentAssistantTextEl) return;
+  try {
+    await ensureMarkdownLibs();
+    const raw = currentBuffer || currentAssistantTextEl.textContent || "";
+    const html = marked.parse(raw, { mangle: false, headerIds: false });
+    const clean = DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
+    currentAssistantTextEl.innerHTML = clean; // safe: sanitized HTML
+  } catch (_) {
+    // if libs fail for any reason, we keep plain text
+  } finally {
+    currentAssistantTextEl = null;
+    currentBuffer = "";
+  }
 }
 
 function setTyping(on) {
@@ -68,7 +95,7 @@ function setTyping(on) {
 function setFormEnabled(on) {
   form.querySelector('button[type="submit"]').disabled = !on;
   input.disabled = !on;
-  stopBtn.disabled = on; // stop is only enabled while streaming
+  stopBtn.disabled = on; // stop is enabled only while streaming
 }
 
 function scrollToBottom() {
@@ -76,10 +103,22 @@ function scrollToBottom() {
   if (atBottom) chat.scrollTop = chat.scrollHeight;
 }
 
-stopBtn.addEventListener('click', () => {
-  if (currentAbort) {
-    currentAbort.abort();
+// UX: Enter to send, Shift+Enter for newline
+input.addEventListener('keydown', (e) => {
+  if (e.key === 'Enter' && !e.shiftKey) {
+    e.preventDefault();
+    form.requestSubmit();
   }
+});
+
+// Auto-grow textarea height
+input.addEventListener('input', () => {
+  input.style.height = 'auto';
+  input.style.height = Math.min(input.scrollHeight, 180) + 'px';
+});
+
+stopBtn.addEventListener('click', () => {
+  if (currentAbort) currentAbort.abort();
 });
 
 form.addEventListener('submit', async (e) => {
@@ -92,7 +131,6 @@ form.addEventListener('submit', async (e) => {
   setTyping(true);
   setFormEnabled(false);
 
-  // allow one in-flight stream; abort if user clicks Stop
   currentAbort = new AbortController();
 
   try {
@@ -104,15 +142,19 @@ form.addEventListener('submit', async (e) => {
       onTelemetry: () => setTyping(true),
       onHeartbeat: () => setTyping(true),
       onToken: (delta) => appendAssistantDelta(delta),
-      onDone: () => {
+      onDone: async () => {
         setTyping(false);
-        endAssistant();
+        await finalizeAssistantMessage();
       }
     });
   } catch (err) {
-    // Graceful error message
-    beginAssistant();
-    appendAssistantDelta('\nSorry, my connection hiccuped. Please try again.');
+    if (err?.message === 'Heartbeat timeout') {
+      beginAssistant();
+      appendAssistantDelta('\nConnection paused. Reopen chat or try again.');
+    } else {
+      beginAssistant();
+      appendAssistantDelta('\nSorry, my connection hiccuped. Please try again.');
+    }
     console.error(err);
   } finally {
     setTyping(false);
