@@ -1,9 +1,25 @@
 ﻿// /public/boot.js
+// Frontend chat boot: anonymous Supabase auth, JWT header to Edge, transcript save, SSE stream UI
+
 import { streamChat } from '/js/keilaniStream.v24.js';
 import { createClient } from 'https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2.45.4/+esm';
 
-const SUPABASE_URL = 'https://YOUR_PROJECT.supabase.co';
-const SUPABASE_ANON_KEY = 'YOUR_SUPABASE_ANON_KEY';
+/** ---------- REQUIRED: set your real Supabase values ---------- **/
+const SUPABASE_URL = 'https://<YOUR-PROJECT-REF>.supabase.co';
+const SUPABASE_ANON_KEY = '<YOUR-PUBLIC-ANON-KEY>';
+/** -------------------------------------------------------------- **/
+
+// Guard loudly if placeholders were not replaced
+(function hardFailIfPlaceholders() {
+  if (
+    !SUPABASE_URL ||
+    SUPABASE_URL.includes('<YOUR-PROJECT-REF>') ||
+    !SUPABASE_ANON_KEY ||
+    SUPABASE_ANON_KEY.includes('<YOUR-PUBLIC-ANON-KEY>')
+  ) {
+    console.error('❌ boot.js misconfigured: set SUPABASE_URL & SUPABASE_ANON_KEY.');
+  }
+})();
 
 const supa = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
@@ -12,7 +28,7 @@ async function ensureSession() {
   const { data } = await supa.auth.getSession();
   if (data?.session) return data.session;
 
-  // Anonymous sign-in must be enabled in Supabase Auth settings (Providers → Anonymous)
+  // Requires: Auth → Providers → Anonymous = Enabled, and CORS allows this origin
   const { data: anon, error } = await supa.auth.signInAnonymously();
   if (error) {
     console.error('Anonymous auth failed:', error);
@@ -63,7 +79,7 @@ const stopBtn = document.getElementById('stop');
 
 let currentAssistantTextEl = null;
 let currentAbort = null;
-let currentBuffer = "";
+let currentBuffer = '';
 let marked = null;
 let DOMPurify = null;
 
@@ -72,7 +88,7 @@ async function ensureMarkdownLibs() {
   if (marked && DOMPurify) return;
   const [{ marked: mkd }, purifier] = await Promise.all([
     import('https://cdn.jsdelivr.net/npm/marked@12.0.2/lib/marked.esm.js'),
-    import('https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.es.js')
+    import('https://cdn.jsdelivr.net/npm/dompurify@3.0.6/dist/purify.es.js'),
   ]);
   marked = mkd;
   DOMPurify = purifier.default;
@@ -103,7 +119,7 @@ function appendUser(text) {
 
 function beginAssistant() {
   currentAssistantTextEl = newBubble('assistant');
-  currentBuffer = "";
+  currentBuffer = '';
   scrollToBottom();
 }
 
@@ -118,16 +134,16 @@ async function finalizeAssistantMessage() {
   if (!currentAssistantTextEl) return;
   try {
     await ensureMarkdownLibs();
-    const raw = currentBuffer || currentAssistantTextEl.textContent || "";
+    const raw = currentBuffer || currentAssistantTextEl.textContent || '';
     const html = marked.parse(raw, { mangle: false, headerIds: false });
     const clean = DOMPurify.sanitize(html, { USE_PROFILES: { html: true } });
     currentAssistantTextEl.innerHTML = clean;
-  } catch (_) {
+  } catch (_e) {
     // keep plain text if libs fail
   } finally {
     await saveMessage({ role: 'assistant', content: currentBuffer });
     currentAssistantTextEl = null;
-    currentBuffer = "";
+    currentBuffer = '';
   }
 }
 
@@ -161,11 +177,9 @@ input.addEventListener('input', () => {
   input.style.height = Math.min(input.scrollHeight, 180) + 'px';
 });
 
-stopBtn.addEventListener('click', () => {
-  if (currentAbort) currentAbort.abort();
-});
+stopBtn.addEventListener('click', () => { if (currentAbort) currentAbort.abort(); });
 
-// Ensure we have a session ASAP (pre-warm token)
+// Pre-warm session (creates anonymous session on first load)
 ensureSession().catch(console.error);
 
 form.addEventListener('submit', async (e) => {
@@ -199,9 +213,11 @@ form.addEventListener('submit', async (e) => {
     });
   } catch (err) {
     beginAssistant();
-    appendAssistantDelta(err?.message === 'Heartbeat timeout'
-      ? '\nConnection paused. Reopen chat or try again.'
-      : '\nSorry, my connection hiccuped. Please try again.');
+    appendAssistantDelta(
+      err?.message === 'Heartbeat timeout'
+        ? '\nConnection paused. Reopen chat or try again.'
+        : '\nSorry, my connection hiccuped. Please try again.'
+    );
     console.error(err);
   } finally {
     setTyping(false);
