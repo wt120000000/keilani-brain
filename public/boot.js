@@ -1,5 +1,5 @@
 ﻿// /public/boot.js
-import { streamChat } from '/js/keilaniStream.v22.js';
+import { streamChat } from '/js/keilaniStream.v23.js';
 
 const widget = document.getElementById('widget');
 
