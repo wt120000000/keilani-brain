@@ -2,83 +2,112 @@
 <meta charset="utf-8" />
 <title>SSE Probe</title>
 <style>
-  html,
   body {
-    background: #0b0b0b;
-    color: #d8d8d8;
+    background: #0b0c10;
+    color: #e8f5f7;
     font:
-      14px ui-monospace,
+      14px/1.4 ui-monospace,
       SFMono-Regular,
       Menlo,
-      Monaco,
       Consolas,
       "Liberation Mono",
-      "Courier New",
       monospace;
+    margin: 0;
   }
-  pre {
-    white-space: pre-wrap;
-    word-break: break-word;
-  }
-  .row {
-    margin: 10px 0;
+  #bar {
+    padding: 12px;
+    display: flex;
+    gap: 10px;
+    position: sticky;
+    top: 0;
+    background: #0b0c10;
   }
   input,
   button {
-    font: inherit;
-    padding: 6px 10px;
+    background: #101218;
+    color: #e8f5f7;
+    border: 1px solid #1f2630;
     border-radius: 8px;
-    border: 1px solid #333;
-    background: #121212;
-    color: #eee;
+    padding: 10px 12px;
+    font: inherit;
+  }
+  input {
+    width: 340px;
   }
   button {
-    background: #00ffc6;
-    color: #001;
-    border: none;
+    background: #00ffcc;
+    color: #012c25;
     font-weight: 700;
+    cursor: pointer;
+  }
+  pre {
+    margin: 0;
+    padding: 12px;
+    white-space: pre-wrap;
+  }
+  .muted {
+    color: #6c7a86;
   }
 </style>
-<div class="row">
-  <input id="msg" size="50" placeholder="message" value="hello from probe" />
-  <input id="uid" size="16" placeholder="userId" value="web" />
-  <input id="agent" size="16" placeholder="agent" value="keilani" />
+
+<div id="bar">
+  <input id="msg" placeholder="message" value="" />
+  <input id="uid" placeholder="userId" value="web" />
+  <input id="agent" placeholder="agent" value="keilani" />
   <button id="go">Connect</button>
 </div>
 <pre id="out">[connecting…]</pre>
-<script>
-  const out = document.getElementById("out");
-  const go = document.getElementById("go");
 
-  function log(obj) {
-    out.textContent +=
-      "\n" + (typeof obj === "string" ? obj : JSON.stringify(obj));
+<script type="module">
+  const $ = (s) => document.querySelector(s);
+  const out = $("#out");
+  const params = new URLSearchParams(location.search);
+  $("#msg").value = params.get("message") ?? $("#msg").value;
+  $("#uid").value = params.get("userId") ?? $("#uid").value;
+  $("#agent").value = params.get("agent") ?? $("#agent").value;
+
+  function log(x) {
+    out.textContent += (out.textContent.endsWith("\n") ? "" : "\n") + x;
   }
 
-  function connect() {
-    out.textContent = "[connecting…]";
-    const q = new URLSearchParams({
-      message: document.getElementById("msg").value,
-      userId: document.getElementById("uid").value,
-      agent: document.getElementById("agent").value,
-    });
-    // GET-based SSE so EventSource can attach
-    const url = `/api/chat-stream?${q.toString()}`;
-    const es = new EventSource(url, { withCredentials: false });
+  async function connect() {
+    out.textContent = "";
+    const url = new URL("/api/chat-stream", location.origin);
+    url.searchParams.set("message", $("#msg").value || "hello from probe");
+    url.searchParams.set("userId", $("#uid").value || "web");
+    url.searchParams.set("agent", $("#agent").value || "keilani");
 
-    es.addEventListener("message", (ev) => {
-      try {
-        log(JSON.parse(ev.data));
-      } catch {
-        log(ev.data);
+    const res = await fetch(url, { headers: { Accept: "text/event-stream" } });
+    if (!res.ok || !res.body) {
+      log(`[http ${res.status}] ${await res.text().catch(() => "(no body)")}`);
+      return;
+    }
+
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      const parts = buf.split("\n\n");
+      buf = parts.pop() ?? "";
+      for (const p of parts) {
+        if (!p.startsWith("data:")) continue;
+        const data = p.slice(5).trim();
+        try {
+          const json = JSON.parse(data);
+          if (json.type === "delta") log(json.content);
+          else log(`[${json.type}] ${JSON.stringify(json)}`);
+        } catch {
+          log(`[raw] ${data}`);
+        }
       }
-    });
-
-    es.addEventListener("error", (err) => {
-      log("[eventsource error]");
-      es.close();
-    });
+    }
   }
 
-  go.addEventListener("click", connect);
+  $("#go").addEventListener("click", connect);
+  // auto-connect if message provided
+  if ($("#msg").value) connect();
 </script>

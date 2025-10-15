@@ -1,189 +1,171 @@
-﻿// Edge Function: /api/chat-stream
-// Streams OpenAI Chat Completions as Server-Sent Events.
+﻿// Diagnostic SSE relay for Netlify Edge
+// - Immediate telemetry frame
+// - 500ms heartbeats so clients see sustained streaming
+// - Optional OpenAI relay (chat.completions stream) when OPENAI_API_KEY is set
 
-const MODEL  = Deno.env.get("OPENAI_MODEL_CHAT") || "gpt-4o-mini-2024-07-18";
-const APIKEY = Deno.env.get("OPENAI_API_KEY")    || "";
+const MODEL   = Deno.env.get("OPENAI_MODEL_CHAT") || "gpt-4o-mini-2024-07-18";
+const API_KEY = Deno.env.get("OPENAI_API_KEY") || "";
 
-// Small helper to format an SSE frame.
-function sse(obj) {
-  return `data: ${JSON.stringify(obj)}\n\n`;
-}
+const te = new TextEncoder();
+const sse = (obj) => `data: ${JSON.stringify(obj)}\n\n`;
 
-// Parse the incoming request payload from JSON, form, or query.
-async function parsePayload(req) {
-  let message, userId, agent;
+function parsePayload(reqUrl, method, bodyText, contentType) {
+  const url = new URL(reqUrl);
+  // 1) Querystring (GET probe)
+  const qsMsg = url.searchParams.get("message");
+  const qsUserId = url.searchParams.get("userId");
+  const qsAgent = url.searchParams.get("agent") || "keilani";
+  if (qsMsg && qsUserId) return { message: qsMsg, userId: qsUserId, agent: qsAgent };
 
-  // Try JSON
-  try {
-    const ct = req.headers.get("content-type") || "";
-    if (ct.includes("application/json")) {
-      const j = await req.json();
-      message = j?.message;
-      userId  = j?.userId;
-      agent   = j?.agent;
-    }
-  } catch (_) {}
-
-  // Try form-encoded
-  if (!message || !userId) {
+  // 2) JSON body
+  if (method === "POST" && contentType?.includes("application/json")) {
     try {
-      const ct = req.headers.get("content-type") || "";
-      if (ct.includes("application/x-www-form-urlencoded")) {
-        const f = await req.formData();
-        message = message ?? f.get("message");
-        userId  = userId  ?? f.get("userId");
-        agent   = agent   ?? f.get("agent");
+      const json = JSON.parse(bodyText || "{}");
+      if (json?.message && json?.userId) {
+        return { message: json.message, userId: json.userId, agent: json.agent || "keilani" };
       }
-    } catch (_) {}
+    } catch {}
   }
 
-  // Try query string
-  if (!message || !userId) {
-    const url = new URL(req.url);
-    message = message ?? url.searchParams.get("message");
-    userId  = userId  ?? url.searchParams.get("userId");
-    agent   = agent   ?? url.searchParams.get("agent");
+  // 3) Form body
+  if (method === "POST" && contentType?.includes("application/x-www-form-urlencoded")) {
+    const p = new URLSearchParams(bodyText || "");
+    const message = p.get("message");
+    const userId  = p.get("userId");
+    const agent   = p.get("agent") || "keilani";
+    if (message && userId) return { message, userId, agent };
   }
 
-  // Allow “digits only” bodies from some CLI (debug only)
-  if (!message || !userId) {
-    try {
-      const raw = await req.text();
-      if (/^\d+(\r?\n\d+)*\r?\n?$/.test(raw)) {
-        const bytes = raw.trim().split(/\s+/).map(n => Number(n));
-        const str   = new TextDecoder().decode(new Uint8Array(bytes));
-        const j     = JSON.parse(str);
-        message = j?.message ?? message;
-        userId  = j?.userId  ?? userId;
-        agent   = j?.agent   ?? agent;
-      }
-    } catch (_) {}
-  }
-
-  return { message, userId, agent: agent || "keilani" };
+  return null;
 }
 
 export default async (request, context) => {
+  // Only POST/GET
   if (request.method !== "POST" && request.method !== "GET") {
     return new Response(JSON.stringify({ error: "method_not_allowed" }), {
-      status: 405,
-      headers: { "content-type": "application/json" }
+      status: 405, headers: { "content-type": "application/json" }
     });
   }
 
-  const { message, userId, agent } = await parsePayload(request);
-
-  if (!message || !userId) {
-    return new Response(
-      JSON.stringify({ error: "missing_fields", detail: "Provide { message, userId }" }),
-      { status: 400, headers: { "content-type": "application/json" } }
-    );
+  // Read body once (Edge streams don't allow multiple reads)
+  let rawBody = "";
+  let contentType = request.headers.get("content-type") || "";
+  if (request.method === "POST") {
+    try { rawBody = await request.text(); } catch { rawBody = ""; }
   }
 
-  // NOTE: Do NOT include "Connection" on HTTP/2 responses.
+  const parsed = parsePayload(request.url, request.method, rawBody, contentType);
+  if (!parsed) {
+    return new Response(JSON.stringify({
+      error: "missing_fields",
+      detail: "Provide { message, userId } via JSON, form, or query",
+      received: { contentType, bodyPreview: rawBody?.slice?.(0, 256) ?? "" }
+    }), { status: 400, headers: { "content-type": "application/json" }});
+  }
+  const { message, userId, agent } = parsed;
+
+  // SSE response headers
   const headers = new Headers({
     "content-type": "text/event-stream; charset=utf-8",
-    "cache-control": "no-cache, no-transform"
-    // "connection": "keep-alive"  <-- illegal on HTTP/2; omit it.
+    "cache-control": "no-cache, no-transform",
+    "connection": "keep-alive",
+    "keep-alive": "timeout=60",
+    "x-robots-tag": "noindex"
   });
 
-  // No key? Send a friendly fake stream so the UI still moves.
-  if (!APIKEY) {
-    const body = new ReadableStream({
-      start(controller) {
-        controller.enqueue(sse({ type: "telemetry", model: MODEL, ts: new Date().toISOString() }));
-        controller.enqueue(sse({ type: "delta", content: "Hi! (no OPENAI_API_KEY set)\n" }));
-        controller.enqueue(sse({ type: "done" }));
-        controller.close();
-      }
-    });
-    return new Response(body, { headers, status: 200 });
-  }
-
-  // Relay OpenAI stream to client SSE
   const body = new ReadableStream({
     async start(controller) {
-      // Early ack so the client shows "connected".
-      controller.enqueue(sse({ type: "telemetry", model: MODEL, ts: new Date().toISOString() }));
+      const push = (obj) => controller.enqueue(te.encode(sse(obj)));
 
-      // Keepalive pings (SSE comments) so intermediaries don’t idle-timeout.
-      const ka = setInterval(() => {
-        try { controller.enqueue(`:keepalive ${Date.now()}\n\n`); } catch {}
-      }, 15000);
+      // Immediate ack so clients stop “spinning”
+      push({ type: "telemetry", model: MODEL, agent, ts: new Date().toISOString() });
 
-      const system = `You are ${agent}, a helpful, upbeat AI influencer. Keep it concise.`;
+      // Heartbeat every 500ms while we do work (cleared on close)
+      const hb = setInterval(() => push({ type: "heartbeat", ts: Date.now() }), 500);
+
+      // If no key, just send a friendly demo message and close
+      if (!API_KEY) {
+        push({ type: "delta", content: `Hi ${userId}! (no OPENAI_API_KEY set) ` });
+        push({ type: "delta", content: `Echo: ${message}\n` });
+        clearInterval(hb);
+        push({ type: "done" });
+        controller.close();
+        return;
+      }
 
       try {
+        // Kick off OpenAI stream (chat.completions)
         const resp = await fetch("https://api.openai.com/v1/chat/completions", {
           method: "POST",
           headers: {
-            "authorization": `Bearer ${APIKEY}`,
+            "authorization": `Bearer ${API_KEY}`,
             "content-type": "application/json"
           },
           body: JSON.stringify({
             model: MODEL,
             stream: true,
             messages: [
-              { role: "system", content: system },
+              { role: "system", content: `You are ${agent}, a helpful, upbeat AI influencer. Keep it concise.` },
               { role: "user",   content: message }
             ]
           })
         });
 
         if (!resp.ok || !resp.body) {
-          const text = await resp.text().catch(() => "(no body)");
-          controller.enqueue(sse({ type: "delta", content: `OpenAI error: ${resp.status} ${text}\n` }));
-          controller.enqueue(sse({ type: "done" }));
+          const txt = await resp.text().catch(()=>"");
+          push({ type: "delta", content: `OpenAI error: ${resp.status} ${txt}\n` });
+          clearInterval(hb);
+          push({ type: "done" });
           controller.close();
-          clearInterval(ka);
           return;
         }
 
-        const reader  = resp.body.getReader();
-        const decoder = new TextDecoder();
-        let buffer = "";
-
+        // Relay OpenAI SSE frames
+        const reader = resp.body.getReader();
+        const dec = new TextDecoder();
+        let buf = "";
         while (true) {
           const { done, value } = await reader.read();
           if (done) break;
-          buffer += decoder.decode(value, { stream: true });
 
-          // Split OpenAI SSE frames by double newline
-          const parts = buffer.split("\n\n");
-          buffer = parts.pop() ?? ""; // leftover partial
+          buf += dec.decode(value, { stream: true });
+          const parts = buf.split("\n\n");
+          buf = parts.pop() ?? "";
 
           for (const part of parts) {
             const line = part.trim();
             if (!line.startsWith("data:")) continue;
             const data = line.slice(5).trim();
+
             if (data === "[DONE]") {
-              controller.enqueue(sse({ type: "done" }));
+              clearInterval(hb);
+              push({ type: "done" });
               controller.close();
-              clearInterval(ka);
               return;
             }
+
             try {
-              const json  = JSON.parse(data);
+              const json = JSON.parse(data);
               const delta = json?.choices?.[0]?.delta?.content;
-              if (delta) controller.enqueue(sse({ type: "delta", content: delta }));
+              if (delta) push({ type: "delta", content: delta });
             } catch {
-              // ignore control frames/non-JSON
+              // ignore control lines
             }
           }
         }
 
-        // If upstream ended without explicit [DONE]
-        controller.enqueue(sse({ type: "done" }));
+        // If the OpenAI stream ended silently, end ours gracefully
+        clearInterval(hb);
+        push({ type: "done" });
         controller.close();
-        clearInterval(ka);
       } catch (err) {
-        controller.enqueue(sse({ type: "delta", content: `Edge exception: ${String(err)}\n` }));
-        controller.enqueue(sse({ type: "done" }));
+        clearInterval(hb);
+        push({ type: "delta", content: `Edge exception: ${String(err)}\n` });
+        push({ type: "done" });
         controller.close();
-        clearInterval(ka);
       }
     }
   });
 
-  return new Response(body, { headers, status: 200 });
+  return new Response(body, { status: 200, headers });
 };
